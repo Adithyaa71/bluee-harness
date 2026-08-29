@@ -21,7 +21,7 @@ the same thing, and you can make a new shortcut to it.
 everything through:
 
 ```bat
-"D:\Conceptual Project ~ clgluee.cmd"
+"D:\Conceptual Project ~ clg\bluee.cmd"
 ```
 
 Or `cd` in first and just type `bluee`:
@@ -42,8 +42,8 @@ PowerShell is the same, but call it with `&` because of the spaces in the path:
 
 ```powershell
 cd "D:\Conceptual Project ~ clg"
-.luee.cmd
-.luee.cmd chat
+.\bluee.cmd
+.\bluee.cmd chat
 ```
 
 ### After changing the code

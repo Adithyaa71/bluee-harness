@@ -627,22 +627,6 @@ async function loadLog(){
 }
 
 /* ---------- TOOLS: collapsed per server ---------- */
-async function loadTools(){
-  const d=await api('/api/tools').catch(()=>({tools:[]}));
-  const by={};
-  for(const t of d.tools||[]) (by[t.server] ||= []).push(t);
-  if(!Object.keys(by).length){ $('#sp-tools').innerHTML='<div class="sidenote">No tool servers connected.</div>'; return; }
-  $('#sp-tools').innerHTML=Object.entries(by).map(([srv,list])=>`
-    <div class="tgrp">
-      <div class="thead"><span class="ar">&#9656;</span><span class="nm">${esc(srv)}</span>
-        <span class="ct">${list.length}</span></div>
-      <div class="tbody">${list.map(t=>
-        `<div class="trow"><span class="n">${esc(t.name)}</span>
-         <span class="d">${esc(t.description)}</span></div>`).join('')}</div>
-    </div>`).join('');
-  $$('#sp-tools .thead').forEach(h=>h.onclick=()=>h.parentElement.classList.toggle('open'));
-}
-
 /* ---------- MEMORY page ---------- */
 async function doSearch(){
   const q=$('#msearch').value.trim(); if(!q) return;
@@ -857,21 +841,11 @@ async function deleteSession(id, card){
 async function loadVision(){
   const v=await api('/api/vision').catch(()=>null); if(!v) return;
   paintVision(v.mode);
-  $('#vis').title =
-    'Screen vision — '+v.mode+
-    '
-off: no capture at all'+
-    '
-passive: periodic text-only read of the screen, no model, no cost'+
-    '
-active: unlocks the vision model, and gives bluee a tool to use it'+
-    (v.captured!=null?('
-
-captured '+v.captured+', skipped '+v.skipped_unchanged+' unchanged'):'')+
-    (v.mode==='active'&&!v.vision_model
-      ? '
-
-No LLM_VISION_MODEL set — the tool exists but will report that.' : '');
+  const lines=['Screen vision — '+v.mode,'off: no capture at all','passive: periodic text-only read of the screen, no model, no cost','active: unlocks the vision model, and gives bluee a tool to use it'];
+  if(v.captured!=null) lines.push('captured '+v.captured+', skipped '+v.skipped_unchanged+' unchanged');
+  if(v.mode==='active'&&!v.vision_model)
+    lines.push('No LLM_VISION_MODEL set — the tool exists but will report that.');
+  $('#vis').title=lines.join('\n');
 }
 function paintVision(mode){
   $$('#vis button').forEach(b=>{
