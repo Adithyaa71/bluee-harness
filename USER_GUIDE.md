@@ -69,6 +69,11 @@ desktop app picks a random port each launch.
 
 ## The window
 
+**Top left** — the session name. Click it to rename. Until you name one it shows
+the first line of what you said, so the list stays readable either way. Renaming
+doesn't erase the old name; it appends a new one to the log, same as everything
+else here.
+
 **Left rail** — pages:
 
 - 💬 **Chat** — where you talk to it
@@ -89,6 +94,14 @@ next to *new chat*) shows or hides the right panel.
 
 **Context meter** — top right, next to *new chat*. Shows roughly how full the
 prompt is. Amber at 70%, red at 80%. Click it to run `/compact`.
+
+It measures against whatever context length is set on the **Providers** page.
+For `qwen/qwen3.8-27b` that's **1,000,000 tokens** — the model's real figure,
+read off the provider — so the meter will sit very low for a long time. It used
+to assume 32,000 and shout at you at around 23k, which was wrong.
+
+Low percentage doesn't mean free, though. A big prompt costs what it costs on
+every turn. `/compact` is still worth running on a genuinely long session.
 
 ---
 
@@ -188,6 +201,7 @@ thing you said so you can recognise it.
 - **Open & resume** — carries on where you left off. It gets the conversation
   back and continues in the same log.
 - **Read only** — shows the transcript without resuming.
+- **Rename** — give it a proper name. Same as clicking the title in the top bar.
 - **Delete** — removes it. Click twice; it asks for confirmation because this
   deletes real data permanently.
 
@@ -205,6 +219,12 @@ make a dashboard showing my disk usage
 ```
 
 It writes actual HTML and it appears in the **Playground**, running.
+
+**There's a prompt box at the bottom of the Playground page**, so you can build
+and tweak things without going back to Chat. It's the *same conversation* — what
+you type there is part of the same session, shows up in the chat transcript, and
+goes in the same log. The strip above the box shows what it's doing as it does
+it, and the list refreshes itself when a turn finishes.
 
 **The useful part is that these get remembered by topic.** Later:
 
@@ -353,7 +373,25 @@ You can configure several, in order. The first is the default; if it fails, the
 next one answers. That's the point — a daily driver shouldn't die because one
 endpoint is having a bad day.
 
-Each needs a base URL, an API key, and a model id.
+Each needs a base URL, an API key, and a model id. Then four settings:
+
+| Setting | What it does |
+|---|---|
+| **reply cap** | The most it can write in one answer. |
+| **context length** | How much the model can hold at once. Only used by the meter. |
+| **temperature** / **top_p** | How loose the answers are. **Leave blank** and the model uses its own default — that's usually what you want. |
+| **timeout (s)** | How long to wait before giving up and trying the next provider. |
+
+**Reply cap and context length are not the same thing, and mixing them up costs
+you money.** The cap is the *answer* size. If you set it to the model's full
+window, the provider reserves that whole budget in advance and refuses the
+request outright when your balance is small — that's what the
+`you requested up to 100000 tokens, but can only afford 8048` error was. The
+context length is never sent anywhere; it just tells the meter what full means.
+
+**Press `detect`** and bluee asks your provider directly what that model's
+context length is and fills it in. If the provider doesn't publish one, it says
+so rather than making something up.
 
 **Keys are shown masked** (`••••••••…4e60`). Leave a masked key alone and it
 stays as it is — you can edit everything else and save safely without retyping

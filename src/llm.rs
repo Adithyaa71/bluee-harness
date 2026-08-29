@@ -98,6 +98,11 @@ pub struct OpenAiCompatible {
     api_key: String,
     model: String,
     max_tokens: u32,
+    /// Left unset by default rather than defaulted to a number: an omitted
+    /// field lets the provider use the model's own tuning, which is usually
+    /// better than a guess baked into the harness.
+    temperature: Option<f32>,
+    top_p: Option<f32>,
 }
 
 impl OpenAiCompatible {
@@ -113,7 +118,45 @@ impl OpenAiCompatible {
             api_key: api_key.into(),
             model: model.into(),
             max_tokens,
+            temperature: None,
+            top_p: None,
         }
+    }
+
+    /// Per-provider sampling and request timeout, from the Providers page.
+    pub fn tuned(mut self, temperature: Option<f32>, top_p: Option<f32>, timeout_secs: u64) -> Self {
+        self.temperature = temperature;
+        self.top_p = top_p;
+        if timeout_secs > 0 {
+            if let Ok(c) = reqwest::Client::builder()
+                .timeout(std::time::Duration::from_secs(timeout_secs))
+                .build()
+            {
+                self.client = c;
+            }
+        }
+        self
+    }
+
+    /// Model list with the metadata the Providers page needs to fill in a
+    /// context length for you instead of making you look it up.
+    pub async fn list_models_detailed(&self) -> Result<Vec<ModelEntry>> {
+        let url = format!("{}/models", self.base_url);
+        let res = self
+            .client
+            .get(&url)
+            .bearer_auth(&self.api_key)
+            .send()
+            .await
+            .with_context(|| format!("GET {url}"))?;
+        let status = res.status();
+        let text = res.text().await.context("reading response body")?;
+        if !status.is_success() {
+            bail!("provider returned {status}: {text}");
+        }
+        let parsed: ModelList =
+            serde_json::from_str(&text).with_context(|| format!("parsing model list: {text}"))?;
+        Ok(parsed.data)
     }
 }
 
@@ -128,6 +171,10 @@ struct ChatRequest<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<&'static str>,
     max_tokens: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    temperature: Option<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    top_p: Option<f32>,
 }
 
 #[derive(Serialize)]
@@ -152,9 +199,16 @@ struct ModelList {
     data: Vec<ModelEntry>,
 }
 
-#[derive(Deserialize)]
-struct ModelEntry {
-    id: String,
+#[derive(Deserialize, Serialize, Clone)]
+pub struct ModelEntry {
+    pub id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Present on providers that publish it (aicredits.in does). This is what
+    /// the context meter should measure against - guessing it is how you end
+    /// up compacting a conversation that had plenty of room left.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub context_length: Option<u32>,
 }
 
 #[async_trait::async_trait]
@@ -180,6 +234,8 @@ impl Provider for OpenAiCompatible {
             },
             tool_choice: if tools.is_empty() { None } else { Some("auto") },
             max_tokens: self.max_tokens,
+            temperature: self.temperature,
+            top_p: self.top_p,
         };
 
         let res = self

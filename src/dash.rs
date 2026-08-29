@@ -101,6 +101,8 @@ pub async fn serve_on(cfg: Config, std_listener: std::net::TcpListener) -> Resul
         .route("/api/tasks", get(tasks))
         .route("/api/session/open", post(open_session))
         .route("/api/session/delete", post(delete_session))
+        .route("/api/session/title", post(set_session_title))
+        .route("/api/models", get(models))
         .route("/api/artifacts", get(list_artifacts))
         .route("/artifacts/{id}/", get(artifact_root))
         .route("/artifacts/{id}/{*path}", get(artifact_file))
@@ -245,7 +247,11 @@ async fn chat_stream(mut socket: WebSocket, s: Shared) {
             }
             let agent = guard.as_mut().unwrap();
             agent.turn_with(&text, Some(&tx)).await;
-            Some((agent.session_id().to_string(), agent.model.clone()))
+            Some((
+                agent.session_id().to_string(),
+                agent.model.clone(),
+                agent.title().unwrap_or_default(),
+            ))
         });
 
         while let Some(ev) = rx.recv().await {
@@ -257,7 +263,9 @@ async fn chat_stream(mut socket: WebSocket, s: Shared) {
 
         let done = turn.await.ok().flatten();
         let end = match done {
-            Some((session, model)) => json!({ "type": "done", "session": session, "model": model }),
+            Some((session, model, title)) => {
+                json!({ "type": "done", "session": session, "model": model, "title": title })
+            }
             None => json!({ "type": "done" }),
         };
         if socket.send(WsMessage::Text(end.to_string().into())).await.is_err() {
@@ -544,15 +552,16 @@ async fn open_session(
     let agent = Agent::resume(&s.cfg, s.registry.clone(), s.vision.clone(), &safe_id(&b.session))
         .await
         .map_err(fail)?;
-    let (session, model, tools) = (
+    let (session, model, tools, title) = (
         agent.session_id().to_string(),
         agent.model.clone(),
         agent.tool_count(),
+        agent.title(),
     );
     *s.agent.lock().await = Some(agent);
 
     Ok(Json(json!({
-        "ok": true, "session": session, "model": model, "tools": tools,
+        "ok": true, "session": session, "model": model, "tools": tools, "title": title,
         "note": "Resumed. The conversation continues in the same log."
     })))
 }
@@ -631,10 +640,20 @@ async fn get_providers(State(s): State<Shared>) -> impl IntoResponse {
             "role": if i == 0 { "default".to_string() } else { format!("fallback {i}") },
             "name": p.name, "base_url": p.base_url, "model": p.model,
             "max_tokens": p.max_tokens, "enabled": p.enabled,
+            "context_window": p.context_window,
+            "temperature": p.temperature,
+            "top_p": p.top_p,
+            "timeout_secs": p.timeout_secs,
             "api_key": providers::mask(&p.api_key),
             "has_key": !p.api_key.is_empty(),
         })).collect::<Vec<_>>(),
-        "note": "Order is the fallback order. The first entry is the default."
+        "note": "Order is the fallback order. The first entry is the default.",
+        "fields": {
+            "max_tokens": "Ceiling on the reply. NOT the context window - setting this to the model's full window makes the provider reserve that budget up front and refuse the request on a small balance.",
+            "context_window": "How much the model holds at once. Drives the context meter only.",
+            "temperature": "Blank means the model's own default.",
+            "timeout_secs": "Give up and fall through to the next provider."
+        }
     }))
 }
 
@@ -1012,15 +1031,70 @@ async fn current_session(State(s): State<Shared>) -> impl IntoResponse {
     let ctx = guard.as_ref().map(|a| a.context_estimate());
     Json(json!({
         "session": guard.as_ref().map(|a| a.session_id().to_string()),
+        "title": guard.as_ref().and_then(|a| a.title()),
         "model": guard.as_ref().map(|a| a.model.clone()),
         "tools": guard.as_ref().map(|a| a.tool_count()),
         "providers": guard.as_ref().map(|a| a.provider_count()),
         "context_tokens": ctx.map(|c| c.0),
         "messages": ctx.map(|c| c.1),
-        // Advisory only. The real ceiling depends on the model, and this is a
-        // ~4-chars-per-token estimate, so it warns rather than enforces.
-        "context_budget": 32000,
+        // Advisory only. Comes from the active provider's configured window
+        // (Providers page), and the token count is a ~4-chars-per-token
+        // estimate, so it warns rather than enforces.
+        "context_budget": guard.as_ref().map(|a| a.context_window()),
     }))
+}
+
+#[derive(Deserialize)]
+struct TitleSet {
+    session: String,
+    title: String,
+}
+
+/// Rename a session. Written as an event, not a stored field: the log is the
+/// source of truth and a rename is just the newest title in it.
+async fn set_session_title(
+    State(s): State<Shared>,
+    Json(b): Json<TitleSet>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let title = b.title.trim().chars().take(120).collect::<String>();
+    if title.is_empty() {
+        return Err(fail(anyhow::anyhow!("a title cannot be empty")));
+    }
+
+    // The live agent already holds this log open for appending. Writing
+    // through it keeps the sequence numbers monotonic; a second writer on the
+    // same file would not.
+    let mut guard = s.agent.lock().await;
+    let handled = match guard.as_mut() {
+        Some(a) if a.session_id() == b.session => {
+            a.set_title(&title).map_err(fail)?;
+            true
+        }
+        _ => false,
+    };
+    drop(guard);
+
+    if !handled {
+        let mut log = EventLog::open(s.cfg.events_dir(), b.session.clone()).map_err(fail)?;
+        log.append(crate::eventlog::EventKind::SessionTitle {
+            title: title.clone(),
+        })
+        .map_err(fail)?;
+    }
+    Ok(Json(json!({ "ok": true, "session": b.session, "title": title })))
+}
+
+/// What the endpoint says it offers, including each model's real context
+/// length where it publishes one - so the Providers page can fill that in
+/// rather than making you look it up.
+async fn models(State(s): State<Shared>) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let chain = crate::providers::ProviderChain::build(&s.cfg).map_err(fail)?;
+    let list = chain
+        .primary_client()
+        .list_models_detailed()
+        .await
+        .map_err(fail)?;
+    Ok(Json(json!({ "count": list.len(), "models": list })))
 }
 
 // ------------------------------------------------------------- reads
@@ -1094,6 +1168,7 @@ async fn sessions(State(s): State<Shared>) -> impl IntoResponse {
 
         out.push(json!({
             "id": id,
+            "title": crate::eventlog::session_title(&events),
             "events": events.len(),
             "messages": messages,
             "tool_calls": tool_calls,

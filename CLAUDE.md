@@ -368,6 +368,69 @@ settings, troubleshooting, where files live, and a plain list of what is not
 built yet. Keep it current — it is the thing that makes this usable by someone
 who did not write it.
 
+**9. Provider settings beyond the model id — BUILT.** The Providers page now
+carries **context length**, **temperature**, **top_p** and **request timeout**
+per provider, alongside the existing reply cap.
+
+- **The two numbers people conflate are now separated on the page, with the
+  reason written next to them.** `max_tokens` caps the *reply*; `context_window`
+  is how much the model holds at once. Setting the cap to the full window is the
+  exact mistake that produced the earlier `402 … you requested up to 100000
+  tokens, but can only afford 8048`, because the provider reserves the cap up
+  front. The context window is **advisory only** — it drives the meter and
+  nothing else, and is never sent in a request.
+- **Temperature and top_p left blank are omitted from the request entirely**
+  rather than defaulted to a number the harness invented, so the model's own
+  tuning stands. `#[serde(skip_serializing_if = "Option::is_none")]` on both.
+- **Timeout is per provider and per request**, and it is what makes the fallback
+  chain mean anything: a provider that hangs now falls through to the next one
+  instead of freezing the turn indefinitely.
+- **`detect` reads the real figure off the endpoint** (`GET /v1/models` via a new
+  `/api/models`) rather than asking you to look it up. aicredits.in publishes
+  `context_length`; a provider that does not gets an honest "this provider does
+  not publish a context length for it" instead of a filled-in guess.
+
+**10. The context meter now measures against the real window — 1,000,000.**
+Verified against the provider's own model list, not assumed:
+`qwen/qwen3.8-27b` reports `"context_length": 1000000`. The meter had a
+**hardcoded 32,000** in `current_session`, so it was reporting ~72% full when the
+session was using under 3% of what the model can actually hold — and prompting
+`/compact` for no reason. It now comes from the active provider's configured
+window. `LLM_CONTEXT_WINDOW` is the `.env` fallback; it defaults to a
+conservative 32,000 when unset rather than guessing high.
+
+**Worth being straight about what this does and does not change:** it removes a
+false alarm, it does not make long prompts free. A 1M-token prompt costs 1M
+tokens. `/compact` is still the right move on a long session, just no longer at
+23k.
+
+**11. Session titles — BUILT.** Shown top left next to the name, click to
+rename; also renameable from the Sessions page, where the title now heads each
+card with the opening line beneath it.
+
+- **A title is an event, not a stored field.** `EventKind::SessionTitle` is
+  appended, so renaming writes a new one and the last wins. Nothing is
+  overwritten and the rename history stays in the log — the §4a property holds
+  for this the same as everything else.
+- Untitled sessions fall back to the first line of the opening message, so the
+  list is readable without anyone naming anything.
+- The rename goes through the live agent when it owns that session, and opens
+  the log directly when it does not — two writers on one file would break the
+  monotonic sequence.
+
+**12. Playground prompt box — BUILT.** A composer at the bottom of the
+Playground page, so you can build and revise artifacts without switching to
+Chat.
+
+- **It is the same conversation, not a second one.** It routes through the same
+  websocket, agent, session and event log; what you say there is context in Chat
+  and every tool call is still logged exactly once. A separate playground
+  conversation would have meant a second history the graph and the reducer knew
+  nothing about.
+- The strip above it mirrors the turn — tool calls as they happen, then the first
+  line of the reply — and the artifact list reloads when the turn finishes, so
+  something built appears without pressing refresh.
+
 ### 4g. Desktop app, not a web page
 
 Requested, and correct: the dashboard should be a real local desktop

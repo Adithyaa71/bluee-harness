@@ -290,6 +290,9 @@ fn replay(cfg: Config, which: Option<String>) -> Result<()> {
             EventKind::Error { context, message } => {
                 println!("{:>3} [{ts}] error     | {context}: {message}", e.seq)
             }
+            EventKind::SessionTitle { title } => {
+                println!("{:>3} [{ts}] titled    | {title}", e.seq)
+            }
             EventKind::SessionEnd { reason } => {
                 println!("{:>3} [{ts}] session end ({reason})", e.seq)
             }

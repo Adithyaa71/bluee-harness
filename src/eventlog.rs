@@ -50,6 +50,12 @@ pub enum EventKind {
         mode: String,
         text: String,
     },
+    /// A human-given name for this session. Renaming appends another one
+    /// rather than editing the old line - the log stays append-only and the
+    /// last title wins, so a rename is still fully reconstructable.
+    SessionTitle {
+        title: String,
+    },
     /// Harness-level events that are neither the user nor the model speaking:
     /// context compaction, mode changes, and similar. Adding a variant is
     /// backward compatible - older lines simply never carry it.
@@ -193,6 +199,33 @@ impl EventLog {
     }
 }
 
+/// The name to show for a session: the last title it was given, or failing
+/// that the opening line of the conversation.
+///
+/// Titles are events, so "the current name" is simply the last one written.
+/// Nothing is overwritten and the rename history stays in the log.
+pub fn session_title(events: &[Event]) -> Option<String> {
+    let explicit = events.iter().rev().find_map(|e| match &e.kind {
+        EventKind::SessionTitle { title } if !title.trim().is_empty() => {
+            Some(title.trim().to_string())
+        }
+        _ => None,
+    });
+    explicit.or_else(|| {
+        events.iter().find_map(|e| match &e.kind {
+            EventKind::UserMessage { text } if !text.trim().is_empty() => {
+                let one = text.trim().lines().next().unwrap_or("").trim();
+                let mut s: String = one.chars().take(48).collect();
+                if one.chars().count() > 48 {
+                    s.push('…');
+                }
+                Some(s)
+            }
+            _ => None,
+        })
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -220,6 +253,45 @@ mod tests {
         assert_eq!(events[1].seq, 2);
 
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn title_falls_back_to_the_opening_line_and_renaming_appends() {
+        let dir = std::env::temp_dir().join(format!("evlog-{}", uuid::Uuid::new_v4()));
+        let mut log = EventLog::open(&dir, "titled").unwrap();
+
+        // No title yet: the first thing said stands in for one.
+        log.append(EventKind::UserMessage {
+            text: "what broke with the daemon".into(),
+        })
+        .unwrap();
+        let events = EventLog::read(log.path()).unwrap();
+        assert_eq!(
+            session_title(&events).as_deref(),
+            Some("what broke with the daemon")
+        );
+
+        // Renaming twice appends twice; the newest wins and neither is lost.
+        log.append(EventKind::SessionTitle {
+            title: "daemon triage".into(),
+        })
+        .unwrap();
+        log.append(EventKind::SessionTitle {
+            title: "snarevec triage".into(),
+        })
+        .unwrap();
+        let events = EventLog::read(log.path()).unwrap();
+        assert_eq!(session_title(&events).as_deref(), Some("snarevec triage"));
+        assert_eq!(
+            events
+                .iter()
+                .filter(|e| matches!(e.kind, EventKind::SessionTitle { .. }))
+                .count(),
+            2,
+            "a rename must append, not overwrite - the log is append-only"
+        );
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 
     #[test]

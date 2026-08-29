@@ -50,6 +50,12 @@ body{background:var(--bg);color:var(--ink);overflow:hidden;
   border-bottom:1px solid var(--line);background:var(--panel);flex:none}
 #topbar .name{font-weight:600}
 #topbar .meta{color:var(--faint);font-size:12px;font-family:var(--mono)}
+#ttitle{font-size:12.5px;color:var(--dim);max-width:280px;overflow:hidden;
+  white-space:nowrap;text-overflow:ellipsis;cursor:text;padding:3px 7px;
+  border-radius:6px;border:1px solid transparent}
+#ttitle:hover{color:var(--ink);border-color:var(--line);background:var(--panel2)}
+#trename{font-size:12.5px;width:280px;background:var(--panel2);color:var(--ink);
+  border:1px solid var(--accent);border-radius:6px;padding:3px 7px;font-family:inherit}
 .spacer{flex:1}
 .ghost{background:transparent;border:1px solid var(--line);color:var(--dim);
   border-radius:7px;padding:5px 10px;font-size:12px;cursor:pointer}
@@ -161,6 +167,19 @@ body{background:var(--bg);color:var(--ink);overflow:hidden;
 #abar .an{font-size:13px;font-weight:600}
 #abar .am{font-family:var(--mono);font-size:11px;color:var(--faint)}
 #aframe{flex:1;border:0;width:100%;background:#0f1116}
+#pgask{flex:none;border-top:1px solid var(--line);background:var(--panel);padding:10px 16px}
+#pgask .pgrow{display:flex;gap:8px;align-items:flex-end;max-width:900px;margin:0 auto}
+#pgask textarea{flex:1;background:var(--panel2);border:1px solid var(--line);border-radius:9px;
+  color:var(--ink);font:inherit;font-size:13px;padding:9px 11px;resize:none;outline:none;
+  max-height:150px;line-height:1.5}
+#pgask textarea:focus{border-color:var(--accent)}
+#pgask button{background:var(--accent);border:0;color:#0b0d11;border-radius:9px;
+  width:34px;height:34px;font-size:15px;cursor:pointer;flex:none}
+#pgask button:disabled{opacity:.45;cursor:default}
+#pgact{max-width:900px;margin:0 auto 8px;font-size:12px;color:var(--dim);line-height:1.55;
+  max-height:150px;overflow-y:auto}
+#pgact:empty{display:none}
+#pgact .t{font-family:var(--mono);font-size:11px;color:var(--accent)}
 
 /* ---------- vision toggle ---------- */
 #vis{display:flex;align-items:center;gap:0;border:1px solid var(--line);border-radius:7px;
@@ -242,6 +261,8 @@ body{background:var(--bg);color:var(--ink);overflow:hidden;
 .scard.cur{border-color:var(--ok)}
 .scard .sprev{font-size:13.5px;color:var(--ink);margin-bottom:6px;line-height:1.5}
 .scard .smeta{font-family:var(--mono);font-size:11px;color:var(--faint);margin-bottom:10px}
+.scard .sopen{font-size:12px;color:var(--faint);margin:-2px 0 6px;line-height:1.45;
+  overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .scard .srow{display:flex;gap:8px;align-items:center}
 
 /* ---------- settings ---------- */
@@ -253,6 +274,9 @@ body{background:var(--bg);color:var(--ink);overflow:hidden;
 .fin{background:var(--panel2);border:1px solid var(--line);border-radius:7px;padding:7px 10px;color:var(--ink);font-size:12.5px;font-family:var(--mono);outline:none}
 .fin:focus{border-color:var(--accent)}
 .fin.w1{width:140px} .fin.w2{width:250px} .fin.w3{width:210px} .fin.w4{width:80px}
+.flab{display:flex;flex-direction:column;gap:3px;font-size:10.5px;color:var(--faint);
+  font-family:var(--mono);text-transform:uppercase;letter-spacing:.04em}
+.fmsg{font-size:11.5px;font-family:var(--mono);margin-top:6px;min-height:14px;color:var(--faint)}
 #ptext{width:100%;min-height:430px;background:var(--panel2);border:1px solid var(--line);border-radius:10px;padding:14px;color:var(--ink);font:12.5px/1.65 var(--mono);outline:none;resize:vertical}
 #ptext:focus{border-color:var(--accent)}
 .pcard{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:13px;margin-bottom:10px}
@@ -330,6 +354,8 @@ body{background:var(--bg);color:var(--ink);overflow:hidden;
   <div id="main">
     <div id="topbar">
       <span class="name">bluee</span>
+      <span id="ttitle" title="Click to rename this session">untitled session</span>
+      <input id="trename" spellcheck="false" style="display:none">
       <span class="meta" id="tmeta">connecting…</span>
       <div class="spacer"></div>
       <div id="vis" title="Screen vision (§6)">
@@ -396,6 +422,15 @@ body{background:var(--bg);color:var(--ink);overflow:hidden;
           <button class="ghost" id="aopen">open in browser</button>
         </div>
         <iframe id="aframe" sandbox="allow-scripts allow-forms allow-popups"></iframe>
+      </div>
+
+      <div id="pgask">
+        <div id="pgact"></div>
+        <div class="pgrow">
+          <textarea id="pginput" rows="1"
+            placeholder="Build or change something here…  (same conversation as Chat)"></textarea>
+          <button id="pgsend" title="Send">&uarr;</button>
+        </div>
       </div>
     </div>
 
@@ -537,7 +572,9 @@ async function send(){
 /* Streaming turns: tool calls appear the moment they happen rather than the
    whole turn landing at once when it finishes. */
 let chatWs=null, liveBody=null, liveHtml='';
-function finishTurn(){ busy=false; $('#send').disabled=false; scrollDown(); }
+function finishTurn(){ busy=false; $('#send').disabled=false;
+  // Safety net for the error/close paths, which never reach the done frame.
+  pgMirror=false; $('#pgsend').disabled=false; scrollDown(); }
 function chatSocket(){
   if(chatWs && chatWs.readyState<=1) return chatWs;
   chatWs=new WebSocket('ws://'+location.host+'/ws/chat');
@@ -545,7 +582,10 @@ function chatSocket(){
     let e; try{ e=JSON.parse(ev.data); }catch(_){ return; }
     if(e.type==='done'){
       thinking(false);
-      if(e.session){ currentSession=e.session; $('#tmeta').textContent=e.model+' · '+e.session; }
+      if(pgMirror){ pgMirror=false; $('#pgsend').disabled=false;
+                    pgLine('<span style="color:var(--faint)">done</span>'); loadPlayground(); }
+      if(e.session){ currentSession=e.session; $('#tmeta').textContent=e.model+' · '+e.session;
+                     showTitle(e.title); }
       if(!liveHtml && liveBody) liveBody.innerHTML='<p style="color:var(--faint)">(no reply)</p>';
       if($('#sp-log').classList.contains('on')) loadLog();
       if($('#sp-tasks').classList.contains('on')) loadTasks();
@@ -562,6 +602,7 @@ function chatSocket(){
     else if(e.type==='error')
       liveHtml+='<p style="color:var(--bad)">'+esc(e.message)+'</p>';
     liveBody.innerHTML=liveHtml; scrollDown();
+    if(pgMirror) pgEcho(e);
     if($('#sp-tasks').classList.contains('on')) loadTasks();
   };
   chatWs.onerror=()=>{
@@ -590,6 +631,39 @@ document.addEventListener('click',e=>{
   if(e.target.classList.contains('chip')){ $('#input').value=e.target.textContent; send(); }
 });
 $('#newchat').onclick=()=>location.reload();
+
+/* ---------- session title: shown top left, click to rename ----------
+   A rename is an event appended to the session log, so the old name is not
+   destroyed - it is simply no longer the latest one. */
+let sessionTitle=null, sessionList=[];
+function showTitle(t){
+  sessionTitle=t||null;
+  $('#ttitle').textContent=sessionTitle||'untitled session';
+  $('#ttitle').style.color=sessionTitle?'':'var(--faint)';
+}
+function beginRename(){
+  if(!currentSession) return;
+  const s=$('#ttitle'), i=$('#trename');
+  i.value=sessionTitle||'';
+  s.style.display='none'; i.style.display='';
+  i.focus(); i.select();
+}
+async function commitRename(save){
+  const s=$('#ttitle'), i=$('#trename');
+  i.style.display='none'; s.style.display='';
+  const v=i.value.trim();
+  if(!save||!v||v===sessionTitle||!currentSession) return;
+  const r=await api('/api/session/title',{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({session:currentSession,title:v})}).catch(e=>({error:String(e)}));
+  if(r.ok) showTitle(r.title);
+}
+$('#ttitle').onclick=beginRename;
+$('#trename').addEventListener('keydown',e=>{
+  if(e.key==='Enter'){ e.preventDefault(); commitRename(true); }
+  if(e.key==='Escape'){ e.preventDefault(); commitRename(false); }
+});
+$('#trename').addEventListener('blur',()=>commitRename(true));
 $('#attach').onclick=()=>$('#file').click();
 $('#file').onchange=async e=>{
   for(const f of e.target.files) attachments.push({name:f.name,text:(await f.text()).slice(0,60000)});
@@ -746,6 +820,7 @@ async function loadTasks(){
 async function loadSessions(){
   const d=await api('/api/sessions').catch(()=>({sessions:[]}));
   const list=d.sessions||[];
+  sessionList=list;
   if(!list.length){
     $('#sessbody').innerHTML='<div class="empty"><h2>No sessions yet</h2>'+
       '<p>Every conversation is written to disk and shows up here.</p></div>';
@@ -756,13 +831,16 @@ async function loadSessions(){
     'Deleting removes the log permanently; that is source-of-truth data, so it is one at a time.</p>'+
     list.map(x=>
     '<div class="scard'+(x.id===currentSession?' cur':'')+'" data-id="'+esc(x.id)+'">'+
-      '<div class="sprev">'+(esc(x.preview)||'<i style="color:var(--faint)">(no messages)</i>')+'</div>'+
+      '<div class="sprev">'+(esc(x.title||x.preview)||'<i style="color:var(--faint)">(no messages)</i>')+'</div>'+
+      (x.title&&x.preview&&x.title!==x.preview
+        ? '<div class="sopen">'+esc(x.preview)+'</div>' : '')+
       '<div class="smeta">'+esc(x.id)+' &middot; '+x.messages+' messages &middot; '+
         x.tool_calls+' tool calls &middot; '+esc((x.last||'').slice(0,16).replace('T',' '))+
         (x.id===currentSession?' &middot; <b style="color:var(--ok)">current</b>':'')+'</div>'+
       '<div class="srow">'+
         '<button class="btn s-open">Open &amp; resume</button>'+
         '<button class="btn sec s-read">Read only</button>'+
+        '<button class="btn sec s-name">Rename</button>'+
         '<div class="spacer"></div>'+
         '<button class="btn sec s-del">Delete</button>'+
       '</div>'+
@@ -773,6 +851,7 @@ async function loadSessions(){
     c.querySelector('.s-open').onclick=()=>openSession(id,true);
     c.querySelector('.s-read').onclick=()=>openSession(id,false);
     c.querySelector('.s-del').onclick=()=>deleteSession(id,c);
+    c.querySelector('.s-name').onclick=()=>renameSession(id,c);
   });
 }
 
@@ -808,6 +887,7 @@ async function openSession(id, resume){
     if(r.ok){
       currentSession=r.session;
       $('#tmeta').textContent=r.model+' · '+r.session;
+      showTitle(r.title||(sessionList.find(x=>x.id===id)||{}).title);
       // the chat socket holds no state, but reconnect so nothing half-sent lingers
       if(chatWs){ try{chatWs.close()}catch(_){ } chatWs=null; }
       addMsg('ai','<p style="color:var(--faint);font-size:12.5px">Resumed this session &mdash; carry on.</p>');
@@ -835,6 +915,32 @@ async function deleteSession(id, card){
     body:JSON.stringify({session:id})}).catch(e=>({error:String(e)}));
   if(r.ok){ if(currentSession===id) currentSession=null; loadSessions(); }
   else{ btn.textContent='failed'; }
+}
+
+/* Rename from the Sessions page. Same endpoint as the top-bar rename; a title
+   is an appended event either way, so nothing is overwritten. */
+async function renameSession(id, card){
+  const cur=(sessionList.find(x=>x.id===id)||{}).title||'';
+  const head=card.querySelector('.sprev');
+  const inp=document.createElement('input');
+  inp.value=cur; inp.className='fin';
+  inp.style.cssText='width:100%;margin-bottom:6px';
+  head.replaceWith(inp); inp.focus(); inp.select();
+  const finish=async save=>{
+    const v=inp.value.trim();
+    if(save&&v&&v!==cur){
+      const r=await api('/api/session/title',{method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({session:id,title:v})}).catch(e=>({error:String(e)}));
+      if(r.ok&&currentSession===id) showTitle(r.title);
+    }
+    loadSessions();
+  };
+  inp.addEventListener('keydown',e=>{
+    if(e.key==='Enter'){ e.preventDefault(); finish(true); }
+    if(e.key==='Escape'){ e.preventDefault(); finish(false); }
+  });
+  inp.addEventListener('blur',()=>finish(true),{once:true});
 }
 
 /* ---------- vision mode (§6) ---------- */
@@ -1088,7 +1194,12 @@ function renderPersona(){
 function renderProviders(){
   $('#setbody').innerHTML=
     '<p class="hintline">Order is the fallback order &mdash; the first is the default, and if it '+
-    'fails the next one answers. Keys are shown masked; leave a masked key untouched to keep it.</p>'+
+    'fails the next one answers. Keys are shown masked; leave a masked key untouched to keep it.<br>'+
+    '<b>Reply cap</b> and <b>context length</b> are different things and the difference costs money: '+
+    'the cap limits the <i>answer</i>, and setting it to the full window makes the provider reserve '+
+    'that whole budget up front and refuse the request on a small balance. The context length is only '+
+    'measured against &mdash; it drives the meter in the top bar. '+
+    '<b>Temperature</b> and <b>top_p</b> left blank are omitted from the request, so the model uses its own.</p>'+
     '<div id="plist"></div>'+
     '<div class="savebar"><button class="btn" id="prsave">Save chain</button>'+
     '<button class="btn sec" id="pradd">Add provider</button><span id="prmsg"></span></div>';
@@ -1096,7 +1207,8 @@ function renderProviders(){
   $('#pradd').onclick=()=>{
     collectProvs();
     provs.push({name:'new provider',base_url:'https://openrouter.ai/api/v1',
-      api_key:'',model:'',max_tokens:4096,enabled:true});
+      api_key:'',model:'',max_tokens:4096,context_window:32000,
+      temperature:null,top_p:null,timeout_secs:180,enabled:true});
     drawProvs();
   };
   $('#prsave').onclick=async()=>{
@@ -1121,14 +1233,27 @@ function drawProvs(){
       '</div>'+
       '<div class="frow">'+
         '<input class="fin w2 f-key" value="'+esc(p.api_key||'')+'" placeholder="api key">'+
-        '<input class="fin w4 f-max" value="'+(p.max_tokens||4096)+'" placeholder="max">'+
-        '<label style="font-size:12px;color:var(--dim)"><input type="checkbox" class="f-on" '+
-          (p.enabled!==false?'checked':'')+'> enabled</label>'+
+        '<label class="flab">reply cap<input class="fin w4 f-max" value="'+(p.max_tokens||4096)+'"></label>'+
+        '<label class="flab">context length'+
+          '<input class="fin w3 f-ctx" value="'+(p.context_window||32000)+'"></label>'+
+        '<button class="btn sec f-detect" title="Ask the endpoint for this model&apos;s context length">detect</button>'+
+      '</div>'+
+      '<div class="frow">'+
+        '<label class="flab">temperature'+
+          '<input class="fin w4 f-temp" value="'+(p.temperature==null?'':p.temperature)+'" placeholder="auto"></label>'+
+        '<label class="flab">top_p'+
+          '<input class="fin w4 f-topp" value="'+(p.top_p==null?'':p.top_p)+'" placeholder="auto"></label>'+
+        '<label class="flab">timeout (s)'+
+          '<input class="fin w4 f-to" value="'+(p.timeout_secs||180)+'"></label>'+
+        '<label class="flab" style="justify-content:flex-end"><span>&nbsp;</span>'+
+          '<span style="font-size:12px;color:var(--dim)"><input type="checkbox" class="f-on" '+
+          (p.enabled!==false?'checked':'')+'> enabled</span></label>'+
         '<div class="spacer"></div>'+
         '<button class="btn sec f-up" '+(i?'':'disabled')+'>&uarr;</button>'+
         '<button class="btn sec f-dn" '+(i===provs.length-1?'disabled':'')+'>&darr;</button>'+
         '<button class="btn sec f-rm">remove</button>'+
       '</div>'+
+      '<div class="fmsg"></div>'+
     '</div>').join('') : '<p class="hintline">No providers configured yet.</p>';
 
   $$('#plist .pcard').forEach(c=>{
@@ -1136,15 +1261,44 @@ function drawProvs(){
     c.querySelector('.f-up').onclick=()=>{collectProvs();const t=provs[i-1];provs[i-1]=provs[i];provs[i]=t;drawProvs();};
     c.querySelector('.f-dn').onclick=()=>{collectProvs();const t=provs[i+1];provs[i+1]=provs[i];provs[i]=t;drawProvs();};
     c.querySelector('.f-rm').onclick=()=>{collectProvs();provs.splice(i,1);drawProvs();};
+    c.querySelector('.f-detect').onclick=()=>detectContext(c);
   });
+}
+
+/* Ask the endpoint what the model's real context length is rather than
+   guessing at it. Providers that publish it (aicredits.in does) return it in
+   /v1/models; ones that do not say so plainly instead of filling in a number
+   that would be wrong. */
+async function detectContext(card){
+  const msg=card.querySelector('.fmsg');
+  const model=card.querySelector('.f-model').value.trim();
+  if(!model){ msg.className='fmsg errmsg'; msg.textContent='set a model id first'; return; }
+  msg.className='fmsg'; msg.textContent='asking the provider…';
+  const d=await api('/api/models').catch(e=>({error:String(e)}));
+  if(d.error){ msg.className='fmsg errmsg'; msg.textContent=d.error; return; }
+  const m=(d.models||[]).find(x=>x.id===model);
+  if(!m){ msg.className='fmsg errmsg';
+    msg.textContent='this provider does not offer "'+model+'" ('+(d.count||0)+' models listed)'; return; }
+  if(!m.context_length){ msg.className='fmsg errmsg';
+    msg.textContent='found the model, but this provider does not publish a context length for it'; return; }
+  card.querySelector('.f-ctx').value=m.context_length;
+  msg.className='fmsg okmsg';
+  msg.textContent=(m.name||m.id)+' — '+m.context_length.toLocaleString()+' tokens. Save the chain to keep it.';
 }
 
 function collectProvs(){
   $$('#plist .pcard').forEach(c=>{
     const i=+c.dataset.i, g=k=>c.querySelector(k);
+    const num=(sel,dflt)=>{ const v=parseInt(g(sel).value); return isFinite(v)&&v>0?v:dflt; };
+    // Blank means "let the model decide" - sent as null, omitted from the
+    // request entirely, rather than defaulted to a number we invented.
+    const opt=sel=>{ const t=g(sel).value.trim(); if(!t) return null;
+                     const v=parseFloat(t); return isFinite(v)?v:null; };
     provs[i]={ name:g('.f-name').value.trim(), base_url:g('.f-url').value.trim(),
       model:g('.f-model').value.trim(), api_key:g('.f-key').value,
-      max_tokens:parseInt(g('.f-max').value)||4096, enabled:g('.f-on').checked };
+      max_tokens:num('.f-max',4096), context_window:num('.f-ctx',32000),
+      temperature:opt('.f-temp'), top_p:opt('.f-topp'),
+      timeout_secs:num('.f-to',180), enabled:g('.f-on').checked };
   });
 }
 
@@ -1192,6 +1346,45 @@ function openArtifact(id){
 }
 $('#aback').onclick=()=>{ $('#aview').classList.remove('on'); $('#playbody').style.display=''; };
 $('#areload').onclick=loadPlayground;
+
+/* ---------- playground composer ----------
+   Deliberately the SAME conversation as the Chat page, not a second one: it
+   goes through the same websocket, the same agent and the same event log, so
+   what you say here is context there and every tool call is still logged once.
+   The strip below only mirrors the turn - it is not a separate transcript. */
+let pgMirror=false;
+function pgLine(html){
+  const a=$('#pgact');
+  a.insertAdjacentHTML('beforeend','<div>'+html+'</div>');
+  a.scrollTop=a.scrollHeight;
+}
+function pgEcho(e){
+  if(e.type==='tool_call') pgLine('<span class="t">&#9654; '+esc(e.server)+'.'+esc(e.tool)+'</span>');
+  else if(e.type==='tool_result'&&!e.ok) pgLine('<span style="color:var(--bad)">tool failed</span>');
+  else if(e.type==='reply') pgLine(esc(e.text.trim().split(/\r?\n/)[0]).slice(0,220));
+  else if(e.type==='error') pgLine('<span style="color:var(--bad)">'+esc(e.message)+'</span>');
+}
+function pgSend(){
+  const ta=$('#pginput'), text=ta.value.trim();
+  if(!text) return;
+  if(busy){ pgLine('<span style="color:var(--warm)">still working on the last one…</span>'); return; }
+  ta.value=''; ta.style.height='auto';
+  $('#pgact').innerHTML='';
+  pgLine('<span style="color:var(--ink)">'+esc(text)+'</span>');
+  pgMirror=true; $('#pgsend').disabled=true;
+  // Routed through the chat composer so the message lands in the chat
+  // transcript too - one conversation, two places to type into it.
+  $('#input').value=text;
+  send();
+}
+$('#pgsend').onclick=pgSend;
+$('#pginput').addEventListener('keydown',e=>{
+  if(e.key==='Enter'&&!e.shiftKey){ e.preventDefault(); pgSend(); }
+});
+$('#pginput').addEventListener('input',e=>{
+  e.target.style.height='auto';
+  e.target.style.height=Math.min(e.target.scrollHeight,150)+'px';
+});
 
 /* ---------- GRAPH page ---------- */
 async function drawGraph(){
@@ -1297,6 +1490,7 @@ async function ping(){
     if(s.session){
       if(!currentSession) currentSession=s.session;
       $('#tmeta').textContent=`${s.model} · ${s.session}`;
+      showTitle(s.title);
     }else{
       const st=await api('/api/stats');
       $('#tmeta').textContent=`${st.tools} tools · ${st.servers} servers`;

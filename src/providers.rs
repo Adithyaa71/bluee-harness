@@ -25,14 +25,37 @@ pub struct ProviderConfig {
     pub api_key: String,
     #[serde(default)]
     pub model: String,
+    /// Ceiling on the *reply*. Not the context window - the two get confused
+    /// constantly and the confusion is expensive: setting this to the model's
+    /// full window makes the provider reserve that much budget up front and
+    /// refuse the request outright on a small balance.
     #[serde(default = "default_max_tokens")]
     pub max_tokens: u32,
+    /// How much the model can hold at once, prompt + reply. Only used to
+    /// measure the context meter and decide when `/compact` is worth running.
+    #[serde(default = "default_context_window")]
+    pub context_window: u32,
+    /// Omitted from the request when unset, so the model's own default stands.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f32>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub top_p: Option<f32>,
+    /// Per-request deadline. A provider that hangs should fall through to the
+    /// next one in the chain rather than freezing the turn forever.
+    #[serde(default = "default_timeout")]
+    pub timeout_secs: u64,
     #[serde(default = "default_true")]
     pub enabled: bool,
 }
 
 fn default_max_tokens() -> u32 {
     4096
+}
+fn default_context_window() -> u32 {
+    32_000
+}
+fn default_timeout() -> u64 {
+    180
 }
 fn default_true() -> bool {
     true
@@ -66,6 +89,10 @@ pub fn load(cfg: &Config) -> ProvidersFile {
             api_key: cfg.api_key.clone(),
             model: cfg.model.clone(),
             max_tokens: cfg.max_tokens,
+            context_window: cfg.context_window,
+            temperature: None,
+            top_p: None,
+            timeout_secs: default_timeout(),
             enabled: true,
         }],
     }
@@ -107,8 +134,8 @@ impl ProviderChain {
             .into_iter()
             .filter(|p| p.enabled && !p.api_key.is_empty() && !p.model.is_empty())
             .map(|p| {
-                let client =
-                    OpenAiCompatible::new(&p.base_url, &p.api_key, &p.model, p.max_tokens);
+                let client = OpenAiCompatible::new(&p.base_url, &p.api_key, &p.model, p.max_tokens)
+                    .tuned(p.temperature, p.top_p, p.timeout_secs);
                 (p, client)
             })
             .collect();
@@ -130,6 +157,18 @@ impl ProviderChain {
 
     pub fn len(&self) -> usize {
         self.entries.len()
+    }
+
+    /// The context window the meter measures against - whichever provider is
+    /// first in line, since that is the one normally answering.
+    pub fn context_window(&self) -> u32 {
+        self.entries[0].0.context_window
+    }
+
+    /// A client borrowed for a one-off request that is not a chat turn (the
+    /// Providers page asking the endpoint what models it has).
+    pub fn primary_client(&self) -> &OpenAiCompatible {
+        &self.entries[0].1
     }
 
     /// Ask each provider in turn. Errors from earlier ones are collected and

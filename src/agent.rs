@@ -319,6 +319,27 @@ impl Agent {
         self.chain.len()
     }
 
+    /// What the context meter measures against - the active provider's
+    /// configured window, not a constant baked into the dashboard.
+    pub fn context_window(&self) -> u32 {
+        self.chain.context_window()
+    }
+
+    /// Name this session. Appends rather than edits, so the rename history
+    /// stays in the log like everything else.
+    pub fn set_title(&mut self, title: &str) -> Result<()> {
+        self.log.append(EventKind::SessionTitle {
+            title: title.trim().to_string(),
+        })?;
+        Ok(())
+    }
+
+    /// Current display name for this session, from its own log.
+    pub fn title(&self) -> Option<String> {
+        let events = EventLog::read(self.log.path()).unwrap_or_default();
+        crate::eventlog::session_title(&events)
+    }
+
     /// Rough prompt size. Not exact tokenisation - the point is a usable
     /// "how full am I" signal, and ~4 chars per token is close enough to warn
     /// at the right time. Over-reporting is safer than under-reporting here.

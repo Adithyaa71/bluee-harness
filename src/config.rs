@@ -13,6 +13,9 @@ pub struct Config {
     pub api_key: String,
     pub model: String,
     pub max_tokens: u32,
+    /// The model's own ceiling on prompt + reply. Advisory: it drives the
+    /// context meter, not the request.
+    pub context_window: u32,
     pub data_dir: PathBuf,
     pub persona_dir: PathBuf,
     pub mcp_config: PathBuf,
@@ -43,11 +46,19 @@ impl Config {
             .and_then(|v| v.parse().ok())
             .unwrap_or(4096);
 
+        // Deliberately conservative when unset. The Providers page can read the
+        // real figure off the endpoint's own model list rather than guessing.
+        let context_window = std::env::var("LLM_CONTEXT_WINDOW")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(32_000);
+
         Ok(Self {
             base_url,
             api_key,
             model,
             max_tokens,
+            context_window,
             data_dir: PathBuf::from(
                 std::env::var("HARNESS_DATA_DIR").unwrap_or_else(|_| "data".into()),
             ),

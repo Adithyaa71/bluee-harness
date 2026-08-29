@@ -285,6 +285,8 @@ fn render(event: &Event) -> Option<String> {
             Some(format!("Error in {context}: {}", truncate(message, 400)))
         }
         EventKind::System { note } => Some(format!("System: {note}")),
+        // A title is a label for the session, not something said in it.
+        EventKind::SessionTitle { title } => Some(format!("Session titled: {title}")),
         EventKind::SessionStart { .. } | EventKind::SessionEnd { .. } => None,
     }
 }
