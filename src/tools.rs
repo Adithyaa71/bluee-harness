@@ -73,6 +73,9 @@ impl NativeTools {
                 | "save_skill"
                 | "list_skills"
                 | "run_skill"
+                | "delete_artifact"
+                | "delete_skill"
+                | "read_source"
         )
     }
 
@@ -185,6 +188,42 @@ impl NativeTools {
                         "name": { "type": "string", "description": "Skill name or slug." }
                     },
                     "required": ["name"]
+                }),
+            },
+            ToolDef {
+                name: "delete_artifact".into(),
+                description: "Delete an artifact you built. Use when one is obsolete, was a                     mistake, or the user asks you to clear it. Deletes the files on disk - say                     what you are about to remove and only do it when that is clearly what was                     wanted."
+                    .into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "id": { "type": "string", "description": "Artifact id from list_artifacts." }
+                    },
+                    "required": ["id"]
+                }),
+            },
+            ToolDef {
+                name: "delete_skill".into(),
+                description: "Delete a saved skill by name. Use when a procedure is wrong,                     superseded, or the user asks you to drop it."
+                    .into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "name": { "type": "string", "description": "Skill name or slug from list_skills." }
+                    },
+                    "required": ["name"]
+                }),
+            },
+            ToolDef {
+                name: "read_source".into(),
+                description: "Read one file of your own source code, by repo-relative path                     (e.g. `src/llm.rs`, `dash/index.html`, `CLAUDE.md`). Use after search_memory                     points you at a file and you need the exact current text. Secrets, build                     output and derived state are refused. You can read your source; you cannot                     write it."
+                    .into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Repo-relative path, forward slashes." }
+                    },
+                    "required": ["path"]
                 }),
             },
             ToolDef {
@@ -382,6 +421,44 @@ impl NativeTools {
                             "available": known,
                         }))
                     }
+                }
+            }
+
+            "delete_artifact" => {
+                let id = args.get("id").and_then(|v| v.as_str())
+                    .context("delete_artifact requires `id`")?;
+                self.artifacts.delete(id)?;
+                Ok(serde_json::json!({
+                    "deleted": id,
+                    "note": "Files removed from disk. The event log still records that it was                              built and then deleted - that history is not rewritten.",
+                }))
+            }
+
+            "delete_skill" => {
+                let name = args.get("name").and_then(|v| v.as_str())
+                    .context("delete_skill requires `name`")?;
+                let existed = self.skills.delete(name)?;
+                Ok(serde_json::json!({
+                    "deleted": existed,
+                    "name": name,
+                    "note": if existed { "Skill file removed." } else { "No skill by that name." },
+                }))
+            }
+
+            "read_source" => {
+                let path = args.get("path").and_then(|v| v.as_str())
+                    .context("read_source requires `path`")?;
+                let root = std::env::current_dir()?;
+                match crate::codemap::read_source(&root, path) {
+                    Ok(text) => Ok(serde_json::json!({
+                        "path": path,
+                        "lines": text.lines().count(),
+                        "text": text,
+                    })),
+                    Err(e) => Ok(serde_json::json!({
+                        "path": path,
+                        "error": e.to_string(),
+                    })),
                 }
             }
 

@@ -484,6 +484,49 @@ concrete — 106 tool schemas are **~18,300 prompt tokens on every single turn**
 about **₹0.93–1.06 per call** before you have said anything. 30 tools costs
 ₹0.28. This is now the top item.
 
+**14. bluee knows its own source — BUILT.** `src/codemap.rs` indexes the repo
+into both memory layers, plus `delete_artifact`, `delete_skill` and
+`read_source`.
+
+*Why this does not break §4a.* The event log is the source of truth for what
+*happened*; the repo is the source of truth for what bluee *is*. Both are
+derived into the same two stores and both are fully rebuildable — proven by
+running `reduce` twice and getting identical counts. The rule that actually
+matters, nothing in the graph without evidence behind it, still holds: a file on
+disk is evidence. Code chunks live under a third vector scope, `code`, beside
+`global` (the log) and `session` (`/compact`), so each rebuilds without
+destroying the others.
+
+*Extraction is deterministic and deliberately shallow* — paths, module
+structure, declared symbols. It reads what a file *declares*, not what it does,
+which is the same call §4c's reducer makes about entities: a graph of guessed-at
+intent is worse than a small true one.
+
+*Measured:* 119 files, 1,038 chunks, 1,009 symbols. The graph went from 17
+entities to 1,013 and 16 relations to 1,179 — §4f-d's "the graph is the weakest
+layer" is now false for a different reason than expected.
+
+*Verified against the real model:* asked where it handles provider streaming, it
+called `search_memory`, then `read_source("src/llm.rs")`, and correctly named
+`read_stream` and its helper `absorb`.
+
+*Deletes are real but bounded.* `delete_artifact` and `delete_skill` remove
+plain files the owner can also delete by hand. **Session deletion is not
+offered to the model** — that is source-of-truth data, and the UI keeps it
+two-click armed and one-at-a-time for exactly that reason (§4f-d.1). The
+distinction is worth keeping: the model may delete things derived from a
+conversation, never the conversation.
+
+*`read_source` reads, and only reads.* Refusal is by location, not by name:
+`.env`, `data/`, `target/`, `.git/` and the rest of the skip list are rejected,
+as is any path containing `..` or resolving outside the repo — belt and braces
+via `canonicalize`. Verified live: asked to read `.env`, the tool refused and
+the model reported the refusal rather than probing for a way around it.
+**Writing its own source is deliberately not built.** Reading is the
+prerequisite for the self-editing the owner wants later; enabling writes is a
+separate decision with its own guardrails, and it should be made on purpose
+rather than arrive as a side effect of this.
+
 ### 4g. Desktop app, not a web page
 
 Requested, and correct: the dashboard should be a real local desktop

@@ -183,6 +183,20 @@ automatically, and bluee searches it when it needs to.
 - **The graph** — how things connect. People, machines, projects, tools,
   preferences.
 
+**bluee also knows its own source code.** The repo is indexed alongside your
+conversations - 119 files, every function and struct it declares. So you can ask
+"where do you handle the provider timeout?" and it will find the file, read it,
+and tell you. It can read any file in the project except secrets (`.env`),
+`data/`, and build output.
+
+**It cannot edit itself.** Reading is on; writing is not. That's the
+prerequisite for the self-editing you want later, not the thing itself - turning
+on writes is its own decision with its own guardrails.
+
+**It can delete artifacts and skills** when you ask - those are plain files.
+**It cannot delete sessions.** Those are the source of truth, so deleting one
+stays a deliberate two-click action you take on the Sessions page.
+
 **One thing you do need to know:** memory search only covers what's been
 *indexed*, and indexing happens when you run `/reduce` (or `cargo run --
 reduce`). Recent conversations aren't searchable until then. `/compact` indexes

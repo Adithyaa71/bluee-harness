@@ -30,6 +30,9 @@ pub struct ReduceStats {
     pub entities: usize,
     pub relations: usize,
     pub graph_skipped: bool,
+    pub code_files: usize,
+    pub code_chunks: usize,
+    pub code_symbols: usize,
 }
 
 /// Facts we can extract from the log deterministically.
@@ -88,15 +91,32 @@ pub async fn run(cfg: &Config) -> Result<ReduceStats> {
     let store = VectorStore::open(cfg.data_dir.join("vectors.db"))?;
     store.clear()?;
 
-    if !chunks.is_empty() {
+    // The repo is indexed alongside the log: bluee should know its own source
+    // (§4f-d.14). Same rebuild-from-scratch rule applies, so `code` chunks are
+    // cleared and rewritten here rather than accumulating.
+    let code = crate::codemap::scan(&std::env::current_dir()?).unwrap_or_default();
+    stats.code_files = code.files;
+    stats.code_chunks = code.chunks.len();
+    store.clear_scope(crate::codemap::SCOPE)?;
+
+    if !chunks.is_empty() || !code.chunks.is_empty() {
         let mut model = TextEmbedding::try_new(TextInitOptions::new(EmbeddingModel::AllMiniLML6V2))
             .context("loading embedding model (first run downloads it)")?;
 
-        let texts: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
-        let embeddings = model.embed(texts, None).context("embedding chunks")?;
+        if !chunks.is_empty() {
+            let texts: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
+            let embeddings = model.embed(texts, None).context("embedding chunks")?;
+            for (chunk, embedding) in chunks.iter().zip(embeddings) {
+                store.insert(chunk, &embedding)?;
+            }
+        }
 
-        for (chunk, embedding) in chunks.iter().zip(embeddings) {
-            store.insert(chunk, &embedding)?;
+        if !code.chunks.is_empty() {
+            let texts: Vec<&str> = code.chunks.iter().map(|c| c.text.as_str()).collect();
+            let embeddings = model.embed(texts, None).context("embedding source")?;
+            for (chunk, embedding) in code.chunks.iter().zip(embeddings) {
+                store.insert_scoped(chunk, &embedding, crate::codemap::SCOPE)?;
+            }
         }
     }
 
@@ -105,6 +125,19 @@ pub async fn run(cfg: &Config) -> Result<ReduceStats> {
     for events in &all {
         extract_graph(events, &mut facts);
     }
+    // The repo's structure goes in the same graph: a file on disk is evidence,
+    // so this keeps §4c's "nothing without evidence" rule intact.
+    for (name, kind) in &code.facts.entities {
+        facts.entity(name, kind);
+    }
+    for (source, target, relation) in &code.facts.relations {
+        *facts
+            .relations
+            .entry((source.clone(), target.clone(), relation.clone()))
+            .or_insert(0) += 1;
+    }
+    stats.code_symbols = code.symbols;
+
     stats.entities = facts.entities.len();
     stats.relations = facts.relations.len();
 

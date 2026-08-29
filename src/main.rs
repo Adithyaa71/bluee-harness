@@ -1,6 +1,7 @@
 mod agent;
 mod artifacts;
 mod app;
+mod codemap;
 mod config;
 mod dash;
 mod eventlog;
@@ -83,6 +84,10 @@ async fn reduce_cmd(cfg: Config) -> Result<()> {
     println!("sessions read : {}", stats.sessions);
     println!("events read   : {}", stats.events);
     println!("chunks embedded: {}", stats.chunks);
+    println!(
+        "source indexed: {} file(s), {} chunk(s), {} symbol(s)",
+        stats.code_files, stats.code_chunks, stats.code_symbols
+    );
     if stats.graph_skipped {
         println!("graph         : SKIPPED (server unavailable)");
     } else {

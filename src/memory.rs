@@ -89,6 +89,16 @@ impl VectorStore {
         Ok(())
     }
 
+    /// Drop everything in one scope. Used to rebuild the code index without
+    /// touching what the event log or a live `/compact` put there.
+    pub fn clear_scope(&self, scope: &str) -> Result<usize> {
+        let n = self
+            .conn
+            .execute("DELETE FROM chunks WHERE scope = ?1", params![scope])
+            .with_context(|| format!("clearing {scope} memory"))?;
+        Ok(n)
+    }
+
     /// Remove one session's compacted chunks, so re-compacting replaces rather
     /// than duplicates.
     pub fn clear_session(&self, session_id: &str) -> Result<usize> {
