@@ -44,6 +44,16 @@ pub struct ProviderConfig {
     /// next one in the chain rather than freezing the turn forever.
     #[serde(default = "default_timeout")]
     pub timeout_secs: u64,
+    /// Ask for the answer as a stream. On by default because it is what makes
+    /// long turns possible at all here: aicredits.in cuts a non-streamed
+    /// request off at ~30s wall clock and returns `500 Internal Server Error`.
+    /// An escape hatch for a provider that streams badly, not a preference.
+    #[serde(default = "default_true")]
+    pub stream: bool,
+    /// Extra attempts against this same provider before falling through to the
+    /// next one. A gateway timeout is a hiccup, not a verdict.
+    #[serde(default = "default_retries")]
+    pub retries: u32,
     #[serde(default = "default_true")]
     pub enabled: bool,
 }
@@ -56,6 +66,9 @@ fn default_context_window() -> u32 {
 }
 fn default_timeout() -> u64 {
     180
+}
+fn default_retries() -> u32 {
+    2
 }
 fn default_true() -> bool {
     true
@@ -93,6 +106,8 @@ pub fn load(cfg: &Config) -> ProvidersFile {
             temperature: None,
             top_p: None,
             timeout_secs: default_timeout(),
+            stream: true,
+            retries: default_retries(),
             enabled: true,
         }],
     }
@@ -135,7 +150,8 @@ impl ProviderChain {
             .filter(|p| p.enabled && !p.api_key.is_empty() && !p.model.is_empty())
             .map(|p| {
                 let client = OpenAiCompatible::new(&p.base_url, &p.api_key, &p.model, p.max_tokens)
-                    .tuned(p.temperature, p.top_p, p.timeout_secs);
+                    .tuned(p.temperature, p.top_p, p.timeout_secs)
+                    .transport(p.stream, p.retries);
                 (p, client)
             })
             .collect();

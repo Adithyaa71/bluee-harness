@@ -644,6 +644,8 @@ async fn get_providers(State(s): State<Shared>) -> impl IntoResponse {
             "temperature": p.temperature,
             "top_p": p.top_p,
             "timeout_secs": p.timeout_secs,
+            "stream": p.stream,
+            "retries": p.retries,
             "api_key": providers::mask(&p.api_key),
             "has_key": !p.api_key.is_empty(),
         })).collect::<Vec<_>>(),
@@ -652,7 +654,9 @@ async fn get_providers(State(s): State<Shared>) -> impl IntoResponse {
             "max_tokens": "Ceiling on the reply. NOT the context window - setting this to the model's full window makes the provider reserve that budget up front and refuse the request on a small balance.",
             "context_window": "How much the model holds at once. Drives the context meter only.",
             "temperature": "Blank means the model's own default.",
-            "timeout_secs": "Give up and fall through to the next provider."
+            "timeout_secs": "Give up and fall through to the next provider.",
+            "stream": "Ask for the answer as a stream. aicredits.in cuts any non-streamed request off at ~30s wall clock and returns a bare 500 - streamed, the same work runs for minutes. Leave this on unless a provider streams badly.",
+            "retries": "Extra attempts against this same provider before falling through to the next."
         }
     }))
 }

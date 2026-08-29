@@ -1199,7 +1199,12 @@ function renderProviders(){
     'the cap limits the <i>answer</i>, and setting it to the full window makes the provider reserve '+
     'that whole budget up front and refuse the request on a small balance. The context length is only '+
     'measured against &mdash; it drives the meter in the top bar. '+
-    '<b>Temperature</b> and <b>top_p</b> left blank are omitted from the request, so the model uses its own.</p>'+
+    '<b>Temperature</b> and <b>top_p</b> left blank are omitted from the request, so the model uses its own.<br>'+
+    '<b>Leave stream on.</b> Measured against aicredits.in: a non-streamed request is cut off at '+
+    '~30 seconds of wall clock and comes back <code>500 Internal Server Error</code> &mdash; whether '+
+    'those 30s went on a big prompt or a long answer. Streamed, the same work ran for minutes and '+
+    'finished. <b>Retries</b> cover the rest: a gateway hiccup is retried against the same provider '+
+    'before falling through to the next one.</p>'+
     '<div id="plist"></div>'+
     '<div class="savebar"><button class="btn" id="prsave">Save chain</button>'+
     '<button class="btn sec" id="pradd">Add provider</button><span id="prmsg"></span></div>';
@@ -1208,7 +1213,7 @@ function renderProviders(){
     collectProvs();
     provs.push({name:'new provider',base_url:'https://openrouter.ai/api/v1',
       api_key:'',model:'',max_tokens:4096,context_window:32000,
-      temperature:null,top_p:null,timeout_secs:180,enabled:true});
+      temperature:null,top_p:null,timeout_secs:180,retries:2,stream:true,enabled:true});
     drawProvs();
   };
   $('#prsave').onclick=async()=>{
@@ -1245,6 +1250,10 @@ function drawProvs(){
           '<input class="fin w4 f-topp" value="'+(p.top_p==null?'':p.top_p)+'" placeholder="auto"></label>'+
         '<label class="flab">timeout (s)'+
           '<input class="fin w4 f-to" value="'+(p.timeout_secs||180)+'"></label>'+
+        '<label class="flab">retries'+
+          '<input class="fin w4 f-rt" value="'+(p.retries==null?2:p.retries)+'"></label>'+
+        '<label class="flab">stream<span style="font-size:12px;color:var(--dim);padding-top:5px">'+
+          '<input type="checkbox" class="f-str" '+(p.stream!==false?'checked':'')+'> on</span></label>'+
         '<label class="flab" style="justify-content:flex-end"><span>&nbsp;</span>'+
           '<span style="font-size:12px;color:var(--dim)"><input type="checkbox" class="f-on" '+
           (p.enabled!==false?'checked':'')+'> enabled</span></label>'+
@@ -1298,7 +1307,8 @@ function collectProvs(){
       model:g('.f-model').value.trim(), api_key:g('.f-key').value,
       max_tokens:num('.f-max',4096), context_window:num('.f-ctx',32000),
       temperature:opt('.f-temp'), top_p:opt('.f-topp'),
-      timeout_secs:num('.f-to',180), enabled:g('.f-on').checked };
+      timeout_secs:num('.f-to',180), retries:num('.f-rt',2),
+      stream:g('.f-str').checked, enabled:g('.f-on').checked };
   });
 }
 

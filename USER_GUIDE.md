@@ -381,6 +381,14 @@ Each needs a base URL, an API key, and a model id. Then four settings:
 | **context length** | How much the model can hold at once. Only used by the meter. |
 | **temperature** / **top_p** | How loose the answers are. **Leave blank** and the model uses its own default — that's usually what you want. |
 | **timeout (s)** | How long to wait before giving up and trying the next provider. |
+| **retries** | How many times to try the same provider again after a hiccup. |
+| **stream** | **Leave this on.** See below. |
+
+**Stream is not a display preference — it's what stops your provider timing
+out.** aicredits.in kills any non-streamed request at ~30 seconds and returns
+`500 Internal Server Error`. Streamed, the same work runs for minutes and
+finishes. The one thing to know: this provider still buffers, so you won't see
+words appear one by one — you just stop losing long answers.
 
 **Reply cap and context length are not the same thing, and mixing them up costs
 you money.** The cap is the *answer* size. If you set it to the model's full
@@ -407,6 +415,18 @@ To find valid model ids: `cargo run -- models`.
 The SnareVec daemon idles out and shuts down. That's normal, not a fault. Open
 the SnareVec workbench to start it again. bluee will tell you when this is the
 problem rather than claiming it's broken.
+
+**`500 Internal Server Error` from the provider**
+Your provider cuts any request off at about **30 seconds** and returns this. It
+has nothing to do with your conversation — a tiny question with a long answer
+triggers it just as reliably as a big one.
+
+bluee now asks for answers as a **stream**, which keeps the connection alive and
+gets past that wall (measured: the same work went from a guaranteed 500 at 30s
+to finishing at 362s). It also **retries** a failed call twice before giving up.
+
+If you see this anyway: check that **stream** is still ticked on the Providers
+page. It should be on for every provider.
 
 **`402 Payment Required`**
 Your provider is out of credit, or too many requests are in flight at once.

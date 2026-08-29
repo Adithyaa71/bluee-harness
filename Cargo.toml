@@ -22,6 +22,8 @@ rusqlite = { version = "0.32", features = ["bundled"] }
 reqwest = { version = "0.12", default-features = false, features = [
     "json",
     "rustls-tls",
+    # Needed for SSE: this provider cuts any non-streamed request off at ~30s.
+    "stream",
 ] }
 rmcp = { version = "3.1", features = ["client", "transport-child-process"] }
 serde = { version = "1", features = ["derive"] }

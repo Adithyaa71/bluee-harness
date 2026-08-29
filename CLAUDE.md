@@ -431,6 +431,59 @@ Chat.
   line of the reply — and the artifact list reloads when the turn finishes, so
   something built appears without pressing refresh.
 
+**13. The `500 Internal Server Error` — DIAGNOSED AND FIXED. Root cause: the
+provider cuts every non-streamed request off at ~30 seconds of wall clock.**
+
+Reported as "it crawled a site, ran five searches, then died, and the next
+message died too". The error text was `all 1 provider(s) failed: … provider
+returned 500 Internal Server Error`, which says nothing.
+
+*What the log gave away:* both failures took **exactly 30 seconds** —
+20:16:41→20:17:11 and 20:18:38→20:19:08. Twice in a row to the second is a
+deadline, not a fault.
+
+*Measured against the live endpoint, not assumed:*
+
+| request | result |
+|---|---|
+| tiny prompt, short answer | 1.4s, 200 |
+| tiny prompt, **4000-token answer** | **30.4s, 500** — three for three |
+| the real failing request, 118 KB, 106 tools | 30.5s, 500 — three for three |
+| the same request, `stream: true` | **49.4s, 200** |
+| tiny prompt, 3000-word essay, `stream: true` | **362.8s, 200**, 20,306 chars |
+
+Every failure landed at 30.3–30.6s; every success came in under 30s. A *tiny*
+prompt with a long answer fails too, so **this was never about context size** —
+it is a wall-clock deadline on the whole request. The five searches only made it
+likely by making generation slow enough to cross the line.
+
+*Fix, in `src/llm.rs`:*
+- **`stream: true` by default.** This is not a UI nicety here — it is what makes
+  a long turn possible at all. Note the provider still buffers: on the 362s
+  request the first and last tokens arrived 0.1s apart at the very end. Nothing
+  is gained in responsiveness; what is gained is that the request survives.
+- **SSE reassembly is index-based**, because several tool calls in one turn
+  interleave their fragments, and the arguments arrive in pieces that must be
+  concatenated rather than replaced. Unparseable frames are skipped rather than
+  fatal — providers sprinkle keepalives through these streams and one unknown
+  line must not lose a turn.
+- **Transient failures retry against the same provider** before the chain falls
+  through. 5xx/429/timeout retry; 401 and 402 do not, since those will not fix
+  themselves. Errors now carry elapsed time and attempt number.
+- Both are per-provider settings on the Providers page, with `stream` an escape
+  hatch rather than a preference.
+
+*Verified through the harness, not just by curl:* a tool call round-tripped over
+streaming, three parallel tool calls came back with correct distinct ids and
+names, and a 55-second answer completed where the same shape used to 500. Four
+unit tests cover the reassembly against frames captured verbatim from the
+provider, including the split-arguments and `"content": null` cases.
+
+**Still true and still worth doing: cut the tool count.** The cost data makes it
+concrete — 106 tool schemas are **~18,300 prompt tokens on every single turn**,
+about **₹0.93–1.06 per call** before you have said anything. 30 tools costs
+₹0.28. This is now the top item.
+
 ### 4g. Desktop app, not a web page
 
 Requested, and correct: the dashboard should be a real local desktop
