@@ -1,0 +1,52 @@
+{
+  "servers": {
+    "kuzu_graph": {
+      "command": ".venv/Scripts/python.exe",
+      "args": [
+        "mcps/kuzu-graph/server.py"
+      ],
+      "env": {},
+      "enabled": true,
+      "$comment": "Graph memory (§4c). Owns its own kuzu database; no external daemon."
+    },
+    "snarevec": {
+      "command": ".venv/Scripts/python.exe",
+      "args": [
+        "C:/Users/adity/Desktop/blueeClaw/git/broswer extension/snarevec/pro/mcp/snarevec_mcp.py"
+      ],
+      "env": {},
+      "enabled": true,
+      "$comment": [
+        "Stateless stdio proxy in front of the SnareVec daemon on 127.0.0.1:8756.",
+        "It is stdlib-only, so it needs no venv packages and starts regardless.",
+        "IMPORTANT: the daemon idles out and is restarted from the SnareVec",
+        "workbench. When it is down this server still connects and still lists",
+        "tools, but tool CALLS fail. That is a runtime condition, not a config",
+        "error - see TOOLS.md (§5a) for how the assistant should handle it."
+      ]
+    },
+    "uacc": {
+      "command": "mcps/UACC/.venv/Scripts/python.exe",
+      "args": [
+        "-m",
+        "uacc_mcp.server"
+      ],
+      "env": {},
+      "enabled": true,
+      "$comment": [
+        "Pixel-level GUI control. Runs in its OWN venv (mcps/UACC/.venv), not",
+        "the harness venv, because UACC is written against mcp v1 (FastMCP)",
+        "while the kuzu server needs mcp v2 (MCPServer). Those cannot coexist",
+        "in one interpreter. Separate processes can have separate Pythons -",
+        "which is exactly what the MCP boundary buys us, and it matches what",
+        "UACC's own uacc-mcp.bat already expects (it looks for %~dp0.venv)."
+      ]
+    }
+  },
+  "$comment": [
+    "MCP servers the harness launches as child processes and speaks stdio to.",
+    "This is the seam that makes the harness language-agnostic (§2): these are",
+    "all Python, the harness is Rust, and neither cares.",
+    "Paths are relative to the repo root unless absolute."
+  ]
+}

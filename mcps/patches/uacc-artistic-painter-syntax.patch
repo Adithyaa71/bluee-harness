@@ -1,0 +1,34 @@
+diff --git a/uacc/actions/artistic_painter.py b/uacc/actions/artistic_painter.py
+index a6cbe6a..0a22abe 100644
+--- a/uacc/actions/artistic_painter.py
++++ b/uacc/actions/artistic_painter.py
+@@ -117,12 +117,23 @@ class ArtisticPainter:
+         structural_paths = raw_paths[:primary_count]
+         detail_paths = raw_paths[primary_count:]
+ 
+-            if is_facial:
+-                face_feature_paths.append(p)
+-            elif plen >= min(img_w, img_h) * 0.12:
+-                structural_paths.append(p)
+-            else:
+-                detail_paths.append(p)
++        # --- PATCHED LOCALLY (see mcps/patches/README.md) -------------------
++        # Upstream ships an orphaned `if is_facial:` block here whose enclosing
++        # `for` loop was lost in a bad merge. This file is a SyntaxError in
++        # EVERY upstream commit that has ever touched it, so uacc_mcp.server
++        # cannot import at all - which takes the whole 68-tool server down.
++        #
++        # The orphaned block is removed so the module parses, and
++        # face_feature_paths is defined so the .sort() below and the loop
++        # further down do not NameError.
++        #
++        # The per-path facial/structural classification that block implemented
++        # is deliberately NOT reconstructed - that would be guessing at
++        # upstream intent. Only the length-based split above is in effect, so
++        # facial-feature prioritisation in ArtisticPainter is inert. That
++        # affects MS Paint drawing only, not any GUI-control tool we use.
++        face_feature_paths = []
++        # --- end local patch ------------------------------------------------
+ 
+         # Sort structural paths by length (longest first)
+         structural_paths.sort(key=lambda p: path_length(p), reverse=True)

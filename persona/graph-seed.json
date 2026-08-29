@@ -1,0 +1,40 @@
+{
+  "$comment": [
+    "Known facts seeded into the graph (§5a).",
+    "",
+    "This is a FILE, not a one-off write, because the reducer clears and",
+    "rebuilds the graph on every run - anything written directly would be",
+    "erased on the next `reduce`. The reducer replays this after rebuilding,",
+    "so seeds survive and the graph stays a pure function of (event log + this",
+    "file). Add facts here, not with upsert_entity.",
+    "",
+    "Only verified facts. An empty graph beats a confident wrong one."
+  ],
+
+  "entities": [
+    { "name": "Adithya",       "kind": "person" },
+    { "name": "bluee",         "kind": "assistant" },
+    { "name": "Grey",          "kind": "machine" },
+    { "name": "Pi 5",          "kind": "machine" },
+    { "name": "bluee harness", "kind": "project" },
+    { "name": "SnareVec",      "kind": "project" },
+    { "name": "plain English", "kind": "preference" },
+    { "name": "single binary", "kind": "preference" }
+  ],
+
+  "relations": [
+    { "source": "bluee",         "target": "Grey",          "relation": "part_of", "weight": 1 },
+    { "source": "bluee harness", "target": "Adithya",       "relation": "part_of", "weight": 1 },
+    { "source": "SnareVec",      "target": "Adithya",       "relation": "part_of", "weight": 1 },
+    { "source": "Grey",          "target": "Adithya",       "relation": "part_of", "weight": 1 },
+    { "source": "Pi 5",          "target": "Adithya",       "relation": "part_of", "weight": 1 },
+
+    { "source": "Adithya",       "target": "plain English", "relation": "prefers", "weight": 1 },
+    { "source": "Adithya",       "target": "single binary", "relation": "prefers", "weight": 1 },
+
+    { "source": "snarevec",      "target": "SnareVec",      "relation": "part_of", "weight": 1 },
+    { "source": "uacc",          "target": "bluee harness", "relation": "part_of", "weight": 1 },
+    { "source": "kuzu_graph",    "target": "bluee harness", "relation": "part_of", "weight": 1 },
+    { "source": "harness",       "target": "bluee harness", "relation": "part_of", "weight": 1 }
+  ]
+}
