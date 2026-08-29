@@ -10,24 +10,57 @@ right and this is stale; tell me and I'll fix it.
 
 ## Starting it
 
-```bash
-cargo run -- app
+**Double-click `bluee` on your desktop.** That's it.
+
+If the shortcut ever goes missing, `bluee-app.vbs` in the project folder does
+the same thing, and you can make a new shortcut to it.
+
+### From a terminal
+
+`bluee.cmd` is in the project folder. It works from anywhere and passes
+everything through:
+
+```bat
+"D:\Conceptual Project ~ clgluee.cmd"
 ```
 
-That opens the desktop window. It's the normal way to use bluee.
+Or `cd` in first and just type `bluee`:
 
-Other entry points, all the same program:
+```bat
+cd /d "D:\Conceptual Project ~ clg"
+bluee                    :: desktop app (same as the shortcut)
+bluee dash               :: in a browser instead, http://127.0.0.1:7777
+bluee chat               :: plain terminal chat, no UI
+bluee reduce             :: rebuild memory from the logs
+bluee search "daemon"    :: search memory
+bluee log                :: print the last session's raw trace
+bluee tools              :: list every connected tool
+bluee models             :: list model ids your provider offers
+```
 
-| Command | What it does |
-|---|---|
-| `cargo run -- app` | desktop window (what you want) |
-| `cargo run -- dash` | same thing in a browser at `http://127.0.0.1:7777` |
-| `cargo run -- chat` | plain terminal chat, no UI |
-| `cargo run -- reduce` | rebuild memory from the logs |
-| `cargo run -- search "..."` | search memory from the terminal |
-| `cargo run -- log` | print the last session's raw trace |
-| `cargo run -- tools` | list every connected tool |
-| `cargo run -- models` | list model ids your provider offers |
+PowerShell is the same, but call it with `&` because of the spaces in the path:
+
+```powershell
+cd "D:\Conceptual Project ~ clg"
+.luee.cmd
+.luee.cmd chat
+```
+
+### After changing the code
+
+The launcher runs a compiled binary, so rebuild first:
+
+```bat
+cargo build --release
+```
+
+`cargo run -- app` still works too — it just rebuilds every time, which is
+slower to start.
+
+**Why a launcher rather than the raw `.exe`:** bluee looks for `.venv`,
+`mcps/`, `persona/`, `skills/` and `data/` relative to the project folder. The
+launcher `cd`s there first. Running the `.exe` directly from somewhere else
+will start but find nothing.
 
 Nothing is exposed to the internet. It listens on `127.0.0.1` only, and the
 desktop app picks a random port each launch.
