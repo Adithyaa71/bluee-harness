@@ -1,24 +1,19 @@
--- One code-intelligence question, asked and answered, then exit.
+-- One code-intelligence question, answered against the LIVE Neovim.
 --
--- Run as: nvim --headless -u <nvimrc/init.lua> -l query.lua <json-args>
+-- Loaded once by init.lua and called per query, rather than run as a one-shot
+-- script. That is the whole point: a fresh Neovim per question throws away
+-- rust-analyzer's index every time, and indexing a Rust workspace is minutes.
+-- Keeping one server alive makes the first question slow and the rest fast.
 --
--- One-shot rather than a long-lived RPC server on purpose: talking to a running
--- Neovim needs pynvim or a msgpack implementation, and this harness should not
--- gain a dependency to ask a question. The cost is a language-server cold start
--- per query; the answer reports how long it took so that cost is visible rather
--- than mysterious.
+-- Returns a table; the caller encodes it. Nothing here exits Neovim.
 
-local ok, args = pcall(vim.json.decode, _G.arg[1] or '{}')
-if not ok then
-  io.stdout:write(vim.json.encode({ error = 'bad arguments' }))
-  return
-end
-
+return function(args)
 local started = vim.uv.hrtime()
+local result = nil
 local function finish(payload)
   payload.secs = tonumber(string.format('%.1f', (vim.uv.hrtime() - started) / 1e9))
-  io.stdout:write(vim.json.encode(payload))
-  vim.cmd('qa!')
+  result = payload
+  return payload
 end
 
 local path = args.path
@@ -54,9 +49,36 @@ if not waited then
   })
 end
 
--- Settle: give the server a moment past attach for initial indexing. Polling
--- for "not busy" is not portable across servers, so this waits for the request
--- to stop coming back empty instead, up to the same deadline.
+-- Wait for indexing to finish before asking.
+--
+-- Attachment is not readiness: rust-analyzer attaches in a second and then
+-- indexes the dependency graph for minutes on a cold cache, answering every
+-- request with an empty list meanwhile. An empty list reads as "nothing calls
+-- this", which is worse than waiting - so wait on the server's own progress
+-- reports instead of guessing. vim.lsp.status() is '' exactly when no client
+-- has work outstanding.
+local uses_ra = false
+for _, c in ipairs(vim.lsp.get_clients({ bufnr = buf })) do
+  if c.name == 'rust_analyzer' then uses_ra = true end
+end
+
+local idle_since = nil
+vim.wait(deadline, function()
+  -- rust-analyzer says so itself; everything else is judged by its progress
+  -- reports going quiet for a stretch.
+  if uses_ra then return _G.BLUEE_RA_READY == true end
+  if vim.lsp.status() ~= '' then
+    idle_since = nil
+    return false
+  end
+  -- Progress reports arrive in bursts with gaps between them, and the first
+  -- gap is not the end.
+  idle_since = idle_since or vim.uv.hrtime()
+  return (vim.uv.hrtime() - idle_since) > 1.5e9
+end, 200)
+
+local ready = uses_ra and (_G.BLUEE_RA_READY == true) or (vim.lsp.status() == '')
+
 local method = args.method or 'textDocument/references'
 local line = (args.line or 1) - 1
 local col = args.col or 0
@@ -75,19 +97,23 @@ local function request()
   return vim.lsp.buf_request_sync(buf, method, params, 20000)
 end
 
-local responses
-local settle = vim.uv.hrtime() + deadline * 1e6
-repeat
-  responses = request()
-  local any = false
-  for _, r in pairs(responses or {}) do
+-- One retry after a pause, in case the server was mid-flight when we asked.
+-- Not a loop until non-empty: that turns "genuinely zero references" into a
+-- full-timeout wait and then reports the same empty answer anyway.
+local responses = request()
+local function empty(rs)
+  for _, r in pairs(rs or {}) do
     if r.result and (type(r.result) ~= 'table' or next(r.result) ~= nil) then
-      any = true
+      return false
     end
   end
-  if any then break end
-  vim.wait(500)
-until vim.uv.hrtime() > settle
+  return true
+end
+if empty(responses) then
+  vim.wait(2000)
+  responses = request()
+end
+local still_busy = not ready
 
 -- Shape the answer. Locations become file:line plus the source line itself,
 -- because a bare file:line tells a model nothing and it would have to read
@@ -148,4 +174,13 @@ finish({
   results = out,
   filetype = ft,
   method = method,
+  -- Told plainly rather than left to look like a real zero: an empty answer
+  -- from a server that is still indexing means "ask again", not "no callers".
+  indexing = still_busy or nil,
+  note = (#out == 0 and still_busy)
+      and 'The language server was still indexing, so this is not a reliable '
+       .. 'zero - ask again in a minute.' or nil,
 })
+
+return result
+end

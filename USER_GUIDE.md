@@ -200,19 +200,20 @@ Grep finds the word `run` in forty files — a language server finds the seven
 that call **this** `run`. Ask "what breaks if I change this function" and bluee
 uses `find_references`.
 
-Neovim is installed. Each language needs its own server, and bluee checks by
-actually running them rather than just looking on PATH:
+Neovim and rust-analyzer are both installed and working. Real numbers from
+your own repo, asking what calls `roots::pretty`:
 
 ```
-rustup component add rust-analyzer
+first call   28s   (rust-analyzer indexes the workspace)
+after that  ~0s   (Neovim stays alive and keeps the index)
+answer       6 call sites, with the source line of each
 ```
 
-Right now that one is a rustup *stub* — present but broken — and `lsp_status`
-says so instead of pretending. Run that command when your network is back.
+The resolution is the point. Asking what calls `system::run` gives 4 real
+callers and does **not** match `reduce::run` — grep would have returned both.
 
-These calls are slow (a language server has to start and index), so bluee
-reaches for memory and `read_source` first and uses the LSP when it genuinely
-needs resolution.
+Other languages need their own server; `lsp_status` lists what works and how to
+add the rest, and it checks by *running* each one rather than trusting PATH.
 
 **It cannot edit itself.** Reading is on; writing is not. That's the
 prerequisite for the self-editing you want later, not the thing itself - turning

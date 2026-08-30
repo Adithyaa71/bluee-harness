@@ -23,6 +23,20 @@ local servers = {
     cmd = { 'rust-analyzer' },
     filetypes = { 'rust' },
     root_markers = { 'Cargo.toml', 'rust-project.json', '.git' },
+    -- rust-analyzer will tell us when it has actually finished loading the
+    -- workspace, if asked. Without this the only readiness signal is progress
+    -- reports, which go quiet between phases - and asking during a gap returns
+    -- an empty list that reads as "nothing calls this". That false zero is far
+    -- worse than a wait, so take the real signal.
+    capabilities = {
+      experimental = { serverStatusNotification = true },
+    },
+    handlers = {
+      ['experimental/serverStatus'] = function(_, res)
+        _G.BLUEE_RA_READY = res and res.quiescent or false
+        return true
+      end,
+    },
     settings = {
       ['rust-analyzer'] = {
         -- The harness asks structural questions; running clippy on every query
@@ -78,3 +92,29 @@ end
 -- Readable from the query script, so "no answer" can distinguish "no language
 -- server installed for this filetype" from "the server had nothing to say".
 _G.BLUEE_LSP_ENABLED = enabled
+
+-- ---------------------------------------------------------------------------
+-- The query entry point, for the persistent-server mode.
+--
+-- Arguments go in via a file and the answer comes out via a file, rather than
+-- being threaded through `--remote-expr` as a quoted string. Quoting JSON
+-- through a shell, into Vimscript, into Lua, is three escaping layers and every
+-- one of them is a bug waiting to happen; two temp files are not.
+local here = debug.getinfo(1, 'S').source:sub(2):gsub('[^/\\]+$', '')
+local run = dofile(here .. 'query.lua')
+
+function _G.bluee_query_file(inpath, outpath)
+  local ok, res = pcall(function()
+    local raw = table.concat(vim.fn.readfile(inpath), '\n')
+    return run(vim.json.decode(raw))
+  end)
+  if not ok then
+    res = { error = tostring(res) }
+  end
+  vim.fn.writefile({ vim.json.encode(res or { error = 'no result' }) }, outpath)
+  return 'ok'
+end
+
+-- Something to poll for: the pipe answering proves Neovim is up, and this
+-- proves the config finished loading.
+_G.BLUEE_READY = true
