@@ -26,3 +26,6 @@ __pycache__/
 #   mcps/UACC, reference/RustFox, reference/friday-tony-stark-demo
 /mcps/UACC/
 /reference/
+
+# UI check screenshots - regenerated on demand by dev/uicheck.mjs
+dev/shots/

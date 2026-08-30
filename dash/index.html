@@ -168,10 +168,10 @@ body{background:var(--bg);color:var(--ink);overflow:hidden;
 .acard .au{color:var(--faint);font-size:10.5px;font-family:var(--mono);margin-top:8px}
 #aview{display:none;flex:1;min-height:0;flex-direction:column}
 #aview.on{display:flex}
-#abar{display:flex;align-items:center;gap:10px;padding:0 14px;height:40px;flex:none;
+.abar{display:flex;align-items:center;gap:10px;padding:0 14px;height:40px;flex:none;
   background:var(--panel);border-bottom:1px solid var(--line)}
-#abar .an{font-size:13px;font-weight:600}
-#abar .am{font-family:var(--mono);font-size:11px;color:var(--faint)}
+.abar .an{font-size:13px;font-weight:600}
+.abar .am{font-family:var(--mono);font-size:11px;color:var(--faint)}
 #aframe{flex:1;border:0;width:100%;background:#0f1116}
 #pgask{flex:none;border-top:1px solid var(--line);background:var(--panel);padding:10px 16px}
 #pgask .pgrow{display:flex;gap:8px;align-items:flex-end;max-width:900px;margin:0 auto}
@@ -379,6 +379,16 @@ body{background:var(--bg);color:var(--ink);overflow:hidden;
 #pgfiles{width:250px;flex:none;border-right:1px solid var(--line);
   display:flex;flex-direction:column;background:var(--panel);min-height:0}
 #pgfiles.hide{display:none}
+#pgdrag{width:5px;flex:none;cursor:ew-resize;background:transparent;
+  transition:background .12s;margin-left:-3px;z-index:2}
+#pgdrag:hover,#pgdrag.on{background:var(--accent)}
+#pgfiles.hide + #pgdrag{display:none}
+#pgshow{display:none;position:absolute;left:8px;top:56px;z-index:5;
+  width:24px;height:24px;border-radius:6px;border:1px solid var(--line);
+  background:var(--panel2);color:var(--dim);cursor:pointer;font-size:11px}
+#pgshow:hover{color:var(--ink);border-color:var(--accent)}
+#pgwrap.collapsed #pgshow{display:block}
+#v-play{position:relative}
 .pgf-head{display:flex;align-items:center;gap:6px;padding:8px 10px;flex:none;
   border-bottom:1px solid var(--line)}
 .pgf-head .t{font-size:11.5px;color:var(--faint);font-family:var(--mono);flex:1}
@@ -491,16 +501,18 @@ body{background:var(--bg);color:var(--ink);overflow:hidden;
         <div id="pgfiles">
           <div class="pgf-head">
             <span class="t">FILES</span>
-            <button class="win-btn" id="pgfnew" title="Open the folder on disk">&#8599;</button>
             <button class="win-btn" id="pgfrel" title="Refresh">&#8635;</button>
+            <button class="win-btn" id="pgfhide" title="Collapse the panel">&#10094;</button>
           </div>
           <div class="pgf-wrap"><input id="pgfilter" placeholder="Filter files…"></div>
           <div id="pgtree"></div>
         </div>
+        <div id="pgdrag" title="Drag to resize"></div>
+        <button id="pgshow" title="Show files">&#10095;</button>
         <div id="pgmain">
       <div id="playbody"></div>
       <div id="pgview">
-        <div id="abar">
+        <div class="abar" id="pgbar">
           <button class="ghost" id="pgback">&larr; all</button>
           <span class="an" id="pgname"></span>
           <span class="am" id="pgmeta"></span>
@@ -513,7 +525,7 @@ body{background:var(--bg);color:var(--ink);overflow:hidden;
                 sandbox="allow-scripts allow-forms allow-popups"></iframe>
       </div>
       <div id="aview">
-        <div id="abar">
+        <div class="abar" id="abar">
           <button class="ghost" id="aback">&larr; all</button>
           <span class="an" id="aname"></span>
           <span class="am" id="ameta"></span>
@@ -1431,7 +1443,11 @@ async function loadPlayground(){
   $$('#topics .tchip').forEach(c=>c.onclick=()=>{ topicFilter=c.dataset.t||null; loadPlayground(); });
 
   const list=topicFilter?artifacts.filter(a=>a.topic===topicFilter):artifacts;
-  $('#aview').classList.remove('on'); $('#playbody').style.display='';
+  // Reloading after a turn used to force the card list back on top of whatever
+  // file you had open, which reads exactly like the file closing itself.
+  const viewingFile=$('#pgview').classList.contains('on');
+  $('#aview').classList.remove('on');
+  if(!viewingFile) $('#playbody').style.display='';
   if(!list.length){
     $('#playbody').innerHTML=`<div class="empty">
       <h2>Playground</h2>
@@ -1464,9 +1480,42 @@ $('#aback').onclick=()=>{ $('#aview').classList.remove('on'); $('#playbody').sty
 $('#pgback').onclick=()=>{ $('#pgview').classList.remove('on'); $('#playbody').style.display='';
   filePick=null; renderTree(); };
 $('#pgfrel').onclick=loadFiles;
-$('#pgfnew').onclick=()=>window.open('/api/files','_blank');
-$('#pgtoggle').onclick=()=>{ $('#pgfiles').classList.toggle('hide');
-  $('#pgtoggle').classList.toggle('on'); };
+function setFiles(open){
+  $('#pgfiles').classList.toggle('hide',!open);
+  $('#pgwrap').classList.toggle('collapsed',!open);
+  $('#pgtoggle').classList.toggle('on',open);
+  try{ localStorage.setItem('bluee.files', open?'1':'0'); }catch(_){}
+}
+const filesOpen=()=>!$('#pgfiles').classList.contains('hide');
+$('#pgtoggle').onclick=()=>setFiles(!filesOpen());
+$('#pgfhide').onclick=()=>setFiles(false);
+$('#pgshow').onclick=()=>setFiles(true);
+try{ if(localStorage.getItem('bluee.files')==='0') setFiles(false); else setFiles(true); }
+catch(_){ setFiles(true); }
+
+/* Drag the divider to resize. Width is remembered, because re-widening a panel
+   every time you open the page is the kind of small friction that makes a tool
+   annoying to live with. */
+(function(){
+  const bar=$('#pgdrag'), panel=$('#pgfiles');
+  try{ const w=localStorage.getItem('bluee.fileswidth'); if(w) panel.style.width=w+'px'; }catch(_){}
+  bar.addEventListener('mousedown',e=>{
+    e.preventDefault();
+    const sx=e.clientX, sw=panel.getBoundingClientRect().width;
+    bar.classList.add('on');
+    const move=ev=>{
+      const w=Math.min(560,Math.max(150,sw+ev.clientX-sx));
+      panel.style.width=w+'px';
+    };
+    const up=()=>{
+      bar.classList.remove('on');
+      try{ localStorage.setItem('bluee.fileswidth',
+        Math.round(panel.getBoundingClientRect().width)); }catch(_){}
+      removeEventListener('mousemove',move); removeEventListener('mouseup',up);
+    };
+    addEventListener('mousemove',move); addEventListener('mouseup',up);
+  });
+})();
 $('#pgfilter').addEventListener('input',renderTree);
 $('#pgsrc').onclick=()=>{
   const b=$('#pgsrc');
@@ -1991,10 +2040,26 @@ function renderTree(){
     const path = node.dataset.p, isDir = node.dataset.d === '1';
     node.querySelector('.del').onclick = ev => { ev.stopPropagation(); deleteFile(path, node, isDir); };
     node.onclick = () => {
-      if (isDir) { fileOpen[path] = fileOpen[path] === false; renderTree(); }
-      else openFile(path);
+      if (!isDir) { openFile(path); return; }
+      fileOpen[path] = fileOpen[path] === false;
+      renderTree();
+      // A folder in here is an artifact. Clicking it should show the artifact,
+      // not just fold a row open - "I clicked it and nothing happened" is the
+      // whole complaint.
+      const kids = findNode(path)?.children || [];
+      const index = kids.find(c => /^index\.html?$/i.test(c.name));
+      if (index) openFile(index.path);
     };
   });
+}
+
+function findNode(path, nodes){
+  for (const n of (nodes || fileTree)) {
+    if (n.path === path) return n;
+    const hit = findNode(path, n.children || []);
+    if (hit) return hit;
+  }
+  return null;
 }
 
 async function openFile(path){

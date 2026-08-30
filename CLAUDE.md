@@ -617,6 +617,46 @@ time.
 present, filter narrows correctly (`meta` → the folder plus `meta.json`), and
 pan/zoom re-render costs **0–1ms** per frame.
 
+**17. A real browser in the loop — `dev/uicheck.mjs`.** The reason UI bugs kept
+reaching the owner: every check so far ran against a **DOM stub**. A stub proves
+the code executes. It cannot tell you a click does nothing, a panel has zero
+height, or an element paints off screen — which is exactly the class of bug he
+kept finding by hand.
+
+This drives **headless Chrome over CDP**, so a click is a click and a screenshot
+is the page. It needs nothing installed: Chrome ships with Windows and CDP is
+plain WebSocket, which node has built in. It opens the dashboard, walks the
+pages, exercises the controls, saves screenshots to `dev/shots/`, and fails on
+any console error.
+
+**Found and fixed by it:**
+- **Duplicate `id="abar"`** — the artifact bar was copied into the file preview,
+  so `querySelector('#abar')` silently picked whichever came first.
+- **`loadPlayground()` clobbered an open file.** It reset the card list to
+  visible on every refresh, including the one after each turn — which reads
+  exactly like the file closing itself, and is the likeliest cause of "can't
+  open a file".
+- **Clicking a folder only folded it open.** A folder in this panel *is* an
+  artifact, so a click now also opens its `index.html`. "I clicked it and
+  nothing happened" was a fair description of the old behaviour.
+
+**Files panel is collapsible and resizable**, as asked: a chevron collapses it
+to a reopen button, the divider drags between 150 and 560px, and both the state
+and the width persist in `localStorage` — re-widening a panel on every visit is
+the small friction that makes a tool tiring to live with.
+
+**Verified in the real browser, not a stub:**
+
+```
+click file   -> pgview.on=true  iframe 796x608  src=/artifacts/.../index.html
+collapse     -> panel width=0, reopen button visible
+reopen       -> panel width=250
+resize       -> 250px -> 370px
+folder click -> opens trading-ticker-board/index.html
+source view  -> 4798 chars, visible
+console errors: none
+```
+
 ### 4g. Desktop app, not a web page
 
 Requested, and correct: the dashboard should be a real local desktop
