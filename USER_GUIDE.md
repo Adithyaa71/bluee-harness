@@ -211,9 +211,17 @@ To ask memory something directly, use the **Memory** page. To see the shape of
 what it knows, use the **Graph** page.
 
 **The Graph page:** scroll to zoom, drag to move, double-click to fit it all
-back on screen, hover a dot to name it. Labels appear as you zoom in — at 1,013
-entities everything at once is unreadable, so detail arrives when you go
-looking for it.
+back on screen, hover a dot to name it. Labels appear as you zoom in.
+
+**The coloured chips under the graph are filters** — click one to show or hide
+that kind. **`symbol` and `file` start hidden**, and that's deliberate: indexing
+bluee's own source added 837 symbols and 119 files, which is 94% of the graph.
+Drawn together they bury the part you actually want — you, your machines, your
+projects, your tools. With them off you get about 57 things and can read every
+label. Click `symbol` to pull the code back in when you want it.
+
+The count always tells you what's hidden ("57 of 1013 · 956 hidden"), so you're
+never looking at part of the graph thinking it's all of it.
 
 ---
 

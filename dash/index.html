@@ -137,6 +137,12 @@ body{background:var(--bg);color:var(--ink);overflow:hidden;
 .hit .mt{font-family:var(--mono);font-size:11px;color:var(--faint);margin-left:8px}
 .hit pre{font-size:12px;color:var(--dim);white-space:pre-wrap;margin-top:8px}
 #gcv{flex:1;width:100%;background:var(--bg);display:block;min-height:0}
+.gk{display:inline-block;margin:3px 10px 0 0;padding:2px 8px;border-radius:11px;
+  border:1px solid var(--line);cursor:pointer;user-select:none;color:var(--dim);
+  transition:background .12s,color .12s,border-color .12s}
+.gk:hover{border-color:var(--accent);color:var(--ink)}
+.gk.off{opacity:.5;text-decoration:line-through}
+.gk i{font-style:normal;color:var(--faint);font-family:var(--mono);font-size:10px}
 #glegend{padding:8px 16px;color:var(--faint);font-size:11.5px;
   border-top:1px solid var(--line);background:var(--panel);flex:none}
 
@@ -602,7 +608,9 @@ $$('.rb[data-page]').forEach(b=>b.onclick=()=>{
   $$('.rb[data-page]').forEach(x=>x.classList.remove('on'));
   $$('.view').forEach(x=>x.classList.remove('on'));
   b.classList.add('on'); $('#v-'+b.dataset.page).classList.add('on');
-  if(b.dataset.page==='graph') requestAnimationFrame(drawGraph);
+  // Wrapped: rAF passes a timestamp, which drawGraph would read as `force`
+  // and re-fetch the whole graph on every visit to the page.
+  if(b.dataset.page==='graph') requestAnimationFrame(()=>drawGraph());
   if(b.dataset.page==='play'){ loadPlayground(); loadFiles(); }
   if(b.dataset.page==='set') loadSettings();
   if(b.dataset.page==='sess') loadSessions();
@@ -1536,6 +1544,20 @@ const gColor=k=>({server:'#e0b341',tool:'#5b9dff',person:'#f2695c',machine:'#c07
 /* Repulsion through a uniform grid: only nodes in neighbouring cells push on
    each other. Every pair would be a million comparisons per step here; this is
    linear in practice and the picture is indistinguishable. */
+/* Tuned by sweeping against the real graph, not by eye. These put the fit
+   scale around 0.5 - close enough to the 0.85 label threshold that one zoom
+   step makes names readable. */
+const GC={push:2000,pull:0.006,vmax:26,link:70,stiff:0.02};
+
+/* Kinds hidden by default.
+   Indexing the repo added 837 `symbol` and 119 `file` nodes, which is 94% of
+   the graph and 1008 of 1179 edges. Drawn together they bury the part you
+   actually came to look at - you, your machines, projects, tools, preferences -
+   and the sweep showed 70-80% of nodes overlapping at EVERY parameter setting,
+   so this is a density problem no constant fixes. Code is one click away
+   instead of on top of everything. */
+const G_HIDDEN_BY_DEFAULT=['symbol','file'];
+let gHide=new Set(G_HIDDEN_BY_DEFAULT);
 function gLayout(N,E,W,H){
   const R=Math.max(W,H)*0.45, CELL=90;
   N.forEach((n,i)=>{
@@ -1560,18 +1582,26 @@ function gLayout(N,E,W,H){
           if(m===n) continue;
           const ax=n.x-m.x, ay=n.y-m.y, d2=ax*ax+ay*ay||0.01;
           if(d2>CELL*CELL*4) continue;
-          const di=Math.sqrt(d2), f=1800/d2;
+          const di=Math.sqrt(d2), f=GC.push/d2;
           n.vx+=ax/di*f; n.vy+=ay/di*f;
         }
       }
-      n.vx+=(W/2-n.x)*0.0012; n.vy+=(H/2-n.y)*0.0012;
+      n.vx+=(W/2-n.x)*GC.pull; n.vy+=(H/2-n.y)*GC.pull;
     }
     for(const e of E){
       const a=N[gIndex[e.source]], b=N[gIndex[e.target]];
-      const dx=b.x-a.x, dy=b.y-a.y, di=Math.hypot(dx,dy)||1, f=(di-70)*0.02;
+      const dx=b.x-a.x, dy=b.y-a.y, di=Math.hypot(dx,dy)||1, f=(di-GC.link)*GC.stiff;
       a.vx+=dx/di*f; a.vy+=dy/di*f; b.vx-=dx/di*f; b.vy-=dy/di*f;
     }
-    for(const n of N){ n.x+=n.vx*0.4; n.y+=n.vy*0.4; n.vx*=0.80; n.vy*=0.80; }
+    // Velocity clamp. Without it a node in a dense cluster gets a huge kick,
+    // escapes the grid cutoff where nothing pulls it back, and drags the whole
+    // extent with it - which is how the first version reached 66,000 units
+    // across and made "fit" mean 0.011x.
+    for(const n of N){
+      const v=Math.hypot(n.vx,n.vy);
+      if(v>GC.vmax){ n.vx*=GC.vmax/v; n.vy*=GC.vmax/v; }
+      n.x+=n.vx*0.4; n.y+=n.vy*0.4; n.vx*=0.80; n.vy*=0.80;
+    }
   }
 }
 
@@ -1664,18 +1694,45 @@ async function drawGraph(force){
     gLaidOut=false;
   }
   if(!gLaidOut){
-    gNodes=(gData.nodes||[]).map(n=>({...n}));
+    gNodes=(gData.nodes||[]).filter(n=>!gHide.has(n.kind)).map(n=>({...n}));
     gIndex=Object.fromEntries(gNodes.map((n,i)=>[n.name,i]));
     gEdges=(gData.edges||[]).filter(e=>gIndex[e.source]!=null&&gIndex[e.target]!=null);
     if(gNodes.length){ gLayout(gNodes,gEdges,W,H); gFit(W,H); }
     gLaidOut=true;
-    const kinds=[...new Set(gNodes.map(n=>n.kind))].sort();
-    $('#glegend').innerHTML=
-      '<b>'+gNodes.length+'</b> entities &middot; <b>'+gEdges.length+'</b> relations '+
-      '<span class="ghint">scroll to zoom &middot; drag to move &middot; double-click to fit</span><br>'+
-      kinds.map(x=>'<span style="color:'+gColor(x)+'">&#9679;</span> '+esc(x)).join('&nbsp; ');
+    gLegend();
   }
   gRender();
+}
+
+/* The legend IS the filter - clicking a kind shows or hides it and re-lays out.
+   Hidden kinds are dimmed and struck through so it is obvious something is
+   being left out, rather than the view quietly being partial. */
+function gLegend(){
+  const all=gData.nodes||[];
+  const counts={};
+  for(const n of all) counts[n.kind]=(counts[n.kind]||0)+1;
+  const kinds=Object.keys(counts).sort((a,b)=>counts[b]-counts[a]);
+  const hiddenTotal=all.length-gNodes.length;
+
+  $('#glegend').innerHTML=
+    '<b>'+gNodes.length+'</b> of '+all.length+' entities &middot; '+
+    '<b>'+gEdges.length+'</b> relations '+
+    (hiddenTotal?'<span style="color:var(--faint)">&middot; '+hiddenTotal+' hidden</span> ':'')+
+    (gData.truncated?'<span style="color:var(--warm)">&middot; truncated at '+gData.limit+'</span> ':'')+
+    '<span class="ghint">scroll to zoom &middot; drag to move &middot; double-click to fit</span><br>'+
+    kinds.map(k=>{
+      const off=gHide.has(k);
+      return '<span class="gk'+(off?' off':'')+'" data-k="'+esc(k)+'">'+
+        '<span style="color:'+(off?'#4a5262':gColor(k))+'">&#9679;</span> '+
+        esc(k)+' <i>'+counts[k]+'</i></span>';
+    }).join('');
+
+  $$('#glegend .gk').forEach(chip=>chip.onclick=()=>{
+    const k=chip.dataset.k;
+    if(gHide.has(k)) gHide.delete(k); else gHide.add(k);
+    gLaidOut=false;
+    drawGraph();
+  });
 }
 
 /* Pan and zoom. Zoom is anchored at the cursor, so whatever you are pointing at

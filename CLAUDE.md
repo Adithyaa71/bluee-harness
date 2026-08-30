@@ -568,6 +568,55 @@ Verified live: `../providers.json` and `..` both rejected. Two model-facing
 tools, `list_files` and `delete_file`, share exactly that path; verified end to
 end by having the model list the folder and delete a throwaway directory.
 
+**16. Checked the Graph and Playground against live data — three real bugs.**
+
+Asked to open the app and look, which turned up things the API-level checks had
+not.
+
+**(a) The Graph page was showing 100 of 1,013 entities.** `cypher()` on the
+graph server defaults to `limit: 100` and `/api/graph` never passed one, so the
+page silently drew the first hundred — and truncated the *edges* separately, so
+many pointed at nodes that were not in the set and were dropped on the floor.
+Fixed by passing an explicit limit, and the response now carries `truncated` so
+a partial graph says so instead of looking complete.
+
+*This also corrects a claim made when the layout was rewritten.* The layout was
+genuinely quadratic, but at 100 nodes that is ~3.4M operations, not the ~350M
+quoted. It was slow, not fatal. The rewrite matters more now that the page draws
+the whole graph.
+
+**(b) The layout exploded, then collapsed.** Measured on real data: the first
+tuning spread 1,013 nodes across **66,126 x 49,078 units**, so "fit" meant
+**0.011x** — a dust cloud with no labels. Adding a velocity clamp fixed the
+runaway (a node kicked out of a dense cluster escaped the grid cutoff, where
+nothing pulled it back, and dragged the extent with it). Over-correcting then
+crammed everything into 545 units.
+
+Rather than keep guessing, the constants were **swept against the live graph**
+with targets: fit scale 0.20–0.55, and a count of nodes overlapping at fit.
+Result: `push 2000, pull 0.006, vmax 26`.
+
+**(c) The sweep found something tuning could not fix.** Crowding stayed at
+**70–80% at every parameter setting**. That is a density verdict, not a
+constants problem: indexing the repo added **837 `symbol` and 119 `file` nodes —
+94% of the graph, and 1,008 of 1,179 edges are `defined_in`**. The part worth
+looking at (person, machines, projects, tools, servers, preferences) was buried
+under its own source index.
+
+So **the legend became the filter**, with `symbol` and `file` hidden by default.
+Measured after: **57 nodes, 52 edges, fit scale 0.939 — above the label
+threshold, so all 57 names render.** Hidden kinds are struck through and the
+count says "57 of 1013 · 956 hidden", because a partial view that looks total is
+the bug from (a) in a different costume. One click puts the code back.
+
+**Also fixed:** `requestAnimationFrame(drawGraph)` passed the frame timestamp as
+the `force` argument, so opening the Graph page re-fetched the entire graph every
+time.
+
+**Playground verified against the live folder:** tree renders, delete controls
+present, filter narrows correctly (`meta` → the folder plus `meta.json`), and
+pan/zoom re-render costs **0–1ms** per frame.
+
 ### 4g. Desktop app, not a web page
 
 Requested, and correct: the dashboard should be a real local desktop

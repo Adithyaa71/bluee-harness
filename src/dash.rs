@@ -1316,7 +1316,14 @@ async fn graph(State(s): State<Shared>) -> Result<Json<Value>, (StatusCode, Json
         .call(
             "kuzu_graph",
             "cypher",
-            json!({ "query": "MATCH (e:Entity) RETURN e.name AS name, e.kind AS kind" }),
+            // The graph server's `cypher` defaults to limit 100. Without an
+            // explicit one the page silently showed the first 100 of 1,013
+            // entities - and truncated the edges separately, so many pointed at
+            // nodes that were not in the set and were dropped. Ask for the lot.
+            json!({
+                "query": "MATCH (e:Entity) RETURN e.name AS name, e.kind AS kind",
+                "limit": GRAPH_LIMIT,
+            }),
         )
         .await
         .map_err(fail)?;
@@ -1325,13 +1332,28 @@ async fn graph(State(s): State<Shared>) -> Result<Json<Value>, (StatusCode, Json
         .call(
             "kuzu_graph",
             "cypher",
-            json!({ "query": "MATCH (a:Entity)-[r:Rel]->(b:Entity) RETURN a.name AS source, b.name AS target, r.type AS type, r.weight AS weight" }),
+            json!({
+                "query": "MATCH (a:Entity)-[r:Rel]->(b:Entity) RETURN a.name AS source, b.name AS target, r.type AS type, r.weight AS weight",
+                "limit": GRAPH_LIMIT,
+            }),
         )
         .await
         .map_err(fail)?;
 
+    let n = nodes.get("rows").cloned().unwrap_or(json!([]));
+    let e = edges.get("rows").cloned().unwrap_or(json!([]));
+    let (nc, ec) = (n.as_array().map_or(0, |a| a.len()), e.as_array().map_or(0, |a| a.len()));
     Ok(Json(json!({
-        "nodes": nodes.get("rows").cloned().unwrap_or(json!([])),
-        "edges": edges.get("rows").cloned().unwrap_or(json!([])),
+        "nodes": n,
+        "edges": e,
+        // Say so rather than quietly showing part of the graph as if it were
+        // all of it - that is the bug this replaced.
+        "truncated": nc >= GRAPH_LIMIT || ec >= GRAPH_LIMIT,
+        "limit": GRAPH_LIMIT,
     })))
 }
+
+/// Ceiling on what the Graph page draws at once. High enough for the whole
+/// graph today (1,013 entities, 1,179 relations) and low enough that a runaway
+/// one cannot hang the canvas.
+const GRAPH_LIMIT: usize = 20_000;
