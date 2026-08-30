@@ -78,7 +78,14 @@ pub fn load(cfg: &Config) -> Vec<Root> {
 }
 
 fn save(cfg: &Config, roots: &[Root]) -> Result<()> {
-    let keep: Vec<&Root> = roots.iter().filter(|r| !r.builtin).collect();
+    // The playground is synthesised rather than stored, so it is normally
+    // filtered out. But once it has a server choice that choice has to survive
+    // - otherwise setting *another* workspace's servers silently wipes it,
+    // which is exactly what happened the first time.
+    let keep: Vec<&Root> = roots
+        .iter()
+        .filter(|r| !r.builtin || r.servers.is_some())
+        .collect();
     let p = file(cfg);
     if let Some(dir) = p.parent() {
         std::fs::create_dir_all(dir)?;
@@ -205,34 +212,13 @@ pub fn rename(cfg: &Config, id: &str, label: &str) -> Result<()> {
 /// which is different from `None` (all) and is a legitimate thing to want.
 pub fn set_servers(cfg: &Config, id: &str, servers: Option<Vec<String>>) -> Result<()> {
     let mut roots = load(cfg);
-    // The playground is not in roots.json, so its choice is stored separately
-    // under a reserved entry rather than being silently unsettable.
-    if id == "playground" {
-        let mut pg = playground(cfg);
-        pg.servers = servers;
-        pg.builtin = false; // so save() keeps it
-        pg.id = "playground".into();
-        roots.retain(|r| r.id != "playground" || r.builtin);
-        let mut out: Vec<Root> = roots.into_iter().filter(|r| !r.builtin).collect();
-        out.insert(0, pg);
-        return save_all(cfg, &out);
-    }
+    // The playground is synthesised, not stored - but `save` now keeps any
+    // entry that carries a server choice, so setting it here is enough.
     let Some(r) = roots.iter_mut().find(|r| r.id == id) else {
         bail!("no granted folder with id `{id}`");
     };
     r.servers = servers;
     save(cfg, &roots)
-}
-
-/// Write the file exactly as given, including a stored playground entry.
-fn save_all(cfg: &Config, roots: &[Root]) -> Result<()> {
-    let p = file(cfg);
-    if let Some(dir) = p.parent() {
-        std::fs::create_dir_all(dir)?;
-    }
-    std::fs::write(&p, serde_json::to_string_pretty(&serde_json::json!({ "roots": roots }))?)
-        .with_context(|| format!("writing {}", p.display()))?;
-    Ok(())
 }
 
 pub fn get(cfg: &Config, id: &str) -> Result<Root> {
@@ -295,6 +281,39 @@ mod tests {
 
         remove(&cfg, &r.id).unwrap();
         assert!(get(&cfg, &r.id).is_err());
+        std::fs::remove_dir_all(&base).ok();
+    }
+
+    /// Setting one workspace's servers must not disturb another's - including
+    /// the playground, which is synthesised rather than stored and so was the
+    /// one that got quietly wiped.
+    #[test]
+    fn server_choices_survive_each_other() {
+        let base = std::env::temp_dir().join(format!("roots-s-{}", uuid::Uuid::new_v4()));
+        let work = base.join("proj");
+        std::fs::create_dir_all(&work).unwrap();
+        let cfg = cfg_in(&base);
+
+        let r = add(&cfg, work.to_str().unwrap(), None).unwrap();
+        set_servers(&cfg, "playground", Some(vec!["kuzu_graph".into()])).unwrap();
+        set_servers(&cfg, &r.id, Some(vec!["nvim_lsp".into()])).unwrap();
+
+        let loaded = load(&cfg);
+        let pg = loaded.iter().find(|x| x.id == "playground").unwrap();
+        let proj = loaded.iter().find(|x| x.id == r.id).unwrap();
+        assert_eq!(pg.servers.as_deref(), Some(&["kuzu_graph".to_string()][..]));
+        assert_eq!(proj.servers.as_deref(), Some(&["nvim_lsp".to_string()][..]));
+
+        // The playground keeps its real path and stays unremovable even after
+        // being written to the file.
+        assert!(pg.path.ends_with("artifacts"));
+        assert!(remove(&cfg, "playground").is_err());
+
+        // An empty list is a real choice and must not read back as "all".
+        set_servers(&cfg, "playground", Some(vec![])).unwrap();
+        let pg = load(&cfg).into_iter().find(|x| x.id == "playground").unwrap();
+        assert_eq!(pg.servers, Some(vec![]));
+
         std::fs::remove_dir_all(&base).ok();
     }
 

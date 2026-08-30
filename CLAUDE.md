@@ -777,28 +777,18 @@ idea. **One caveat to decide first:** a per-session graph means an entity can
 exist twice (once session-scoped, once global) and the merge has to reconcile
 them, which is where this stops being trivial.
 
-**b. Accessing a large codebase.** See the answer given to Adithya: the current
-`codemap.rs` scales to a few thousand files, and the honest limit is that it
-indexes *declarations*, not call graphs — so "what breaks if I change this
-function" is a question it cannot answer today. A Neovim MCP with LSP behind it
-is a good answer to exactly that, because an LSP gives real references and call
-hierarchies rather than guessed ones. Worth doing when a large repo is actually
-in play.
+**b. Accessing a large codebase — DONE, see §4h-b-built below.**
 
-**c. Per-workspace MCP configuration** — a granted folder should be able to say
-which servers it wants. This is the §4f tool-scoping idea with a concrete
-trigger, and it is the same mechanism as `HARNESS_TOOL_SERVERS`.
+**c. Per-workspace MCP configuration — DONE (§4f-d.25).**
 
-**d. Multiple terminal sessions with tmux-style resume.** `PtyManager` already
-keys sessions by name, so this is tabs in the UI plus a picker; the tmux part is
-wrapping real tmux rather than reimplementing persistence (§4f).
+**d. Multiple terminal sessions with tmux-style resume — DONE.** Tabs keyed by
+granted folder; the pty already outlived its socket, so "resume" was only ever
+remembering which sessions belong to which workspace.
 
-**e. A browser panel in the playground.** SnareVec already exposes 16 CDP
-`browser_*` tools against the real browser, so the capability exists; what is
-missing is a surface that shows it and a way to feed a screenshot back in.
+**e. A browser panel in the playground — BUILT.** Blocked on a human gate in
+SnareVec itself, not on code: see §12e.
 
-**f. The `+` composer menu** — files, folder, MCP connectors, plugins, skills —
-as one attachment menu rather than the scattered buttons there now.
+**f. The `+` composer menu — DONE (§4f-d.24).**
 
 **23. Per-session graph and memory — BUILT, and simpler than the sketch.**
 
@@ -837,6 +827,72 @@ switches, and your saved skills. Picking a skill **puts it in the box rather
 than sending it** - you may want to add to it, and a menu that fires a turn
 behind your back is startling. Rendered once and opened from either composer,
 because two copies of a menu is two things to keep in step.
+
+**25. Per-workspace MCP tick-boxes, and the Neovim LSP server — BUILT.**
+
+*Tool scoping is the cost lever, not a preference.* Each granted folder chooses
+its servers from the **+ menu → Connectors**. Measured against the live agent:
+
+```
+129 tools (all)            54 tools (playground)      28 tools (a code folder)
+~22,300 prompt tokens      ~9,300                     ~4,800
+```
+
+paid on every turn before anything is said. `null` means every server and `[]`
+means none — a real choice, kept distinct from unset. Applied to the running
+agent immediately and re-applied at the start of each turn, the same way the
+vision gate is.
+
+*One bug worth recording because it was invisible:* `save()` filtered out
+`builtin` entries, and the playground is synthesised rather than stored — so
+setting **any other** workspace's servers silently wiped the playground's
+choice. It read as "the setting did not stick" with nothing in any log. `save`
+now keeps any entry carrying a server choice, and a test asserts the two
+survive each other.
+
+**§4h-b-built — Neovim LSP.** `codemap.rs` reads what a file *declares*; an LSP
+resolves. Verified on this repo against grep as ground truth:
+
+```
+roots::pretty          6 references, exactly the 6 grep finds
+system::run            4 references — and NOT reduce::run, which grep matches
+set_allowed_servers    2 references, the call sites in dash.rs
+goto_definition        call site -> declaration
+document_symbols       25 symbols in roots.rs
+hover                  signature plus doc comment
+
+first call  28s (rust-analyzer indexing)   after that  ~0s
+```
+
+The `system::run` case is the whole argument: two functions named `run` in one
+crate, and only one is the answer.
+
+*Three findings, each measured:*
+- **One-shot was the wrong architecture.** A fresh Neovim per query throws away
+  the index — 28s *every* call. Now one long-lived `nvim --headless --listen`,
+  queried with `nvim --server ... --remote-expr`. Neovim speaks msgpack to
+  Neovim, so this stays dependency-free; `pynvim` was never needed.
+- **A false zero.** Attachment is not readiness: rust-analyzer attaches in a
+  second then indexes for half a minute, answering empty meanwhile — which
+  reads as "nothing calls this". It now waits on rust-analyzer's own
+  `serverStatus`/`quiescent` signal and flags `indexing: true` on any empty
+  answer from a busy server.
+- **The project path broke the config silently.** Neovim expands `~` inside
+  `-u`, and this project lives at `D:/Conceptual Project ~ clg`, so the config
+  never loaded and every query said "no language server" with nothing in any
+  log. The config is copied to a scratch dir with a plain name before use.
+
+**26. The browser panel names which thing is wrong.** Three different failures
+stop it working and the first version showed one generic "not running" for all
+of them, which sends you looking in the wrong place. Now: daemon not running /
+**browser actions disabled in `~/.snarevec/config.json`** / daemon up but no
+browser attached — each with its own instruction, plus the daemon's own text
+behind a disclosure. The middle one is the current state, and it is a human gate
+in Adithya's own software: bluee does not flip it.
+
+**27. The preview bar is four icons.** Source, wrap, terminal-here and pop-out
+were four word-buttons taking most of the bar. The words were the least
+informative part — a tooltip says it better, and only when asked.
 
 ### 4g. Desktop app, not a web page
 
@@ -1121,3 +1177,168 @@ Not part of this 2-day scope, but captured here since it's the stated end goal a
 **Core (Phases 0-4, this is the actual bar):** you can type a request and it (a) reasons via cloud API with the split persona files applied, (b) calls the right MCP tool (OS action, GUI/browser control, or memory query) correctly, (c) the event log captures the full trace of what happened, and (d) the dashboard shows the resulting update across all three memory views (event log, vector, graph) in real time — for at least 3 distinct rehearsed scenarios covering tool-calling, memory recall, and screen-context awareness (including toggling vision mode live in the dashboard for one of them).
 
 **Stretch (Phase 5, only if reached):** the same scenarios work end to end via voice instead of text, with no changes needed to the harness core — voice should be purely additive on top of the text path, not a parallel implementation.
+
+---
+
+## 12. Resuming in a new session — read this first
+
+Written for whoever picks this up next, including a fresh agent with no memory
+of the conversation that built it. Everything here is measured, not assumed.
+
+### 12a. What this is right now
+
+A Rust binary (`src/`) that serves a web UI (`dash/index.html`, `include_str!`'d
+into the binary) and speaks MCP to four Python tool servers. `harness app` opens
+it as a Tauri desktop window; `harness dash <port>` serves it to a browser.
+
+```
+harness app                 desktop window (what bluee.cmd / the shortcut run)
+harness dash 7788           browser, fixed port - use this for testing
+harness reduce              rebuild memory + graph from the event log
+harness search "..."        query vector memory
+harness tools               list every connected tool
+harness call <tool> '<json>'  call one directly, logged like any other call
+harness log                 print the last session's raw trace
+```
+
+**Build:** `cargo build --release`. Output goes to `D:/tgt/harness` (see
+`.cargo/config.toml`) because the project path contains a space and a tilde and
+Windows `MAX_PATH` bites otherwise.
+
+**The app holds the binary open.** `taskkill /F /IM harness.exe` before a
+rebuild or the link step fails with "Access is denied".
+
+### 12b. The rule everything rests on
+
+The **append-only event log is the source of truth** (§4a). Vector memory, the
+graph, and the code index are *derived* and fully rebuildable: delete them, run
+`reduce`, get identical output. Verified repeatedly.
+
+Consequences that are easy to break by accident:
+- The reducer is the graph's only writer. `upsert_entity` / `upsert_relation`
+  are in `WITHHELD_FROM_MODEL` for this reason.
+- Anything written directly into a derived store either vanishes on the next
+  rebuild or survives as a fact with no evidence behind it. Both are bugs.
+- Session deletion removes the log, and now also that session's vector chunks
+  and graph edges (§4f-d.23).
+
+### 12c. How to check your work — do not skip this
+
+`dev/uicheck.mjs` drives **real headless Chrome over CDP**. Every UI bug that
+reached Adithya got there because a check ran against a DOM stub, which proves
+code executes and cannot prove a click does anything.
+
+```
+harness dash 7788 &            (wait ~26s: MCP servers start slowly)
+node dev/uicheck.mjs 7788      walks the pages, clicks things, screenshots
+```
+
+It fails on any console error and writes `dev/shots/*.png`. **Read the
+screenshots.** Several real bugs were only visible in them.
+
+Two failure modes worth knowing, both hit already: a test that asserts on a DOM
+node captured before a re-render is measuring a detached element, and a test
+that inherits state from the previous step passes without proving anything.
+Clear `localStorage` and assert the precondition too.
+
+`cargo test` is 31 tests. `tests/dashboard_js.rs` runs `node --check` over the
+page's inline script, because the HTML is compiled into the binary and nothing
+else would catch a syntax error until the window came up blank.
+
+### 12d. Editing `dash/index.html` — the trap that keeps recurring
+
+It is one large file with inline CSS and JS. Splicing it from a bash heredoc
+**repeatedly ate backslashes**: `\\n` became a real newline inside a JS string
+(a syntax error that blanked the whole page once), `\\'` became `'`, a Lua
+pattern `[^/\\]+$` became `[^/]+$`, and `'\r'` became a literal carriage return.
+
+Use the Write tool for the script, or the Edit tool directly. After any edit:
+
+```
+node --check   on the extracted <script>      (the test does this)
+node dev/uicheck.mjs 7788                     (proves it still runs)
+```
+
+### 12e. State of each piece
+
+**Working and verified:**
+- Chat, streaming turns, session resume, rename, `/compact`, slash commands
+- Memory (vector + graph + code index), Graph page with zoom/pan/search/pin
+- Playground: artifacts, file tree, granted folders, browser panel surface
+- Terminal with tabs, per-workspace sessions, shared with the model
+- Real OS windows for every pop-out (Tauri multi-window, `?only=<view>`)
+- Per-workspace MCP tick-boxes (the cost lever - see 12f)
+- System tools: `run_command`, `open_path`, `open_app`
+- Neovim + rust-analyzer: `find_references` etc., verified against grep truth
+- Screen vision, three modes, gated so the tool does not exist unless ACTIVE
+
+**Needs something from Adithya, not from code:**
+- **Browser panel.** The SnareVec daemon must be running *and*
+  `"browser": { "enabled": true }` set in `~/.snarevec/config.json`. That gate
+  is in his own software and deliberately human-only - do not flip it. The
+  panel now names which of the three problems it is.
+- **Other language servers.** `lsp_status` lists what works and how to add
+  each; it runs each binary rather than trusting PATH.
+
+**Not built, deliberately:**
+- Voice (Phase 5). Nothing depends on it.
+- Writing its own source. Reading is on (`read_source`); writing is a separate
+  decision with its own guardrails and should be made on purpose.
+- Automatic skill mining (§5c Tier 2). `skills/proposed/` is the safety catch
+  that would make it safe to switch on.
+
+### 12f. Cost — the single biggest lever
+
+Tool schemas are paid on **every turn**, before anything is said.
+
+```
+129 tools (all servers)   ~22,300 prompt tokens   ~R1.15 / call
+ 54 tools (playground)     ~9,300 prompt tokens   ~R0.50 / call
+ 28 tools (a code folder)  ~4,800 prompt tokens   ~R0.25 / call
+```
+
+Set per granted folder: **+ menu → Connectors**. `null` = every server, `[]` =
+none (a real choice, kept distinct from unset). Applied to the live agent
+immediately and re-applied at the start of each turn.
+
+Also: `/compact` when a conversation gets long. The context meter measures
+against the provider's real window (1,000,000 for `qwen/qwen3.8-27b`), so it
+will look empty for a long time - that is correct, and a big prompt still costs
+what it costs.
+
+### 12g. Machine-specific traps, all hit for real
+
+- **The project path contains `~`.** Neovim expands it inside `-u`, so the LSP
+  config silently never loaded and every query said "no language server" with
+  nothing in any log. The nvim config is now copied to a scratch dir with a
+  plain name. Expect other tools to do the same.
+- **The provider cuts non-streamed requests at ~30s wall clock** and returns
+  `500 Internal Server Error`. `stream: true` is not a preference here; it is
+  what makes a long turn possible (§4f-d.13).
+- **`max_tokens` is the reply cap, not the context window.** Setting it to the
+  full window makes the provider reserve that budget and refuse on a small
+  balance - that was the earlier 402.
+- **`rust-analyzer` in `.cargo/bin` is a rustup shim.** It exists and fails
+  until `rustup component add rust-analyzer`. Anything that checks PATH rather
+  than running the binary will report it as installed.
+- **DNS on this machine is intermittent.** Several installs failed and
+  succeeded minutes apart. Retry before concluding a package is unavailable.
+- **`.env` and `data/` are gitignored and must stay so** - they hold the API
+  key and `providers.json`.
+
+### 12h. Open requests, in the order they were raised
+
+1. **Artifact panels that can be moved and resized inside the artifact.** The
+   ask was for the ticker board's three charts to be individually resizable and
+   rearrangeable. This is not a harness feature - an artifact is a page the
+   model writes, so the model has to write draggable, resizable panels.
+   Guidance for exactly that is now in `persona/TOOLS.md`; the next artifact
+   should come out that way. Verify by asking for a multi-panel artifact and
+   checking the panels actually drag.
+2. **Font and background.** Adithya is choosing them. Colours are ten CSS
+   variables in the `:root` block at the top of `dash/index.html`; type and
+   spacing is a larger pass and was deferred to a Framer-based UI round.
+3. **UI/UX polish round with Framer** - explicitly deferred to the end.
+4. Per-session graph *views* in the UI. The data now carries `session` on every
+   edge and `origin` on every entity, so filtering the Graph page by session is
+   a small addition on top of what exists.

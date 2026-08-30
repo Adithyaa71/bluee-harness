@@ -190,6 +190,15 @@ body{background:var(--bg);color:var(--ink);overflow:hidden;
 .abar{display:flex;align-items:center;gap:10px;padding:0 14px;height:40px;flex:none;
   background:var(--panel);border-bottom:1px solid var(--line)}
 .abar .an{font-size:13px;font-weight:600}
+/* Square icon buttons. The bar had four word-buttons taking most of its width;
+   the words were the least informative part - the tooltip says it better and
+   only when you ask. */
+.ibtn{width:28px;height:26px;flex:none;display:grid;place-items:center;
+  background:transparent;border:1px solid var(--line);border-radius:7px;
+  color:var(--dim);font-size:11.5px;font-family:var(--mono);cursor:pointer;
+  line-height:1;padding:0;transition:color .12s,border-color .12s,background .12s}
+.ibtn:hover{color:var(--ink);border-color:var(--accent);background:var(--panel2)}
+.ibtn.on{color:var(--accent);border-color:var(--accent);background:var(--accent-dim)}
 .abar .am{font-family:var(--mono);font-size:11px;color:var(--faint)}
 #aframe{flex:1;border:0;width:100%;background:#0f1116}
 #pgask{flex:none;border-top:1px solid var(--line);background:var(--panel);padding:10px 16px}
@@ -721,10 +730,10 @@ body.dragging{cursor:grabbing;user-select:none}
           <span class="an" id="pgname"></span>
           <span class="am" id="pgmeta"></span>
           <div class="spacer"></div>
-          <button class="ghost" id="pgsrc">Source</button>
-          <button class="ghost" id="pgwrapbtn" title="Soft wrap long lines">wrap</button>
-          <button class="ghost" id="pgterm" title="Open a terminal in this folder">terminal here</button>
-          <button class="ghost" id="pgpop">open window</button>
+          <button class="ibtn" id="pgsrc" title="Show the source">&lt;/&gt;</button>
+          <button class="ibtn" id="pgwrapbtn" title="Soft wrap long lines">&#8617;</button>
+          <button class="ibtn" id="pgterm" title="Open a terminal in this folder">&gt;_</button>
+          <button class="ibtn" id="pgpop" title="Open in its own window">&#8599;</button>
         </div>
         <div id="pgcodewrap"><div id="pggutter"></div><pre id="pgcode"></pre></div>
         <iframe id="pgframe" style="display:none;flex:1;border:0;width:100%;background:#0f1116"
@@ -736,8 +745,8 @@ body.dragging{cursor:grabbing;user-select:none}
           <span class="an" id="aname"></span>
           <span class="am" id="ameta"></span>
           <div class="spacer"></div>
-          <button class="ghost" id="apop">pop out</button>
-          <button class="ghost" id="aopen">open in browser</button>
+          <button class="ibtn" id="apop" title="Open in its own window">&#8599;</button>
+          <button class="ibtn" id="aopen" title="Open in your browser">&#127760;</button>
         </div>
         <iframe id="aframe" sandbox="allow-scripts allow-forms allow-popups"></iframe>
       </div>
@@ -1781,16 +1790,38 @@ function webBusy(t){ $('#webstat').textContent=t||''; }
 async function webLoad(){
   webBusy('checking…');
   const d=await api('/api/browser').catch(e=>({error:String(e)}));
-  const txt=JSON.stringify(d.status||{});
-  const up=/running|connected|ok/i.test(txt) && !/not running/i.test(txt);
-  if(!up){
+  // Three different things stop this working and they need three different
+  // answers. The first version showed one generic "not running" for all of
+  // them, which sent you looking in the wrong place.
+  const txt = typeof d.status === 'string' ? d.status : JSON.stringify(d.status || {});
+  const noDaemon = /cannot reach|refused|not running|connection/i.test(txt);
+  const disabled = /browser\.enabled|actions are off|enabled:\s*False/i.test(txt);
+  const noBrowser = /connected:\s*False/i.test(txt);
+
+  if(noDaemon || disabled || noBrowser){
     $('#webtabs').innerHTML='';
-    $('#webview').innerHTML='<div class="sidenote" style="padding:16px;max-width:340px">'+
-      '<b>The browser bridge is not running.</b><br><br>'+
-      'SnareVec drives your own browser, and its daemon idles out when unused '+
-      '&mdash; that is normal, not a fault. Start the SnareVec workbench and hit refresh.'+
+    let title, body;
+    if(noDaemon){
+      title='The SnareVec daemon is not running.';
+      body='It idles out when unused &mdash; normal, not a fault. Start the '+
+           'SnareVec workbench, then hit refresh.';
+    } else if(disabled){
+      title='Browser actions are switched off in SnareVec.';
+      body='That is a deliberate gate in your own config, so bluee will not '+
+           'flip it. Set <code>"browser": { "enabled": true }</code> in '+
+           '<code>~/.snarevec/config.json</code>, restart the daemon, then refresh.';
+    } else {
+      title='The daemon is running, but no browser is attached.';
+      body='Open Chrome with the SnareVec extension so the daemon has a browser '+
+           'to drive, then refresh.';
+    }
+    $('#webview').innerHTML='<div class="sidenote" style="padding:16px;max-width:360px;line-height:1.6">'+
+      '<b>'+title+'</b><br><br>'+body+
+      '<details style="margin-top:12px"><summary style="cursor:pointer;color:var(--faint)">'+
+      'what the daemon said</summary><pre style="white-space:pre-wrap;font-size:10.5px;'+
+      'color:var(--faint);margin-top:8px">'+esc(txt).slice(0,700)+'</pre></details>'+
       '</div>';
-    webBusy('offline');
+    webBusy(noDaemon ? 'offline' : disabled ? 'disabled' : 'no browser');
     return;
   }
   // Tab shapes differ between versions, so pull ids and titles defensively
@@ -2006,9 +2037,11 @@ catch(_){ setFiles(true); }
 $('#pgfilter').addEventListener('input',renderTree);
 $('#pgsrc').onclick=()=>{
   const b=$('#pgsrc');
-  if(b.dataset.mode==='render'){ b.dataset.mode='source'; b.textContent='Rendered';
-    showSource(filePick); }
-  else { b.dataset.mode='render'; b.textContent='Source'; showRendered(filePick); }
+  const toSource = b.dataset.mode==='render';
+  b.dataset.mode = toSource ? 'source' : 'render';
+  b.classList.toggle('on', toSource);
+  b.title = toSource ? 'Show it running' : 'Show the source';
+  if(toSource) showSource(filePick); else showRendered(filePick);
 };
 $('#pgpop').onclick=async()=>{
   if(!filePick) return;
@@ -3032,8 +3065,9 @@ async function openFile(path){
   // a Source toggle for when you want the code instead.
   const isHtml = /\.html?$/i.test(path) && canRender();
   $('#pgsrc').style.display = isHtml ? '' : 'none';
-  $('#pgsrc').textContent = 'Source';
   $('#pgsrc').dataset.mode = 'render';
+  $('#pgsrc').classList.remove('on');
+  $('#pgsrc').title = 'Show the source';
 
   if (isHtml) return showRendered(path);
   return showSource(path);
