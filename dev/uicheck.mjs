@@ -355,6 +355,72 @@ log('restore     :', await evaluate(`
   return window.__nodes().length + ' nodes, hovering ' +
     JSON.stringify(window.__hover() && window.__hover().name);
 `));
+log('search       :', await evaluate(`
+  const s = document.querySelector('#gsearch');
+  s.value = 'snarevec';
+  s.dispatchEvent(new Event('input', { bubbles: true }));
+  await new Promise(r => setTimeout(r, 300));
+  return document.querySelector('#ghits').textContent +
+    ' | ringed: ' + (window.__match() || []).length;
+`));
+log('hidden hint  :', await evaluate(`
+  const s = document.querySelector('#gsearch');
+  s.value = 'read_stream';
+  s.dispatchEvent(new Event('input', { bubbles: true }));
+  await new Promise(r => setTimeout(r, 300));
+  return document.querySelector('#ghits').textContent;
+`));
+log('enter centres:', await evaluate(`
+  const s = document.querySelector('#gsearch');
+  s.value = 'SnareVec';
+  s.dispatchEvent(new Event('input', { bubbles: true }));
+  await new Promise(r => setTimeout(r, 200));
+  s.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }));
+  await new Promise(r => setTimeout(r, 300));
+  const c = document.querySelector('#gcv');
+  const v = window.__view(), p = window.__pin();
+  if (!p) return 'nothing pinned';
+  const sx = p.x * v.k + v.x, sy = p.y * v.k + v.y;
+  return 'pinned ' + JSON.stringify(p.name) + ' at ' + Math.round(sx) + ',' + Math.round(sy) +
+    ' (canvas centre ' + Math.round(c.clientWidth/2) + ',' + Math.round(c.clientHeight/2) + ')';
+`));
+log('click unpins :', await evaluate(`
+  const c = document.querySelector('#gcv'), rect = c.getBoundingClientRect();
+  // Move to empty space FIRST, with no button down - that is the order a real
+  // pointer produces, and it is what clears the hover before the click.
+  c.dispatchEvent(new MouseEvent('mousemove', { clientX: rect.left+12, clientY: rect.top+12, bubbles: true }));
+  await new Promise(r => setTimeout(r, 120));
+  const hoverNow = window.__hover();
+  c.dispatchEvent(new MouseEvent('mousedown', { clientX: rect.left+12, clientY: rect.top+12, bubbles: true }));
+  window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+  c.dispatchEvent(new MouseEvent('click', { clientX: rect.left+12, clientY: rect.top+12, bubbles: true }));
+  await new Promise(r => setTimeout(r, 200));
+  return 'hover cleared=' + (hoverNow === null) +
+    ' pin now ' + JSON.stringify(window.__pin() && window.__pin().name);
+`));
+log('drag not pin :', await evaluate(`
+  const c = document.querySelector('#gcv'), rect = c.getBoundingClientRect();
+  // Start from a known state so the result cannot be inherited from the last
+  // step - a test that passes because of leftover state is not a test.
+  window.__clearPin();
+  const pinBefore = window.__pin();
+  const v = window.__view();
+  const n = window.__nodes().find(m => {
+    const x = m.x*v.k+v.x, y = m.y*v.k+v.y;
+    return x > 60 && x < rect.width-60 && y > 60 && y < rect.height-60;
+  });
+  const px = rect.left + n.x*v.k+v.x, py = rect.top + n.y*v.k+v.y;
+  c.dispatchEvent(new MouseEvent('mousemove', { clientX: px, clientY: py, bubbles: true }));
+  c.dispatchEvent(new MouseEvent('mousedown', { clientX: px, clientY: py, bubbles: true }));
+  c.dispatchEvent(new MouseEvent('mousemove', { clientX: px+80, clientY: py+40, bubbles: true }));
+  window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+  c.dispatchEvent(new MouseEvent('click', { clientX: px+80, clientY: py+40, bubbles: true }));
+  await new Promise(r => setTimeout(r, 200));
+  return 'started null=' + (pinBefore === null) +
+    ', after dragging across a node pin is ' +
+    JSON.stringify(window.__pin() && window.__pin().name) +
+    ' (must stay null - a pan is not a click)';
+`));
 log('shot        :', await shot('graph'));
 
 log('\nconsole errors :', consoleErrors.length ? consoleErrors.join(' | ') : 'none');

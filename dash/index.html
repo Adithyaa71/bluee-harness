@@ -136,6 +136,13 @@ body{background:var(--bg);color:var(--ink);overflow:hidden;
 .hit .sc{font-family:var(--mono);font-size:11px;color:var(--accent)}
 .hit .mt{font-family:var(--mono);font-size:11px;color:var(--faint);margin-left:8px}
 .hit pre{font-size:12px;color:var(--dim);white-space:pre-wrap;margin-top:8px}
+#gbar{display:flex;align-items:center;gap:8px;padding:8px 14px;flex:none;
+  border-bottom:1px solid var(--line);background:var(--panel)}
+#gsearch{width:230px;background:var(--panel2);border:1px solid var(--line);
+  border-radius:7px;color:var(--ink);font-size:12.5px;padding:6px 9px;outline:none}
+#gsearch:focus{border-color:var(--accent);width:300px}
+#gsearch{transition:width .14s ease}
+#ghits{font-size:11.5px;font-family:var(--mono);color:var(--faint)}
 #gcv{flex:1;width:100%;background:var(--bg);display:block;min-height:0}
 .gk{display:inline-block;margin:3px 10px 0 0;padding:2px 8px;border-radius:11px;
   border:1px solid var(--line);cursor:pointer;user-select:none;color:var(--dim);
@@ -608,6 +615,13 @@ body{background:var(--bg);color:var(--ink);overflow:hidden;
     </div>
 
     <div class="view" id="v-graph">
+      <div id="gbar">
+        <input id="gsearch" placeholder="Find in graph…" spellcheck="false">
+        <span id="ghits"></span>
+        <div class="spacer"></div>
+        <button class="ghost" id="gfit" title="Fit everything on screen">fit</button>
+        <button class="ghost" id="greload" title="Reload from the graph database">reload</button>
+      </div>
       <canvas id="gcv"></canvas>
       <div id="glegend"></div>
     </div>
@@ -1691,6 +1705,10 @@ $('#pginput').addEventListener('input',e=>{
    which is also what makes pan and zoom feel instant. */
 let gData=null, gNodes=null, gEdges=null, gIndex=null;
 let gView={x:0,y:0,k:1}, gLaidOut=false, gHover=null;
+/* Clicking pins the focus. Hovering is fine for a glance, but you cannot read a
+   neighbourhood while holding the mouse perfectly still, and you certainly
+   cannot scroll away and keep it. */
+let gPin=null, gMatch=null;
 
 const gColor=k=>({server:'#e0b341',tool:'#5b9dff',person:'#f2695c',machine:'#c07ef0',
   project:'#3fb950',preference:'#48c9b0',assistant:'#5b9dff',file:'#7d8896',
@@ -1820,16 +1838,17 @@ function gRender(){
   // to" is the question a graph exists to answer, and reading it off a hairball
   // by eye is exactly what people cannot do.
   let near=null;
-  if(gHover){
-    near=new Set([gHover.name]);
+  const focus=gPin||gHover;
+  if(focus){
+    near=new Set([focus.name]);
     for(const e of gEdges){
-      if(e.source===gHover.name) near.add(e.target);
-      else if(e.target===gHover.name) near.add(e.source);
+      if(e.source===focus.name) near.add(e.target);
+      else if(e.target===focus.name) near.add(e.source);
     }
     ctx.strokeStyle='#5b9dff'; ctx.lineWidth=Math.max(1,1.4*k);
     ctx.beginPath();
     for(const e of gEdges){
-      if(e.source!==gHover.name&&e.target!==gHover.name) continue;
+      if(e.source!==focus.name&&e.target!==focus.name) continue;
       const a=gNodes[gIndex[e.source]], b=gNodes[gIndex[e.target]];
       ctx.moveTo(a.x*k+ox,a.y*k+oy); ctx.lineTo(b.x*k+ox,b.y*k+oy);
     }
@@ -1842,9 +1861,17 @@ function gRender(){
     if(x<-30||x>W+30||y<-30||y>H+30) continue;
     const dim=near&&!near.has(n.name);
     ctx.globalAlpha=dim?0.28:1;
-    ctx.beginPath(); ctx.arc(x,y,n===gHover?r+2.5:r,0,6.29);
+    ctx.beginPath(); ctx.arc(x,y,(n===gHover||n===gPin)?r+2.5:r,0,6.29);
     ctx.fillStyle=gColor(n.kind); ctx.fill();
     ctx.globalAlpha=1;
+    if(gMatch&&gMatch.has(n.name)){
+      ctx.beginPath(); ctx.arc(x,y,r+4,0,6.29);
+      ctx.strokeStyle='#e0b341'; ctx.lineWidth=1.6; ctx.stroke();
+    }
+    if(n===gPin){
+      ctx.beginPath(); ctx.arc(x,y,r+6,0,6.29);
+      ctx.strokeStyle='#5b9dff'; ctx.lineWidth=1.4; ctx.stroke();
+    }
   }
   if(k>0.55){
     ctx.font='11.5px system-ui'; ctx.fillStyle='#c3ccd9';
@@ -1867,9 +1894,11 @@ function gRender(){
       ctx.fillText(t,x+r+4,y+4);
     }
   }
-  if(gHover){
-    const x=gHover.x*k+ox, y=gHover.y*k+oy;
-    const label=gHover.name+'  ('+gHover.kind+')';
+  if(focus){
+    const x=focus.x*k+ox, y=focus.y*k+oy;
+    const deg=near?near.size-1:0;
+    const label=focus.name+'  ('+focus.kind+', '+deg+' link'+(deg===1?'':'s')+')'+
+      (gPin===focus?'  · pinned':'');
     ctx.font='12px system-ui';
     const w=ctx.measureText(label).width+16;
     ctx.fillStyle='#141821'; ctx.strokeStyle='#2b3342'; ctx.lineWidth=1;
@@ -1935,6 +1964,32 @@ function gLegend(){
 /* Handles for dev/uicheck.mjs to inspect view state. Reading the real values
    beats asserting on pixels in a screenshot. */
 window.__view=()=>({...gView}); window.__k=()=>+gView.k.toFixed(3);
+window.__pin=()=>gPin; window.__match=()=>gMatch?[...gMatch]:null;
+window.__clearPin=()=>{ gPin=null; gHover=null; gRender(); };
+
+/* Find a node by name. Matches get a ring so you can see where they are before
+   moving, and Enter centres on the first one and pins it - a search that only
+   highlights leaves you hunting across a canvas. */
+function gFind(){
+  const q=($('#gsearch').value||'').trim().toLowerCase();
+  if(!q){ gMatch=null; $('#ghits').textContent=''; gRender(); return []; }
+  const hits=(gNodes||[]).filter(n=>n.name.toLowerCase().includes(q));
+  gMatch=new Set(hits.map(n=>n.name));
+  const hidden=(gData&&gData.nodes||[]).filter(n=>
+    gHide.has(n.kind)&&n.name.toLowerCase().includes(q)).length;
+  $('#ghits').textContent = hits.length
+    ? hits.length+' match'+(hits.length===1?'':'es')+(hidden?' (+'+hidden+' hidden)':'')
+    : (hidden? 'only in hidden kinds ('+hidden+')' : 'no match');
+  gRender();
+  return hits;
+}
+function gCentre(n){
+  const cv=$('#gcv');
+  const W=cv.clientWidth||900, H=cv.clientHeight||500;
+  gView.k=Math.max(gView.k,1.1);
+  gView.x=W/2-n.x*gView.k; gView.y=H/2-n.y*gView.k;
+  gPin=n; gRender();
+}
 window.__nodes=()=>gNodes||[]; window.__hover=()=>gHover;
 
 /* Pan and zoom. Zoom is anchored at the cursor, so whatever you are pointing at
@@ -1971,9 +2026,27 @@ window.__nodes=()=>gNodes||[]; window.__hover=()=>gHover;
     if(best!==gHover){ gHover=best; cv.style.cursor=best?'pointer':'grab'; gRender(); }
   });
   cv.addEventListener('dblclick',()=>{ gFit(cv.clientWidth,cv.clientHeight); gRender(); });
+
+  // A click pins whatever is under the cursor; clicking empty space lets go.
+  // Distinguished from a pan by distance, so a small wobble while dragging does
+  // not silently change what you are looking at.
+  let downAt=null;
+  cv.addEventListener('mousedown',e=>{ downAt=[e.clientX,e.clientY]; });
+  cv.addEventListener('click',e=>{
+    if(downAt&&Math.hypot(e.clientX-downAt[0],e.clientY-downAt[1])>4) return;
+    gPin=(gHover&&gPin!==gHover)?gHover:null;
+    gRender();
+  });
   cv.style.cursor='grab';
 })();
 
+$('#gsearch').addEventListener('input',gFind);
+$('#gsearch').addEventListener('keydown',e=>{
+  if(e.key==='Enter'){ e.preventDefault(); const h=gFind(); if(h.length) gCentre(h[0]); }
+  if(e.key==='Escape'){ $('#gsearch').value=''; gFind(); }
+});
+$('#gfit').onclick=()=>{ const cv=$('#gcv'); gFit(cv.clientWidth,cv.clientHeight); gRender(); };
+$('#greload').onclick=()=>drawGraph(true);
 addEventListener('resize',()=>{ if($('#v-graph').classList.contains('on')) gRender(); });
 
 /* ---------- floating windows ----------

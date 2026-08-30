@@ -703,6 +703,28 @@ in a screenshot or a measurement, not guessed:
   state and the numbers stopped being comparable — a test that is not
   reproducible is not evidence.
 
+**20. Graph: find, pin, focus.** Hovering is fine for a glance and useless for
+holding — you cannot read a neighbourhood while keeping the mouse perfectly
+still, and you certainly cannot scroll away and keep it.
+
+- **Click pins.** Clicking a node holds the focus, clicking empty space lets go.
+  A pin is distinguished from a pan by distance, so a wobble mid-drag does not
+  silently change what you are looking at.
+- **Search finds by name**, rings the matches so you can see where they are
+  before moving, and Enter centres on the first and pins it. A search that only
+  highlights leaves you hunting across a canvas.
+- **It counts what it cannot show you.** Searching `read_stream` with `symbol`
+  hidden answers "only in hidden kinds (1)" instead of "no match" — the honest
+  answer, and it tells you which chip to click.
+- The focus card now reports the degree: `Adithya (person, 6 links)`.
+
+*Two of the checks were passing for the wrong reason, which is worse than
+failing.* The unpin test drove `mousedown` before `mousemove`, an order a real
+pointer never produces, so the hover was stale and the assertion was measuring
+nothing. The drag test inherited a pin from the previous step and "passed"
+without proving anything. Both now start from a known state and assert the
+precondition as well as the result.
+
 ### 4g. Desktop app, not a web page
 
 Requested, and correct: the dashboard should be a real local desktop
