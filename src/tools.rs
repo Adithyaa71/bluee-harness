@@ -84,6 +84,9 @@ impl NativeTools {
                 | "delete_file"
                 | "list_folders"
                 | "read_file"
+                | "run_command"
+                | "open_path"
+                | "open_app"
         )
     }
 
@@ -263,6 +266,53 @@ impl NativeTools {
                         "root": { "type": "string", "description": "Granted folder id. Defaults to \"playground\"." }
                     },
                     "required": ["path"]
+                }),
+            },
+            ToolDef {
+                name: "run_command".into(),
+                description: "Run a shell command inside a granted folder and get back its exit \
+                    code, stdout and stderr. This is how you build, test, run git, install \
+                    things, or inspect a project. Working directory is the granted folder. Say \
+                    what you are about to run and why before you run it - the command is logged \
+                    either way, but Adithya should not have to read the log to know what you did."
+                    .into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "command": { "type": "string", "description": "The command line to run." },
+                        "root": { "type": "string", "description": "Granted folder id to run in. Defaults to \"playground\"." },
+                        "timeout_secs": { "type": "integer", "description": "Give up after this long. Default 120." }
+                    },
+                    "required": ["command"]
+                }),
+            },
+            ToolDef {
+                name: "open_path".into(),
+                description: "Open a file or folder in whatever application the OS uses for it - \
+                    a document in its editor, a folder in Explorer. Use when Adithya wants to \
+                    SEE something rather than have you read it."
+                    .into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Path relative to the granted folder. Empty opens the folder itself." },
+                        "root": { "type": "string", "description": "Granted folder id. Defaults to \"playground\"." }
+                    }
+                }),
+            },
+            ToolDef {
+                name: "open_app".into(),
+                description: "Launch an application by name or full path (`notepad`, `code`, \
+                    `chrome`), optionally with arguments. Starts it and returns - it does not \
+                    wait or capture output. For something whose output you need, use run_command."
+                    .into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "app": { "type": "string", "description": "Executable name on PATH, or a full path." },
+                        "args": { "type": "array", "items": { "type": "string" }, "description": "Arguments to pass." }
+                    },
+                    "required": ["app"]
                 }),
             },
             ToolDef {
@@ -552,6 +602,73 @@ impl NativeTools {
                         "root": r.id, "deleted": path, "folder": folder, "files_removed": n,
                     })),
                     Err(e) => Ok(serde_json::json!({ "path": path, "error": e.to_string() })),
+                }
+            }
+
+            "run_command" => {
+                let command = args.get("command").and_then(|v| v.as_str())
+                    .context("run_command requires `command`")?;
+                let id = args.get("root").and_then(|v| v.as_str()).unwrap_or("playground");
+                let timeout = args.get("timeout_secs").and_then(|v| v.as_u64()).unwrap_or(120);
+                // No model-settable override, deliberately.
+                //
+                // The first version took a `confirm` flag. Tested against the
+                // real model - asked to "try running `format C: /q`" - it set
+                // `confirm: true` itself and ran it. It survived only because
+                // Windows demanded elevation. A confirmation the model can
+                // grant itself is not a confirmation, it is decoration. These
+                // are refused outright; Adithya has a terminal and can run one
+                // himself if he ever actually means to.
+                if let Some(pat) = crate::system::looks_catastrophic(command) {
+                    return Ok(serde_json::json!({
+                        "refused": true,
+                        "command": command,
+                        "matched": pat,
+                        "error": format!(
+                            "Refused: this contains `{pat}`, which can destroy the machine. \
+                             There is no override on this tool. If that is genuinely what is \
+                             wanted, say so plainly and let Adithya run it himself."
+                        ),
+                    }));
+                }
+
+                let root = match crate::roots::get(&self.cfg, id) {
+                    Ok(r) => r,
+                    Err(e) => return Ok(serde_json::json!({ "root": id, "error": e.to_string() })),
+                };
+                match crate::system::run(command, &root.path, timeout) {
+                    Ok(out) => Ok(serde_json::to_value(out)?),
+                    Err(e) => Ok(serde_json::json!({ "command": command, "error": e.to_string() })),
+                }
+            }
+
+            "open_path" => {
+                let rel = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
+                let id = args.get("root").and_then(|v| v.as_str()).unwrap_or("playground");
+                match crate::roots::resolve(&self.cfg, id, rel) {
+                    Ok((r, full)) => match crate::system::open_path(&full) {
+                        Ok(shown) => Ok(serde_json::json!({
+                            "opened": shown, "root": r.id,
+                            "note": "Handed to the OS. Whether a window appeared is not something \
+                                     this can confirm - ask Adithya if it matters.",
+                        })),
+                        Err(e) => Ok(serde_json::json!({ "path": rel, "error": e.to_string() })),
+                    },
+                    Err(e) => Ok(serde_json::json!({ "path": rel, "error": e.to_string() })),
+                }
+            }
+
+            "open_app" => {
+                let app = args.get("app").and_then(|v| v.as_str())
+                    .context("open_app requires `app`")?;
+                let list: Vec<String> = args
+                    .get("args")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
+                    .unwrap_or_default();
+                match crate::system::open_app(app, &list) {
+                    Ok(shown) => Ok(serde_json::json!({ "launched": shown })),
+                    Err(e) => Ok(serde_json::json!({ "app": app, "error": e.to_string() })),
                 }
             }
 

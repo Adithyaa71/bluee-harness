@@ -13,6 +13,7 @@ mod pty;
 mod reduce;
 mod roots;
 mod skills;
+mod system;
 mod tools;
 mod vision;
 // Aliased because this file already has a `tools` subcommand function.

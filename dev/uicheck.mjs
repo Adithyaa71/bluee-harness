@@ -422,6 +422,55 @@ log('drag not pin :', await evaluate(`
     ' (must stay null - a pan is not a click)';
 `));
 log('shot        :', await shot('graph'));
+log('\n=== MEMORY + GRAPH ===');
+await evaluate("document.querySelector('.rb[data-page=\"memory\"]').click()");
+await sleep(3500);
+log('layout      :', await evaluate(`
+  const top = document.querySelector('#memtop').getBoundingClientRect();
+  const g = document.querySelector('#memgraph').getBoundingClientRect();
+  const cv = document.querySelector('#gcv');
+  return 'memory ' + Math.round(top.width) + 'x' + Math.round(top.height) +
+         ' | graph pane ' + Math.round(g.width) + 'x' + Math.round(g.height) +
+         ' | canvas inside graph pane=' + (cv.closest('#memgraph') !== null);
+`));
+log('graph drawn :', await evaluate(`
+  return document.querySelector('#mgstat').textContent + ' | nodes=' + window.__nodes().length;
+`));
+log('split drag  :', await evaluate(`
+  const bar = document.querySelector('#memsplit'), pane = document.querySelector('#memgraph');
+  const r = bar.getBoundingClientRect();
+  const h0 = pane.getBoundingClientRect().height;
+  bar.dispatchEvent(new MouseEvent('mousedown', { clientY: r.top, clientX: r.left+100, bubbles: true, cancelable: true }));
+  window.dispatchEvent(new MouseEvent('mousemove', { clientY: r.top - 90, clientX: r.left+100, bubbles: true }));
+  window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+  await new Promise(x => setTimeout(x, 250));
+  return Math.round(h0) + 'px -> ' + Math.round(pane.getBoundingClientRect().height) + 'px';
+`));
+log('graph popout:', await evaluate(`
+  document.querySelector('#mgpop').click();
+  await new Promise(x => setTimeout(x, 700));
+  const w = document.querySelector('.win');
+  const cv = document.querySelector('#gcv');
+  return w ? ('window ' + Math.round(w.getBoundingClientRect().width) + 'x' +
+    Math.round(w.getBoundingClientRect().height) +
+    ' canvas inside=' + (cv.closest('.win') !== null)) : 'no window opened';
+`));
+log('popout close:', await evaluate(`
+  document.querySelector('.win .close').click();
+  await new Promise(x => setTimeout(x, 700));
+  const cv = document.querySelector('#gcv');
+  return 'window gone=' + (document.querySelector('.win') === null) +
+    ' canvas back in memory pane=' + (cv.closest('#memgraph') !== null);
+`));
+log('back to graph page:', await evaluate(`
+  document.querySelector('.rb[data-page="graph"]').click();
+  await new Promise(x => setTimeout(x, 1800));
+  const cv = document.querySelector('#gcv');
+  return 'canvas on graph page=' + (cv.closest('#v-graph') !== null) +
+    ' size=' + Math.round(cv.getBoundingClientRect().width) + 'x' +
+    Math.round(cv.getBoundingClientRect().height);
+`));
+log('shot        :', await shot('memory-graph'));
 
 log('\nconsole errors :', consoleErrors.length ? consoleErrors.join(' | ') : 'none');
 
