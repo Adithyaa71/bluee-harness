@@ -40,6 +40,9 @@ struct AppState {
     agent: Mutex<Option<Agent>>,
     pty: PtyManager,
     vision: Arc<VisionState>,
+    /// Which granted folder is currently open, so the agent can be scoped to
+    /// the servers that workspace asked for.
+    workspace: Mutex<String>,
     /// Where we are actually listening, so a pop-out window can be pointed
     /// back at this same server.
     port: u16,
@@ -88,6 +91,7 @@ pub async fn serve_on(cfg: Config, std_listener: std::net::TcpListener) -> Resul
         agent: Mutex::new(None),
         pty: PtyManager::default(),
         vision: Arc::new(VisionState::load(&cfg_vision_dir)),
+        workspace: Mutex::new("playground".into()),
         port,
     });
 
@@ -116,6 +120,8 @@ pub async fn serve_on(cfg: Config, std_listener: std::net::TcpListener) -> Resul
         .route("/api/roots", get(list_roots).post(add_root))
         .route("/api/roots/remove", post(remove_root))
         .route("/api/roots/rename", post(rename_root))
+        .route("/api/roots/servers", post(set_root_servers))
+        .route("/api/workspace", post(set_workspace))
         .route("/api/browser", get(browser_state).post(browser_act))
         .route("/artifacts/{id}/", get(artifact_root))
         .route("/artifacts/{id}/{*path}", get(artifact_file))
@@ -259,6 +265,12 @@ async fn chat_stream(mut socket: WebSocket, s: Shared) {
                 }
             }
             let agent = guard.as_mut().unwrap();
+            // Re-apply the workspace gate each turn, the same way the vision
+            // gate is synced: whichever folder is open decides the toolset.
+            let ws = state.workspace.lock().await.clone();
+            if let Ok(root) = crate::roots::get(&state.cfg, &ws) {
+                agent.set_allowed_servers(root.servers.clone());
+            }
             agent.turn_with(&text, Some(&tx)).await;
             Some((
                 agent.session_id().to_string(),
@@ -1170,6 +1182,55 @@ struct RootRef {
 }
 
 #[derive(Deserialize)]
+struct RootServers {
+    id: String,
+    /// `null` means every server; `[]` means none, which is a real choice.
+    #[serde(default)]
+    servers: Option<Vec<String>>,
+}
+
+async fn set_root_servers(
+    State(s): State<Shared>,
+    Json(b): Json<RootServers>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    crate::roots::set_servers(&s.cfg, &b.id, b.servers.clone()).map_err(fail)?;
+    Ok(Json(json!({ "ok": true, "id": b.id, "servers": b.servers })))
+}
+
+#[derive(Deserialize)]
+struct WorkspaceRef {
+    root: String,
+}
+
+/// Say which workspace is active, so the live agent exposes that workspace's
+/// tools and nothing else.
+///
+/// Applied to the running agent immediately rather than at the next session:
+/// switching workspace mid-conversation is normal, and the point of scoping is
+/// the prompt gets smaller *now*.
+async fn set_workspace(
+    State(s): State<Shared>,
+    Json(b): Json<WorkspaceRef>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let root = crate::roots::get(&s.cfg, &b.root).map_err(fail)?;
+    *s.workspace.lock().await = root.id.clone();
+
+    let mut guard = s.agent.lock().await;
+    let exposed = match guard.as_mut() {
+        Some(a) => {
+            a.set_allowed_servers(root.servers.clone());
+            a.tool_count()
+        }
+        None => 0,
+    };
+    Ok(Json(json!({
+        "ok": true, "workspace": root.id, "label": root.label,
+        "servers": root.servers, "tools_exposed": exposed,
+        "note": "null servers means every server is exposed."
+    })))
+}
+
+#[derive(Deserialize)]
 struct RootRename {
     id: String,
     label: String,
@@ -1268,6 +1329,7 @@ async fn list_roots(State(s): State<Shared>) -> impl IntoResponse {
         .map(|r| {
             json!({
                 "id": r.id, "label": r.label, "builtin": r.builtin,
+                "servers": r.servers,
                 "path": crate::roots::pretty(&r.path),
                 // Say whether it is still there: a folder can be moved or
                 // deleted after it was granted, and a tree that silently comes

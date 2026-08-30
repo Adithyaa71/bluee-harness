@@ -41,6 +41,24 @@
         "which is exactly what the MCP boundary buys us, and it matches what",
         "UACC's own uacc-mcp.bat already expects (it looks for %~dp0.venv)."
       ]
+    },
+    "nvim_lsp": {
+      "command": ".venv/Scripts/python.exe",
+      "args": [
+        "mcps/nvim-lsp/server.py"
+      ],
+      "env": {},
+      "enabled": false,
+      "$comment": [
+        "Code intelligence through a headless Neovim and its language servers.",
+        "DISABLED until its two prerequisites exist, because a server that cannot",
+        "answer anything is 4 more tool schemas on every prompt for nothing:",
+        "  1. winget install Neovim.Neovim",
+        "  2. .venv/Scripts/pip install pynvim",
+        "Then set enabled to true and restart. codemap.rs answers 'where does X",
+        "live'; this answers 'what calls X', which needs real resolution rather",
+        "than text matching."
+      ]
     }
   },
   "$comment": [

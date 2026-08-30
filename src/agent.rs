@@ -85,6 +85,8 @@ pub struct Agent {
     /// Whether the VLM tool is currently in `tool_defs`, so the gate can be
     /// synced without rebuilding the whole list every turn.
     vlm_offered: bool,
+    /// MCP servers the active workspace exposes. `None` means all of them.
+    allowed_servers: Option<Vec<String>>,
 }
 
 /// The one tool that only exists when you have said it may (§6).
@@ -232,10 +234,66 @@ impl Agent {
             vision_model: cfg.vision_model.clone(),
             vision,
             vlm_offered,
+            // Starts from the .env allowlist; a workspace can narrow it further
+            // at runtime without restarting.
+            allowed_servers: allow,
         })
     }
 
     /// Add or remove the VLM tool if the toggle moved since the last turn.
+    /// Narrow the exposed MCP servers to what the active workspace wants.
+    ///
+    /// This is the cost lever, not a nicety: 106 tool schemas are ~18,300
+    /// prompt tokens on every turn. Rebuilding the list rather than filtering
+    /// at call time means the model genuinely cannot see the others, which is
+    /// also what makes it choose better among the ones it can.
+    pub fn set_allowed_servers(&mut self, allow: Option<Vec<String>>) {
+        if allow == self.allowed_servers {
+            return;
+        }
+        self.allowed_servers = allow;
+        self.rebuild_tools();
+        let note = match &self.allowed_servers {
+            Some(list) if list.is_empty() => {
+                format!("workspace tools: none - {} tool(s) exposed", self.tool_defs.len())
+            }
+            Some(list) => format!(
+                "workspace tools: {} - {} tool(s) exposed",
+                list.join(", "),
+                self.tool_defs.len()
+            ),
+            None => format!("workspace tools: all - {} tool(s) exposed", self.tool_defs.len()),
+        };
+        let _ = self.log.append(EventKind::System { note });
+    }
+
+    /// Native tools plus whichever MCP servers are currently allowed.
+    fn rebuild_tools(&mut self) {
+        let mut defs = NativeTools::defs();
+        let allow = self.allowed_servers.clone();
+        defs.extend(
+            self.registry
+                .tools()
+                .iter()
+                .filter(|t| allow.as_ref().is_none_or(|a| a.contains(&t.server)))
+                .filter(|t| !WITHHELD_FROM_MODEL.contains(&t.qualified().as_str()))
+                .map(|t| ToolDef {
+                    name: t.qualified(),
+                    description: t.description.clone(),
+                    parameters: t.schema.clone(),
+                }),
+        );
+        self.tool_defs = defs;
+        // The vision gate is applied on top, so switching workspaces cannot
+        // smuggle the VLM tool back in.
+        self.vlm_offered = false;
+        self.sync_vision_tools();
+    }
+
+    pub fn allowed_servers(&self) -> Option<Vec<String>> {
+        self.allowed_servers.clone()
+    }
+
     fn sync_vision_tools(&mut self) {
         let allowed = self.vision.mode().vlm_allowed();
         if allowed == self.vlm_offered {

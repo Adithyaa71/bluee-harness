@@ -639,6 +639,44 @@ log('escape      :', await evaluate(`
   await new Promise(r => setTimeout(r, 200));
   return 'closed=' + !document.querySelector('#addmenu').classList.contains('on');
 `));
+log('');
+log('=== WORKSPACE CONNECTORS ===');
+await evaluate("document.querySelector('.rb[data-page=\"play\"]').click()");
+await sleep(1200);
+log('tickboxes   :', await evaluate(`
+  document.querySelector('#pgplus').click();
+  await new Promise(r => setTimeout(r, 300));
+  [...document.querySelectorAll('#addmenu .mi')].find(x => x.dataset.a === 'connectors').click();
+  await new Promise(r => setTimeout(r, 1400));
+  const m = document.querySelector('#addmenu');
+  return m.querySelector('.hd').textContent + ' | ' +
+    [...m.querySelectorAll('.mi[data-s]')].map(x =>
+      x.dataset.s + '=' + (x.querySelector('.sw').classList.contains('on') ? 'on' : 'off')).join(', ') +
+    ' | ' + (m.querySelector('.cost') || {}).textContent;
+`));
+log('untick one  :', await evaluate(`
+  const row = [...document.querySelectorAll('#addmenu .mi[data-s]')].find(x => x.dataset.s === 'uacc');
+  if (!row) return 'no uacc row';
+  row.click();
+  await new Promise(r => setTimeout(r, 1600));
+  const m = document.querySelector('#addmenu');
+  return [...m.querySelectorAll('.mi[data-s]')].map(x =>
+    x.dataset.s + '=' + (x.querySelector('.sw').classList.contains('on') ? 'on' : 'off')).join(', ') +
+    ' | ' + (m.querySelector('.cost') || {}).textContent;
+`));
+log('persisted   :', await evaluate(`
+  const d = await fetch('/api/roots').then(r => r.json());
+  const pg = d.roots.find(r => r.id === 'playground');
+  return 'playground servers = ' + JSON.stringify(pg.servers);
+`));
+log('use all     :', await evaluate(`
+  [...document.querySelectorAll('#addmenu .mi')].find(x => x.dataset.a === 'all').click();
+  await new Promise(r => setTimeout(r, 1600));
+  const d = await fetch('/api/roots').then(r => r.json());
+  const pg = d.roots.find(r => r.id === 'playground');
+  return 'back to ' + JSON.stringify(pg.servers) + ' | ' +
+    (document.querySelector('#addmenu .cost') || {}).textContent;
+`));
 
 log('\nconsole errors :', consoleErrors.length ? consoleErrors.join(' | ') : 'none');
 

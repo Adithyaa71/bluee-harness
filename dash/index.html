@@ -435,6 +435,8 @@ body{background:var(--bg);color:var(--ink);overflow:hidden;
 #addmenu .sw.on::after{transform:translateX(11px);background:var(--accent)}
 #addmenu .scroll{max-height:280px;overflow-y:auto}
 #addmenu .empty{padding:8px 9px;font-size:11.5px;color:var(--faint)}
+#addmenu .cost{padding:5px 9px 3px;font-size:10.5px;font-family:var(--mono);
+  color:var(--faint);line-height:1.4}
 
 .win{position:fixed;z-index:60;display:flex;flex-direction:column;
   background:var(--panel);border:1px solid var(--line);border-radius:12px;
@@ -1920,8 +1922,12 @@ $('#pgterm').onclick=()=>{
   },400);
 };
 $('#pgroot').onchange=e=>{ fileRoot=e.target.value; filePick=null; fileOpen={};
-  // Each granted folder is a workspace, and its terminals come back with it.
+  // Each granted folder is a workspace: its terminals come back with it, and
+  // its chosen MCP servers become the toolset.
   loadTabs(); if(!app.classList.contains('no-term')) openTerm(termActive);
+  api('/api/workspace',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({root:e.target.value})})
+    .then(r=>{ if(r&&r.tools_exposed) toolsNote(r.tools_exposed); }).catch(()=>{});
   $('#pgview').classList.remove('on'); $('#playbody').style.display='';
   $('#pgrootmsg').textContent=''; loadFiles(); };
 $('#pgroadd').onclick=()=>{
@@ -2544,50 +2550,99 @@ function openAddMenu(anchor, target){
     });
 }
 
+/* Which servers this workspace exposes.
+   Each granted folder is a workspace, so the tick boxes are per folder rather
+   than global: a trading workspace does not need 70 GUI-automation tools, and
+   every schema it does not need is prompt tokens on every single turn. */
 async function openConnectors(anchor){
-  showMenu(anchor, '<div class="hd">MCP connectors</div><div class="empty">loading…</div>');
-  const d = await api('/api/mcp').catch(() => ({ servers: [] }));
-  const rows = (d.servers || []).map(sv =>
-    '<div class="mi" data-s="' + esc(sv.name) + '">' +
-      '<span class="ic">' + (sv.connected ? '&#9679;' : '&#9675;') + '</span>' +
-      '<span>' + esc(sv.name) + '</span>' +
-      '<span class="sp"></span>' +
-      '<span class="hint">' + (sv.connected ? (sv.tools || 0) + ' tools' : 'off') + '</span>' +
-      '<span class="sw' + (sv.enabled !== false ? ' on' : '') + '"></span>' +
-    '</div>').join('');
-  showMenu(anchor,
-    '<div class="hd">MCP connectors</div>' +
-    '<div class="scroll">' + (rows || '<div class="empty">none configured</div>') + '</div>' +
-    '<div class="sep"></div>' +
-    item('&#9881;', 'Manage connectors', 'settings'),
-    m => {
-      m.querySelectorAll('.mi[data-s]').forEach(row => {
-        row.onclick = async () => {
-          // Toggling writes mcps/servers.json; servers are launched once at
-          // startup, so this takes effect on the next run and says so.
-          const sw = row.querySelector('.sw');
-          const on = !sw.classList.contains('on');
-          sw.classList.toggle('on', on);
-          const file = await api('/api/mcp').catch(() => null);
-          if (!file) return;
-          const target = (file.servers || []).find(x => x.name === row.dataset.s);
-          if (target) target.enabled = on;
-          await api('/api/mcp', { method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ servers: file.servers }) }).catch(() => {});
-          row.querySelector('.hint').textContent = on ? 'on at restart' : 'off at restart';
-        };
-      });
-      const manage = [...m.querySelectorAll('.mi')].find(x => x.dataset.a === 'manage-connectors');
-      if (manage) manage.onclick = () => {
-        closeMenu();
-        document.querySelector('.rb[data-page="set"]').click();
-        setTimeout(() => {
-          const b = [...$$('#settabs button')].find(x => x.dataset.st === 'mcp');
-          if (b) b.click();
-        }, 200);
+  showMenu(anchor, '<div class="hd">Connectors</div><div class="empty">loading…</div>');
+  const [mcp, rootsd] = await Promise.all([
+    api('/api/mcp').catch(() => ({ servers: [] })),
+    api('/api/roots').catch(() => ({ roots: [] })),
+  ]);
+  const here = (rootsd.roots || []).find(r => r.id === fileRoot) || { id: fileRoot };
+  // null means every server; a list means exactly those.
+  let chosen = here.servers == null ? null : here.servers.slice();
+  const all = mcp.servers || [];
+  const on = name => chosen === null || chosen.includes(name);
+
+  const draw = () => {
+    const rows = all.map(sv =>
+      '<div class="mi" data-s="' + esc(sv.name) + '">' +
+        '<span class="ic">' + (sv.connected ? '&#9679;' : '&#9675;') + '</span>' +
+        '<span>' + esc(sv.name) + '</span>' +
+        '<span class="sp"></span>' +
+        '<span class="hint">' +
+          (sv.connected ? (sv.tools || 0) + ' tools' : 'not running') + '</span>' +
+        '<span class="sw' + (on(sv.name) ? ' on' : '') + '"></span>' +
+      '</div>').join('');
+    const exposed = all.filter(sv => on(sv.name) && sv.connected)
+      .reduce((n, sv) => n + (sv.tools || 0), 0);
+    showMenu(anchor,
+      '<div class="hd">Connectors &middot; ' + esc(here.label || here.id) + '</div>' +
+      '<div class="scroll">' + (rows || '<div class="empty">none configured</div>') + '</div>' +
+      '<div class="sep"></div>' +
+      '<div class="mi" data-a="all"><span class="ic">&#10003;</span><span>Use all</span>' +
+        '<span class="sp"></span><span class="hint">' +
+        (chosen === null ? 'current' : '') + '</span></div>' +
+      '<div class="cost">' + exposed + ' tools exposed here' +
+        (exposed ? ' &middot; about ' + Math.round(exposed * 173) + ' prompt tokens a turn' : '') +
+      '</div>' +
+      '<div class="sep"></div>' +
+      item('&#9881;', 'Manage connectors', 'settings'),
+      wire);
+  };
+
+  const persist = async () => {
+    await api('/api/roots/servers', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ id: here.id, servers: chosen }) }).catch(() => {});
+    // Applied to the live agent now, not at the next session: the point of
+    // scoping is that the prompt gets smaller immediately.
+    const r = await api('/api/workspace', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ root: here.id }) }).catch(() => null);
+    if (r && r.tools_exposed) toolsNote(r.tools_exposed);
+  };
+
+  const wire = m => {
+    m.querySelectorAll('.mi[data-s]').forEach(row => {
+      row.onclick = async e => {
+        e.stopPropagation();
+        const name = row.dataset.s;
+        if (chosen === null) chosen = all.map(x => x.name);   // become explicit
+        chosen = on(name) ? chosen.filter(x => x !== name) : chosen.concat([name]);
+        if (chosen.length === all.length) chosen = null;      // back to "all"
+        draw();
+        await persist();
       };
     });
+    const useAll = [...m.querySelectorAll('.mi')].find(x => x.dataset.a === 'all');
+    if (useAll) useAll.onclick = async e => {
+      e.stopPropagation(); chosen = null; draw(); await persist();
+    };
+    const manage = [...m.querySelectorAll('.mi')].find(x => x.dataset.a === 'manage-connectors');
+    if (manage) manage.onclick = () => {
+      closeMenu();
+      document.querySelector('.rb[data-page="set"]').click();
+      setTimeout(() => {
+        const b = [...$$('#settabs button')].find(x => x.dataset.st === 'mcp');
+        if (b) b.click();
+      }, 200);
+    };
+  };
+  draw();
+}
+
+/* Say how many tools the workspace now exposes, briefly, in the top bar. */
+function toolsNote(n){
+  const el = $('#tmeta');
+  if (!el) return;
+  const was = el.textContent;
+  el.textContent = n + ' tools in this workspace';
+  setTimeout(() => {
+    if (el.textContent.endsWith('workspace')) el.textContent = was;
+  }, 3200);
 }
 
 async function openSkillsMenu(anchor){

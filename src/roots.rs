@@ -28,6 +28,14 @@ pub struct Root {
     /// The playground folder, which always exists and cannot be removed.
     #[serde(default)]
     pub builtin: bool,
+    /// Which MCP servers this workspace wants. `None` means all of them.
+    ///
+    /// This is §4f's tool scoping with a concrete trigger. It is also the cost
+    /// lever: 106 tool schemas are ~18,300 prompt tokens on *every* turn, about
+    /// a rupee a call before you have said anything. A workspace that only
+    /// needs the graph does not need to pay for 70 GUI-automation tools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub servers: Option<Vec<String>>,
 }
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -46,6 +54,7 @@ fn playground(cfg: &Config) -> Root {
         label: "playground".into(),
         path: cfg.data_dir.join("artifacts"),
         builtin: true,
+        servers: None,
     }
 }
 
@@ -54,7 +63,15 @@ pub fn load(cfg: &Config) -> Vec<Root> {
     let mut out = vec![playground(cfg)];
     if let Ok(text) = std::fs::read_to_string(file(cfg)) {
         if let Ok(f) = serde_json::from_str::<RootsFile>(&text) {
-            out.extend(f.roots.into_iter().filter(|r| !r.builtin));
+            for r in f.roots {
+                // A stored `playground` entry carries its server choice; its
+                // path and builtin flag stay ours.
+                if r.id == "playground" {
+                    out[0].servers = r.servers;
+                } else {
+                    out.push(r);
+                }
+            }
         }
     }
     out
@@ -150,6 +167,7 @@ pub fn add(cfg: &Config, path: &str, label: Option<&str>) -> Result<Root> {
         label: label.map(str::to_string).unwrap_or(name),
         path: full,
         builtin: false,
+        servers: None,
     };
     roots.push(root.clone());
     save(cfg, &roots)?;
@@ -181,6 +199,40 @@ pub fn rename(cfg: &Config, id: &str, label: &str) -> Result<()> {
     };
     r.label = label.chars().take(60).collect();
     save(cfg, &roots)
+}
+
+/// Choose which MCP servers a workspace exposes. An empty list means none,
+/// which is different from `None` (all) and is a legitimate thing to want.
+pub fn set_servers(cfg: &Config, id: &str, servers: Option<Vec<String>>) -> Result<()> {
+    let mut roots = load(cfg);
+    // The playground is not in roots.json, so its choice is stored separately
+    // under a reserved entry rather than being silently unsettable.
+    if id == "playground" {
+        let mut pg = playground(cfg);
+        pg.servers = servers;
+        pg.builtin = false; // so save() keeps it
+        pg.id = "playground".into();
+        roots.retain(|r| r.id != "playground" || r.builtin);
+        let mut out: Vec<Root> = roots.into_iter().filter(|r| !r.builtin).collect();
+        out.insert(0, pg);
+        return save_all(cfg, &out);
+    }
+    let Some(r) = roots.iter_mut().find(|r| r.id == id) else {
+        bail!("no granted folder with id `{id}`");
+    };
+    r.servers = servers;
+    save(cfg, &roots)
+}
+
+/// Write the file exactly as given, including a stored playground entry.
+fn save_all(cfg: &Config, roots: &[Root]) -> Result<()> {
+    let p = file(cfg);
+    if let Some(dir) = p.parent() {
+        std::fs::create_dir_all(dir)?;
+    }
+    std::fs::write(&p, serde_json::to_string_pretty(&serde_json::json!({ "roots": roots }))?)
+        .with_context(|| format!("writing {}", p.display()))?;
+    Ok(())
 }
 
 pub fn get(cfg: &Config, id: &str) -> Result<Root> {

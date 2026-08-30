@@ -316,6 +316,20 @@ D:\projects\my-thing
 Then pick it from the dropdown at the top of the panel. **terminal here** opens
 the terminal already `cd`'d into it.
 
+**Each folder picks its own tools.** Open the **+** menu → **Connectors** and
+tick which MCP servers this workspace uses. It's per folder, and it's the
+cheapest single thing you can do about cost:
+
+```
+all four servers   108 tools   ~18,700 prompt tokens every turn
+without uacc        38 tools    ~6,600 prompt tokens every turn
+```
+
+That's paid on *every* message before you've said anything. A trading workspace
+doesn't need 70 GUI-automation tools. The menu shows the count and the estimate
+as you tick, and it applies to the running conversation immediately — no
+restart. **Use all** puts it back.
+
 **You grant folders; bluee cannot.** There's deliberately no tool that lets it
 add one — a boundary the thing inside can move isn't a boundary. It can list,
 read and delete *inside* what you've granted, and nowhere else. **Revoke** takes
