@@ -29,3 +29,6 @@ __pycache__/
 
 # UI check screenshots - regenerated on demand by dev/uicheck.mjs
 dev/shots/
+
+# Cloned tool repos keep their own git history; not ours to vendor.
+tools/nyx-nvim/
