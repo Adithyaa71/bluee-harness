@@ -471,6 +471,106 @@ log('back to graph page:', await evaluate(`
     Math.round(cv.getBoundingClientRect().height);
 `));
 log('shot        :', await shot('memory-graph'));
+log('\n=== TERMINAL TABS ===');
+await evaluate(`
+  document.querySelector('.rb[data-page="chat"]').click();
+  if (document.querySelector('#app').classList.contains('no-term'))
+    document.querySelector('.rb[data-toggle="term"]').click();
+`);
+await sleep(1500);
+log('tabs        :', await evaluate(`
+  const t = [...document.querySelectorAll('#termtabs .ttab')];
+  return t.length + ' tab(s): ' + t.map(x => x.querySelector('.nm').textContent).join(', ') +
+    ' | add button=' + (document.querySelector('#ttadd') !== null);
+`));
+log('add a tab   :', await evaluate(`
+  document.querySelector('#ttadd').click();
+  await new Promise(r => setTimeout(r, 1200));
+  const t = [...document.querySelectorAll('#termtabs .ttab')];
+  return t.length + ' tabs, active=' +
+    (t.find(x => x.classList.contains('on'))||{}).dataset?.id;
+`));
+log('switch back :', await evaluate(`
+  const tabs = [...document.querySelectorAll('#termtabs .ttab')];
+  const targetId = tabs[0].dataset.id;
+  tabs[0].click();
+  await new Promise(r => setTimeout(r, 1400));
+  // Re-query: drawTabs rebuilds the strip, so the node captured before the
+  // click is detached and asserting on it measures nothing.
+  const now = [...document.querySelectorAll('#termtabs .ttab')]
+    .find(n => n.classList.contains('on'));
+  return 'active=' + (now && now.dataset.id) + ' expected=' + targetId +
+    ' -> ' + (now && now.dataset.id === targetId ? 'OK' : 'WRONG');
+`));
+log('persisted   :', await evaluate(`
+  const k = 'bluee.terms.' + (window.fileRoot || 'playground');
+  const raw = localStorage.getItem(k);
+  return raw ? JSON.parse(raw).length + ' session(s) remembered under ' + k : 'nothing saved';
+`));
+log('close a tab :', await evaluate(`
+  const tabs = [...document.querySelectorAll('#termtabs .ttab')];
+  const x = tabs[1] && tabs[1].querySelector('.x');
+  if (!x) return 'no close button';
+  x.click();
+  await new Promise(r => setTimeout(r, 1000));
+  return document.querySelectorAll('#termtabs .ttab').length + ' tab(s) left';
+`));
+
+log('\n=== SMOOTHNESS ===');
+log('drag frames :', await evaluate(`
+  // Open an in-page window and measure what a drag actually costs per frame.
+  openWindow({ id: 'perftest', title: 'perf', html: '<div style="padding:20px">x</div>',
+               w: 600, h: 400 });
+  await new Promise(r => setTimeout(r, 300));
+  const head = document.querySelector('.win .win-head');
+  const r = head.getBoundingClientRect();
+  head.dispatchEvent(new MouseEvent('mousedown', { clientX: r.left+40, clientY: r.top+10, bubbles: true }));
+  const times = [];
+  let last = performance.now();
+  for (let i = 0; i < 40; i++) {
+    window.dispatchEvent(new MouseEvent('mousemove',
+      { clientX: r.left+40+i*6, clientY: r.top+10+i*3, bubbles: true }));
+    await new Promise(r2 => requestAnimationFrame(r2));
+    const now = performance.now();
+    times.push(now - last); last = now;
+  }
+  const inert = getComputedStyle(document.body).cursor;
+  const usingTransform = document.querySelector('.win').style.transform !== '';
+  window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+  times.sort((a,b)=>a-b);
+  const med = times[Math.floor(times.length/2)].toFixed(1);
+  const worst = times[times.length-1].toFixed(1);
+  return 'median ' + med + 'ms, worst ' + worst + 'ms | transform used=' + usingTransform +
+    ' | iframes inert during drag=' + (inert === 'grabbing');
+`));
+log('after drag  :', await evaluate(`
+  const w = document.querySelector('.win');
+  const res = 'transform cleared=' + (w.style.transform === '') +
+    ' left=' + w.style.left + ' top=' + w.style.top +
+    ' body still dragging=' + document.body.classList.contains('dragging');
+  document.querySelector('.win .close').click();
+  return res;
+`));
+
+log('\n=== SOLO MODE ===');
+for (const view of ['terminal', 'graph', 'tasks']) {
+  await evaluate(`location.href = '/?only=' + ${JSON.stringify(view)};`);
+  await sleep(3000);
+  log('  ?only=' + view.padEnd(9), ':', await evaluate(`
+    const app = document.querySelector('#app');
+    const rail = document.querySelector('#rail');
+    const vis = el => el && el.offsetParent !== null && el.getBoundingClientRect().height > 5;
+    let main = 'none';
+    if (${JSON.stringify(view)} === 'terminal') main = 'term ' + Math.round(document.querySelector('#term').getBoundingClientRect().height) + 'px';
+    if (${JSON.stringify(view)} === 'graph') main = 'canvas ' + Math.round(document.querySelector('#gcv').getBoundingClientRect().height) + 'px';
+    if (${JSON.stringify(view)} === 'tasks') main = 'panel ' + Math.round(document.querySelector('#side').getBoundingClientRect().width) + 'px';
+    return 'solo=' + app.classList.contains('solo') +
+           ' rail hidden=' + !vis(rail) +
+           ' | ' + main + ' | title=' + JSON.stringify(document.title);
+  `));
+}
+await evaluate("location.href = '/';");
+await sleep(2500);
 
 log('\nconsole errors :', consoleErrors.length ? consoleErrors.join(' | ') : 'none');
 

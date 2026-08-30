@@ -40,6 +40,9 @@ struct AppState {
     agent: Mutex<Option<Agent>>,
     pty: PtyManager,
     vision: Arc<VisionState>,
+    /// Where we are actually listening, so a pop-out window can be pointed
+    /// back at this same server.
+    port: u16,
 }
 
 type Shared = Arc<AppState>;
@@ -76,6 +79,7 @@ pub async fn serve_on(cfg: Config, std_listener: std::net::TcpListener) -> Resul
         registry.tools().len()
     );
 
+    let port = std_listener.local_addr()?.port();
     let cfg_vision_dir = cfg.data_dir.clone();
     let state: Shared = Arc::new(AppState {
         cfg,
@@ -84,6 +88,7 @@ pub async fn serve_on(cfg: Config, std_listener: std::net::TcpListener) -> Resul
         agent: Mutex::new(None),
         pty: PtyManager::default(),
         vision: Arc::new(VisionState::load(&cfg_vision_dir)),
+        port,
     });
 
     let app = Router::new()
@@ -107,6 +112,7 @@ pub async fn serve_on(cfg: Config, std_listener: std::net::TcpListener) -> Resul
         .route("/api/files", get(list_files))
         .route("/api/file", get(read_file))
         .route("/api/file/delete", post(delete_file))
+        .route("/api/window", post(open_window))
         .route("/api/roots", get(list_roots).post(add_root))
         .route("/api/roots/remove", post(remove_root))
         .route("/artifacts/{id}/", get(artifact_root))
@@ -1067,6 +1073,69 @@ struct FileRef {
 
 fn default_root() -> String {
     "playground".into()
+}
+
+#[derive(Deserialize)]
+struct WindowReq {
+    /// Which single view the new window should show.
+    view: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    width: Option<f64>,
+    #[serde(default)]
+    height: Option<f64>,
+}
+
+/// Open one view of the dashboard in a real OS window.
+///
+/// The window loads the same page with `?only=<view>`, so every pop-out reuses
+/// the code it popped out of rather than a second implementation that drifts.
+/// When not running under Tauri (plain `harness dash` in a browser) this says
+/// so and the page falls back to `window.open`.
+async fn open_window(
+    State(s): State<Shared>,
+    Json(b): Json<WindowReq>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let mut url = format!("http://127.0.0.1:{}/?only={}", s.port, b.view);
+    if let Some(id) = b.id.as_deref() {
+        url.push_str(&format!("&id={}", urlencode(id)));
+    }
+    let label = format!(
+        "pop-{}-{}",
+        b.view,
+        b.id.as_deref().unwrap_or("main").replace(|c: char| !c.is_alphanumeric(), "-")
+    );
+    let title = b.title.clone().unwrap_or_else(|| format!("bluee - {}", b.view));
+
+    if crate::app::handle().is_none() {
+        return Ok(Json(json!({
+            "ok": false, "tauri": false, "url": url,
+            "note": "Not running as the desktop app - open it from the browser instead."
+        })));
+    }
+    crate::app::open_view(
+        url.clone(),
+        label.clone(),
+        title,
+        b.width.unwrap_or(900.0),
+        b.height.unwrap_or(620.0),
+    )
+    .map_err(fail)?;
+    Ok(Json(json!({ "ok": true, "tauri": true, "label": label, "url": url })))
+}
+
+fn urlencode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                (b as char).to_string()
+            }
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
 }
 
 #[derive(Deserialize)]

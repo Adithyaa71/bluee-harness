@@ -351,6 +351,24 @@ body{background:var(--bg);color:var(--ink);overflow:hidden;
 /* ---------- terminal ---------- */
 #term{grid-area:term;background:#080a0e;border-top:1px solid var(--line);
   display:flex;flex-direction:column;min-height:0;overflow:hidden}
+#termtabs{display:flex;align-items:stretch;gap:2px;padding:4px 6px 0;flex:none;
+  background:var(--panel);border-bottom:1px solid var(--line);overflow-x:auto;
+  scrollbar-width:none}
+#termtabs::-webkit-scrollbar{display:none}
+.ttab{display:flex;align-items:center;gap:6px;padding:5px 9px;border-radius:7px 7px 0 0;
+  font-size:11.5px;font-family:var(--mono);color:var(--faint);cursor:pointer;
+  border:1px solid transparent;border-bottom:0;white-space:nowrap;
+  transition:background .12s,color .12s}
+.ttab:hover{background:var(--panel2);color:var(--dim)}
+.ttab.on{background:#080a0e;color:var(--ink);border-color:var(--line)}
+.ttab .x{opacity:0;font-size:12px;line-height:1}
+.ttab:hover .x,.ttab.on .x{opacity:.5}
+.ttab .x:hover{opacity:1;color:var(--bad)}
+.ttab .dot{width:6px;height:6px;border-radius:50%;background:var(--ok);flex:none}
+.ttab.dead .dot{background:var(--faint)}
+#ttadd{padding:5px 10px;border-radius:7px 7px 0 0;font-size:13px;color:var(--faint);
+  cursor:pointer;border:0;background:transparent;line-height:1}
+#ttadd:hover{color:var(--accent);background:var(--panel2)}
 #termbar{display:flex;align-items:center;gap:8px;padding:0 12px;height:36px;
   background:var(--panel);border-bottom:1px solid var(--line);flex:none}
 #termbar .t{font-size:11.5px;color:var(--dim);font-family:var(--mono)}
@@ -365,6 +383,28 @@ body{background:var(--bg);color:var(--ink);overflow:hidden;
    terminal and the log/tasks panel can each be popped out of the layout into
    one of these, which is the point - a terminal pinned to a 300px strip at the
    bottom is not a terminal you can work in. */
+/* ---------- solo mode ----------
+   A pop-out loads this same page with ?only=<view>, so every popped window runs
+   the code it popped out of instead of a second implementation that drifts.
+   These rules strip everything except the one view being shown. */
+#app.solo #rail,#app.solo #topbar,#app.solo #playbar,
+#app.solo #pgask,#app.solo #composer,#app.solo #memsplit,#app.solo #pgfiles,
+#app.solo #pgdrag,#app.solo #gbar{display:none!important}
+/* The side panel is hidden in every solo view EXCEPT the two that are the side
+   panel. Listing it in the blanket rule above made the !important beat the
+   rule meant to show it, which is how it came back 0px wide. */
+#app.solo:not(.only-tasks):not(.only-log) #side{display:none!important}
+#app.solo{--side:0px;--term:0px}
+#app.solo #main{border:0}
+#app.solo.only-tasks,#app.solo.only-log{grid-template-columns:0 0 1fr}
+#app.solo.only-tasks #main,#app.solo.only-log #main{display:none}
+#app.solo.only-tasks #side,#app.solo.only-log #side{display:flex;border-left:0}
+#app.solo #term{display:flex!important;grid-area:auto;flex:1;min-height:0;border:0}
+#app.solo.only-terminal{display:flex;flex-direction:column}
+#app.solo #memgraph{height:auto;flex:1;border-top:0}
+#app.solo #memtop{flex:none;max-height:45vh}
+#app.solo.only-graph #glegend{display:flex}
+
 .win{position:fixed;z-index:60;display:flex;flex-direction:column;
   background:var(--panel);border:1px solid var(--line);border-radius:12px;
   box-shadow:0 24px 70px rgba(0,0,0,.6), 0 2px 8px rgba(0,0,0,.4);
@@ -392,6 +432,11 @@ body{background:var(--bg);color:var(--ink);overflow:hidden;
 .win-grip.e{right:0;top:0;width:6px;height:100%;cursor:ew-resize}
 .win-grip.s{left:0;bottom:0;height:6px;width:100%;cursor:ns-resize}
 .win-grip.se{right:0;bottom:0;width:14px;height:14px;cursor:nwse-resize}
+body.dragging iframe,body.dragging canvas{pointer-events:none!important}
+body.dragging{cursor:grabbing;user-select:none}
+/* Compositor hints: the window is its own layer, so moving it does not force
+   the rest of the page to repaint with it. */
+.win{contain:layout paint;backface-visibility:hidden}
 
 /* ---------- playground: files + preview ---------- */
 #pgwrap{flex:1;min-height:0;display:flex}
@@ -679,6 +724,7 @@ body{background:var(--bg);color:var(--ink);overflow:hidden;
   </div>
 
   <div id="term">
+    <div id="termtabs"></div>
     <div id="termbar">
       <span class="t">shell</span>
       <select id="shellsel">
@@ -716,6 +762,50 @@ function md(t){
   }).join('');
 }
 
+/* ---------- solo mode ----------
+   When the page is loaded as ?only=<view> it is a pop-out: show that one view,
+   full bleed, and hide the shell around it. Same code, one surface. */
+const soloView = new URLSearchParams(location.search).get('only');
+const soloId = new URLSearchParams(location.search).get('id');
+function bootSolo(){
+  if(!soloView) return false;
+  document.body.classList.add('solo-body');
+  app.classList.add('solo','only-'+soloView);
+  const show = id => {
+    $$('.view').forEach(v=>v.classList.remove('on'));
+    const v=$(id); if(v) v.classList.add('on');
+  };
+  if(soloView==='terminal'){
+    app.classList.remove('no-term');
+    app.style.setProperty('--term','100%');
+    setTimeout(()=>{ openTerm(soloId||undefined); try{fit.fit()}catch(_){} },120);
+  } else if(soloView==='graph'){
+    show('#v-graph'); graphHome();
+    setTimeout(()=>drawGraph(),150);
+  } else if(soloView==='memory'){
+    show('#v-memory'); graphInto($('#mgholder'));
+  } else if(soloView==='artifact'){
+    show('#v-play');
+    setTimeout(()=>{
+      $('#playbody').style.display='none';
+      $('#aview').classList.add('on');
+      $('#aframe').src='/artifacts/'+encodeURIComponent(soloId)+'/';
+      $('#aname').textContent=soloId;
+    },80);
+  } else if(soloView==='tasks'||soloView==='log'){
+    show('#v-chat');
+    app.classList.remove('no-side');
+    app.style.setProperty('--side','100%');
+    $$('#sidetabs button').forEach(b=>b.classList.toggle('on',b.dataset.sp===soloView));
+    $$('.sp').forEach(x=>x.classList.remove('on'));
+    $('#sp-'+soloView).classList.add('on');
+    setTimeout(()=>{ soloView==='tasks'?loadTasks():loadLog();
+      setInterval(()=>{ soloView==='tasks'?loadTasks():loadLog(); },4000); },200);
+  }
+  document.title='bluee - '+soloView;
+  return true;
+}
+
 /* ---------- left rail: pages + panel toggles ---------- */
 const app=$('#app');
 $$('.rb[data-page]').forEach(b=>b.onclick=()=>{
@@ -738,7 +828,7 @@ $$('[data-toggle]').forEach(b=>b.onclick=()=>{
   b.classList.toggle('on',open);
   if(k==='term'){
     app.style.setProperty('--term', open?'300px':'0px');
-    if(open) setTimeout(()=>{ openTerm(); try{fit.fit()}catch{} },70);
+    if(open) setTimeout(()=>{ loadTabs(); openTerm(termActive); try{fit.fit()}catch{} },70);
   }else{
     app.style.setProperty('--side', open?'320px':'0px');
   }
@@ -1582,8 +1672,11 @@ function openArtifact(id){
 $('#aback').onclick=()=>{ $('#aview').classList.remove('on'); $('#playbody').style.display=''; };
 /* Artifacts pop out into a real window - drag, resize, maximise - so a chart
    you are working against can sit beside the chat instead of underneath it. */
-$('#apop').onclick=()=>{
+$('#apop').onclick=async()=>{
   const a=artifacts.find(x=>x.name===$('#aname').textContent); if(!a) return;
+  // Its own OS window, so a live chart can sit on a second monitor while you
+  // work in the main one.
+  if(await popOut('artifact',{id:a.id,title:a.name,w:900,h:640})) return;
   const url='/artifacts/'+encodeURIComponent(a.id)+'/';
   openWindow({ id:'artifact:'+a.id, title:a.name, subtitle:a.topic, w:900, h:620,
     html:'<iframe style="width:100%;height:100%;border:0;background:#0f1116" '+
@@ -1620,6 +1713,8 @@ $('#pgterm').onclick=()=>{
   },400);
 };
 $('#pgroot').onchange=e=>{ fileRoot=e.target.value; filePick=null; fileOpen={};
+  // Each granted folder is a workspace, and its terminals come back with it.
+  loadTabs(); if(!app.classList.contains('no-term')) openTerm(termActive);
   $('#pgview').classList.remove('on'); $('#playbody').style.display='';
   $('#pgrootmsg').textContent=''; loadFiles(); };
 $('#pgroadd').onclick=()=>{
@@ -1702,8 +1797,12 @@ $('#pgsrc').onclick=()=>{
     showSource(filePick); }
   else { b.dataset.mode='render'; b.textContent='Source'; showRendered(filePick); }
 };
-$('#pgpop').onclick=()=>{
+$('#pgpop').onclick=async()=>{
   if(!filePick) return;
+  if(fileRoot==='playground'&&/\.html?$/i.test(filePick)){
+    const id=filePick.split('/')[0];
+    if(await popOut('artifact',{id,title:filePick,w:900,h:640})) return;
+  }
   const html=/\.html?$/i.test(filePick)
     ? '<iframe style="width:100%;height:100%;border:0;background:#0f1116" '+
       'sandbox="allow-scripts allow-forms allow-popups" src="'+artifactUrl(filePick)+'"></iframe>'
@@ -2124,7 +2223,8 @@ function graphHome(){
 }
 
 $('#mgfull').onclick=()=>document.querySelector('.rb[data-page="graph"]').click();
-$('#mgpop').onclick=()=>{
+$('#mgpop').onclick=async()=>{
+  if(await popOut('graph',{title:'bluee - graph',w:1000,h:700})) return;
   if(winOpen.graph){ winOpen.graph.close(); return; }
   openWindow({ id:'graph', title:'Graph', subtitle:'memory relationships',
     adopt:$('#gcv'), w:900, h:620,
@@ -2137,7 +2237,8 @@ $('#mgpop').onclick=()=>{
       const cv=$('#gcv'); gFit(cv.clientWidth,cv.clientHeight); gRender();
     },40); } });
 };
-$('#mempop').onclick=()=>{
+$('#mempop').onclick=async()=>{
+  if(await popOut('memory',{title:'bluee - memory',w:860,h:600})) return;
   if(winOpen.memory){ winOpen.memory.close(); return; }
   openWindow({ id:'memory', title:'Memory', subtitle:'semantic search',
     adopt:$('#memtop'), w:820, h:560 });
@@ -2174,6 +2275,35 @@ addEventListener('resize',()=>{ if($('#v-graph').classList.contains('on')) gRend
    websocket - re-creating either would drop the shell session, which is the
    one thing the shared terminal must never do. Closing puts it back. */
 const winOpen = {};
+/* An iframe captures mouse events, so a drag that crosses one stops dead. The
+   fix is to make every iframe inert for the duration, which this body class
+   does. Written as a function on purpose: the first version used a `let` that
+   silently shadowed the window property it was meant to set, so the class was
+   never applied and the whole guard did nothing. */
+const setDragging = v => document.body.classList.toggle('dragging', !!v);
+
+/* Ask the desktop shell for a genuine OS window.
+   An in-page div cannot be dragged to a second monitor, which is most of why
+   you would pop something out at all. Under Tauri this creates a real window;
+   in a plain browser it falls back to window.open, which is also a real window;
+   only if both are refused does it fall back to the in-page one. */
+async function popOut(view, opts = {}){
+  const body = { view, title: opts.title || ('bluee - ' + view),
+                 id: opts.id, width: opts.w || 900, height: opts.h || 620 };
+  let r = null;
+  try {
+    r = await api('/api/window', { method: 'POST',
+      headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+  } catch (_) {}
+  if (r && r.ok) return 'os';
+  const url = (r && r.url) ||
+    (location.origin + '/?only=' + encodeURIComponent(view) +
+     (opts.id ? '&id=' + encodeURIComponent(opts.id) : ''));
+  const w = window.open(url, 'bluee_' + view + '_' + (opts.id || ''),
+    `width=${body.width},height=${body.height}`);
+  if (w) { try { w.focus(); } catch (_) {} return 'browser'; }
+  return null;
+}
 
 function openWindow(opts){
   const id = opts.id;
@@ -2245,12 +2375,32 @@ function openWindow(opts){
     const r = host.getBoundingClientRect();
     const ox = e.clientX - r.left, oy = e.clientY - r.top;
     head.classList.add('drag');
+    // Move with a transform, not left/top: transform is composited, so a drag
+    // is one GPU step per frame instead of a layout and a repaint. The final
+    // position is written back to left/top on release so nothing else has to
+    // know about the transform.
+    let dx = 0, dy = 0, frame = 0;
+    const baseL = r.left, baseT = r.top;
+    setDragging(true);
+    host.style.willChange = 'transform';
     const move = ev => {
-      host.style.left = Math.min(innerWidth - 80, Math.max(-r.width + 90, ev.clientX - ox)) + 'px';
-      host.style.top  = Math.min(innerHeight - 40, Math.max(0, ev.clientY - oy)) + 'px';
+      dx = Math.min(innerWidth - 80, Math.max(-r.width + 90, ev.clientX - ox)) - baseL;
+      dy = Math.min(innerHeight - 40, Math.max(0, ev.clientY - oy)) - baseT;
+      // One write per frame. Pointer events fire faster than the display
+      // refreshes, and doing the work more often than that is wasted.
+      if (!frame) frame = requestAnimationFrame(() => {
+        frame = 0;
+        host.style.transform = `translate3d(${dx}px,${dy}px,0)`;
+      });
     };
     const up = () => {
+      if (frame) { cancelAnimationFrame(frame); frame = 0; }
       head.classList.remove('drag');
+      host.style.transform = '';
+      host.style.willChange = '';
+      host.style.left = (baseL + dx) + 'px';
+      host.style.top  = (baseT + dy) + 'px';
+      setDragging(false);
       removeEventListener('mousemove', move); removeEventListener('mouseup', up);
       if (opts.onResize) opts.onResize();
     };
@@ -2265,12 +2415,22 @@ function openWindow(opts){
       const sx = e.clientX, sy = e.clientY, sw = r.width, sh = r.height;
       const ew = g.classList.contains('e') || g.classList.contains('se');
       const es = g.classList.contains('s') || g.classList.contains('se');
+      let w = sw, h = sh, frame = 0;
+      setDragging(true);
       const move = ev => {
-        if (ew) host.style.width  = Math.max(340, sw + ev.clientX - sx) + 'px';
-        if (es) host.style.height = Math.max(200, sh + ev.clientY - sy) + 'px';
-        if (opts.onResize) opts.onResize();
+        if (ew) w = Math.max(340, sw + ev.clientX - sx);
+        if (es) h = Math.max(200, sh + ev.clientY - sy);
+        if (!frame) frame = requestAnimationFrame(() => {
+          frame = 0;
+          if (ew) host.style.width = w + 'px';
+          if (es) host.style.height = h + 'px';
+          // Deliberately NOT calling onResize on every frame: xterm's fit()
+          // reflows the whole buffer and is far too heavy for 60fps.
+        });
       };
       const up = () => {
+        if (frame) { cancelAnimationFrame(frame); frame = 0; }
+        setDragging(false);
         removeEventListener('mousemove', move); removeEventListener('mouseup', up);
         if (opts.onResize) opts.onResize();
       };
@@ -2292,7 +2452,12 @@ addEventListener('keydown', e => {
 
 /* Pop the terminal out of the bottom strip into a real window. The xterm
    instance moves with it, so the shell session is untouched. */
-function popTerminal(){
+async function popTerminal(){
+  // A real window, carrying the session id, so the shell it attaches to is the
+  // same one - the pty outlives the socket, so nothing is lost in the move.
+  const how = await popOut('terminal', { id: shellKey(), title: 'Terminal - ' + shellValue(),
+                                         w: 900, h: 520 });
+  if (how) { app.classList.add('no-term'); app.style.setProperty('--term','0px'); return; }
   const strip = $('#term');
   if (winOpen.term) { winOpen.term.close(); return; }
   app.classList.add('no-term');
@@ -2307,12 +2472,14 @@ function popTerminal(){
 }
 
 /* Same for the log / tasks panel. */
-function popSide(){
+async function popSide(){
+  const which = $('#sidetabs button.on');
+  const view = which && which.dataset.sp === 'tasks' ? 'tasks' : 'log';
+  if (await popOut(view, { title: 'bluee - ' + view, w: 760, h: 620 })) return;
   const panel = $('#side');
   if (winOpen.side) { winOpen.side.close(); return; }
   app.classList.add('no-side');
   app.style.setProperty('--side', '0px');
-  const which = $('#sidetabs button.on');
   openWindow({
     id: 'side', title: which ? which.textContent : 'Log',
     subtitle: 'current session', adopt: panel, w: 720, h: 520,
@@ -2580,9 +2747,88 @@ function openTerm(id){
     }
     term.write(new Uint8Array(ev.data));
   };
-  ws.onclose=()=>$('#termstat').textContent='disconnected';
+  ws.onclose=()=>{
+    $('#termstat').textContent='disconnected';
+    $$('#termtabs .ttab').forEach(n=>n.classList.toggle('dead',n.dataset.id===sid));
+  };
+  termActive=sid;
+  $$('#termtabs .ttab').forEach(n=>{
+    n.classList.toggle('on',n.dataset.id===sid);
+    if(n.dataset.id===sid) n.classList.remove('dead');
+  });
 }
-$('#termnew').onclick=()=>openTerm(shellKey()+'_'+Date.now().toString(36));
+/* ---------- terminal tabs, scoped to the workspace ----------
+   A shell session is a place you were in the middle of something. The pty
+   already outlives its socket, so "resume" is just: remember which sessions
+   belong to this folder and re-attach to them - which is the tmux behaviour
+   that matters here, without reimplementing tmux.
+
+   Sessions are keyed by granted folder, so opening a workspace brings back the
+   terminals you had open in it and nothing from another one. */
+let termTabs = [], termActive = null;
+
+const tabsKey = () => 'bluee.terms.' + (fileRoot || 'playground');
+
+function loadTabs(){
+  try{ termTabs = JSON.parse(localStorage.getItem(tabsKey()) || '[]'); }
+  catch(_){ termTabs = []; }
+  if(!termTabs.length){
+    termTabs = [{ id: shellKey(), shell: shellValue(), name: '1' }];
+  }
+  if(!termTabs.some(t => t.id === termActive)) termActive = termTabs[0].id;
+  saveTabs();
+  drawTabs();
+}
+function saveTabs(){
+  try{ localStorage.setItem(tabsKey(), JSON.stringify(termTabs)); }catch(_){}
+}
+function drawTabs(){
+  const el = $('#termtabs');
+  if(!el) return;
+  el.innerHTML = termTabs.map(t =>
+    '<div class="ttab' + (t.id === termActive ? ' on' : '') + '" data-id="' + esc(t.id) + '">' +
+      '<span class="dot"></span>' +
+      '<span class="nm">' + esc(t.name || t.shell) + '</span>' +
+      (termTabs.length > 1 ? '<span class="x">&#10005;</span>' : '') +
+    '</div>').join('') +
+    '<button id="ttadd" title="New terminal in this workspace">+</button>';
+
+  el.querySelectorAll('.ttab').forEach(node => {
+    const id = node.dataset.id;
+    node.onclick = e => {
+      if(e.target.classList.contains('x')){ closeTab(id); return; }
+      switchTab(id);
+    };
+  });
+  $('#ttadd').onclick = () => addTab();
+}
+function addTab(){
+  const n = String(termTabs.length + 1);
+  const t = { id: shellKey() + '_' + Date.now().toString(36), shell: shellValue(), name: n };
+  termTabs.push(t); termActive = t.id; saveTabs(); drawTabs(); openTerm(t.id);
+}
+function switchTab(id){
+  if(id === termActive) return;
+  termActive = id; saveTabs(); drawTabs();
+  const t = termTabs.find(x => x.id === id);
+  if(t && t.shell){
+    // Point the picker at whatever this tab is, so the label is not lying.
+    const sel = $('#shellsel');
+    if([...sel.options].some(o => o.value === t.shell)) sel.value = t.shell;
+    else { sel.value = '__custom'; $('#shellcustom').style.display=''; $('#shellcustom').value = t.shell; }
+  }
+  openTerm(id);
+}
+function closeTab(id){
+  termTabs = termTabs.filter(t => t.id !== id);
+  if(!termTabs.length) termTabs = [{ id: shellKey(), shell: shellValue(), name: '1' }];
+  if(termActive === id) termActive = termTabs[0].id;
+  saveTabs(); drawTabs(); openTerm(termActive);
+  // Deliberately does NOT kill the pty: closing a tab is putting a window away,
+  // not ending the work. Reopening the workspace reattaches to it.
+}
+
+$('#termnew').onclick = () => addTab();
 
 /* ---------- boot ---------- */
 async function ping(){
@@ -2600,7 +2846,13 @@ async function ping(){
     }
   }catch{ $('#live').classList.remove('live'); }
 }
-ping(); loadLog(); loadVision(); setInterval(ping,20000); setInterval(loadVision,30000);
+// A pop-out boots into one view and skips the rest of the shell.
+if(!bootSolo()){
+  ping(); loadLog(); loadVision();
+  setInterval(ping,20000); setInterval(loadVision,30000);
+}else{
+  ping();
+}
 </script>
 </body>
 </html>
