@@ -213,6 +213,15 @@ what it knows, use the **Graph** page.
 **The Graph page:** scroll to zoom, drag to move, double-click to fit it all
 back on screen, hover a dot to name it. Labels appear as you zoom in.
 
+**Find something:** type in the box at the top. Matches get a gold ring so you
+can see where they are; press Enter to fly to the first one and pin it. If what
+you searched for is in a hidden kind it tells you that instead of pretending
+there's no match.
+
+**Click a node to pin it.** Its connections light up and everything else fades,
+and it stays that way while you scroll and zoom. Click empty space to let go.
+The card shows how many links it has.
+
 **The coloured chips under the graph are filters** — click one to show or hide
 that kind. **`symbol` and `file` start hidden**, and that's deliberate: indexing
 bluee's own source added 837 symbols and 119 files, which is 94% of the graph.
@@ -276,6 +285,32 @@ twice, because it removes the real file.
 bluee can do this too — ask it to list or clean up files in the playground and
 it will. That is bounded to the playground folder; nothing else on your machine
 is reachable through it.
+
+## Opening your own folders
+
+The **FILES** panel isn't limited to the playground. Press **+**, paste a folder
+path, and bluee can work in it — the same as giving a coding agent a directory.
+
+```
+D:\projects\my-thing
+```
+
+Then pick it from the dropdown at the top of the panel. **terminal here** opens
+the terminal already `cd`'d into it.
+
+**You grant folders; bluee cannot.** There's deliberately no tool that lets it
+add one — a boundary the thing inside can move isn't a boundary. It can list,
+read and delete *inside* what you've granted, and nowhere else. **Revoke** takes
+the access away; it never touches the folder itself.
+
+Two things it refuses: a whole drive (`C:\`) and system folders. Not because you
+can't be trusted, but because a delete tool pointed at `C:\` is a bad afternoon.
+
+Only playground files render live in the preview. A folder you granted shows as
+source — serving it over HTTP would quietly widen what you agreed to.
+
+The preview has **line numbers** for code and **wrap** for prose, with a toggle
+either way.
 
 Artifacts are real files at `data/artifacts/<name>/index.html`. Open, edit or
 delete them yourself; bluee doesn't own them.
