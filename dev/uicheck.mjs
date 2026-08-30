@@ -272,9 +272,88 @@ log('\n=== GRAPH ===');
 await evaluate("document.querySelector('.rb[data-page=\"graph\"]').click()");
 await sleep(3000);
 log('legend      :', (await evaluate("return document.querySelector('#glegend').textContent") || '').slice(0, 150));
+// Close the terminal opened earlier so the graph gets the full height.
+await evaluate(`
+  if (!document.querySelector('#app').classList.contains('no-term'))
+    document.querySelector('.rb[data-toggle="term"]').click();
+`);
+await sleep(600);
 log('canvas      :', await evaluate(`
   const c = document.querySelector('#gcv'); const r = c.getBoundingClientRect();
   return Math.round(r.width) + 'x' + Math.round(r.height);
+`));
+log('zoom in x3  :', await evaluate(`
+  const c = document.querySelector('#gcv');
+  const r = c.getBoundingClientRect();
+  for (let i = 0; i < 3; i++)
+    c.dispatchEvent(new WheelEvent('wheel', {
+      deltaY: -240, clientX: r.left + r.width/2, clientY: r.top + r.height/2,
+      bubbles: true, cancelable: true }));
+  await new Promise(r => setTimeout(r, 200));
+  return 'k=' + window.__k();
+`));
+log('pan by drag :', await evaluate(`
+  const c = document.querySelector('#gcv');
+  const before = window.__view();
+  c.dispatchEvent(new MouseEvent('mousedown', { clientX: 400, clientY: 300, bubbles: true }));
+  c.dispatchEvent(new MouseEvent('mousemove', { clientX: 520, clientY: 360, bubbles: true }));
+  window.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }));
+  await new Promise(r => setTimeout(r, 150));
+  const after = window.__view();
+  return 'dx=' + Math.round(after.x - before.x) + ' dy=' + Math.round(after.y - before.y);
+`));
+log('hover focus :', await evaluate(`
+  const c = document.querySelector('#gcv');
+  const rect = c.getBoundingClientRect();
+  const v = window.__view();
+  // Pick a node that is actually on screen after the zoom and pan above, and
+  // convert canvas coords to client coords - the canvas is not at 0,0.
+  const n = window.__nodes().find(m => {
+    const x = m.x * v.k + v.x, y = m.y * v.k + v.y;
+    return x > 20 && x < rect.width - 20 && y > 20 && y < rect.height - 20;
+  });
+  if (!n) return 'no node on screen to hover';
+  c.dispatchEvent(new MouseEvent('mousemove', {
+    clientX: rect.left + n.x * v.k + v.x,
+    clientY: rect.top + n.y * v.k + v.y, bubbles: true }));
+  await new Promise(r => setTimeout(r, 150));
+  return 'hovering ' + JSON.stringify(window.__hover() && window.__hover().name);
+`));
+log('filter chip :', await evaluate(`
+  const chip = [...document.querySelectorAll('#glegend .gk')].find(c => c.dataset.k === 'file');
+  if (!chip) return 'no file chip';
+  chip.click();
+  await new Promise(r => setTimeout(r, 2500));
+  return 'files on -> ' + window.__nodes().length + ' nodes, k=' + window.__k();
+`));
+log('hide all    :', await evaluate(`
+  for (const chip of [...document.querySelectorAll('#glegend .gk')]) {
+    if (!chip.classList.contains('off')) { chip.click(); await new Promise(r=>setTimeout(r,400)); }
+  }
+  await new Promise(r => setTimeout(r, 800));
+  return document.querySelector('#glegend').textContent.slice(0, 60);
+`));
+log('restore     :', await evaluate(`
+  // Back to the default view, hovering a node, for the screenshot.
+  for (const chip of [...document.querySelectorAll('#glegend .gk')]) {
+    const k = chip.dataset.k;
+    const shouldBeOn = k !== 'symbol' && k !== 'file';
+    if (shouldBeOn === chip.classList.contains('off')) {
+      chip.click(); await new Promise(r => setTimeout(r, 400));
+    }
+  }
+  await new Promise(r => setTimeout(r, 1200));
+  document.querySelector('#gcv').dispatchEvent(new MouseEvent('dblclick', { bubbles: true }));
+  await new Promise(r => setTimeout(r, 200));
+  const c = document.querySelector('#gcv'), rect = c.getBoundingClientRect();
+  const v = window.__view();
+  const hub = window.__nodes().find(n => n.name === 'Adithya') || window.__nodes()[0];
+  c.dispatchEvent(new MouseEvent('mousemove', {
+    clientX: rect.left + hub.x * v.k + v.x,
+    clientY: rect.top + hub.y * v.k + v.y, bubbles: true }));
+  await new Promise(r => setTimeout(r, 250));
+  return window.__nodes().length + ' nodes, hovering ' +
+    JSON.stringify(window.__hover() && window.__hover().name);
 `));
 log('shot        :', await shot('graph'));
 

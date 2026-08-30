@@ -1785,7 +1785,11 @@ function gRender(){
   ctx.fillRect(0,0,W,H);
   if(!gNodes||!gNodes.length){
     ctx.fillStyle='#5b6474'; ctx.font='13px system-ui';
-    ctx.fillText('Graph is empty - run reduce first.',24,34); return;
+    const all=(gData&&gData.nodes||[]).length;
+    ctx.fillText(all
+      ? 'Every kind is hidden - click a chip below to show something.'
+      : 'Graph is empty. Run /reduce to build it from your conversations.',24,34);
+    return;
   }
   const ox=gView.x, oy=gView.y, k=gView.k;
 
@@ -1812,18 +1816,53 @@ function gRender(){
     }
   }
 
+  // Hovering highlights what the node is connected to. "What is this wired
+  // to" is the question a graph exists to answer, and reading it off a hairball
+  // by eye is exactly what people cannot do.
+  let near=null;
+  if(gHover){
+    near=new Set([gHover.name]);
+    for(const e of gEdges){
+      if(e.source===gHover.name) near.add(e.target);
+      else if(e.target===gHover.name) near.add(e.source);
+    }
+    ctx.strokeStyle='#5b9dff'; ctx.lineWidth=Math.max(1,1.4*k);
+    ctx.beginPath();
+    for(const e of gEdges){
+      if(e.source!==gHover.name&&e.target!==gHover.name) continue;
+      const a=gNodes[gIndex[e.source]], b=gNodes[gIndex[e.target]];
+      ctx.moveTo(a.x*k+ox,a.y*k+oy); ctx.lineTo(b.x*k+ox,b.y*k+oy);
+    }
+    ctx.stroke();
+  }
+
   const r=Math.max(2, 5*Math.min(k,1.6));
   for(const n of gNodes){
     const x=n.x*k+ox, y=n.y*k+oy;
     if(x<-30||x>W+30||y<-30||y>H+30) continue;
+    const dim=near&&!near.has(n.name);
+    ctx.globalAlpha=dim?0.28:1;
     ctx.beginPath(); ctx.arc(x,y,n===gHover?r+2.5:r,0,6.29);
     ctx.fillStyle=gColor(n.kind); ctx.fill();
+    ctx.globalAlpha=1;
   }
-  if(k>0.85){
+  if(k>0.55){
     ctx.font='11.5px system-ui'; ctx.fillStyle='#c3ccd9';
-    for(const n of gNodes){
+    // One label per screen cell. Without this the dense middle draws names on
+    // top of each other and none of them are readable; with it, zooming in
+    // reveals more, because the cells are screen-sized and the layout grows
+    // past them.
+    const CW=118, CH=17, taken=new Set();
+    // While hovering, label only the neighbourhood. Dimming a node but leaving
+    // its name at full brightness reads as noise, and the point of the hover is
+    // to make one neighbourhood legible.
+    const list=near?gNodes.filter(n=>near.has(n.name)):gNodes;
+    for(const n of list){
       const x=n.x*k+ox, y=n.y*k+oy;
       if(x<-30||x>W+30||y<-30||y>H+30) continue;
+      const cell=((x/CW)|0)+':'+((y/CH)|0);
+      if(taken.has(cell)) continue;
+      taken.add(cell);
       const t=n.name.length>28?n.name.slice(0,27)+'…':n.name;
       ctx.fillText(t,x+r+4,y+4);
     }
@@ -1846,6 +1885,7 @@ async function drawGraph(force){
   const W=cv.clientWidth||900, H=cv.clientHeight||500;
   if(!gData||force){
     $('#glegend').textContent='loading graph…';
+    $('#gcv').style.cursor='progress';
     gData=await api('/api/graph').catch(()=>({nodes:[],edges:[]}));
     gLaidOut=false;
   }
@@ -1857,6 +1897,7 @@ async function drawGraph(force){
     gLaidOut=true;
     gLegend();
   }
+  $('#gcv').style.cursor='grab';
   gRender();
 }
 
@@ -1890,6 +1931,11 @@ function gLegend(){
     drawGraph();
   });
 }
+
+/* Handles for dev/uicheck.mjs to inspect view state. Reading the real values
+   beats asserting on pixels in a screenshot. */
+window.__view=()=>({...gView}); window.__k=()=>+gView.k.toFixed(3);
+window.__nodes=()=>gNodes||[]; window.__hover=()=>gHover;
 
 /* Pan and zoom. Zoom is anchored at the cursor, so whatever you are pointing at
    stays under the pointer instead of sliding away. */
