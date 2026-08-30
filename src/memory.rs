@@ -89,6 +89,19 @@ impl VectorStore {
         Ok(())
     }
 
+    /// Everything one session put here, whatever scope it landed in.
+    ///
+    /// Used when a session is deleted: its log is the source of truth, so once
+    /// that is gone the derived rows are evidence for nothing and should go
+    /// with it rather than waiting for the next full rebuild.
+    pub fn forget_session(&self, session_id: &str) -> Result<usize> {
+        let n = self
+            .conn
+            .execute("DELETE FROM chunks WHERE session_id = ?1", params![session_id])
+            .with_context(|| format!("forgetting session {session_id}"))?;
+        Ok(n)
+    }
+
     /// Drop everything in one scope. Used to rebuild the code index without
     /// touching what the event log or a live `/compact` put there.
     pub fn clear_scope(&self, scope: &str) -> Result<usize> {

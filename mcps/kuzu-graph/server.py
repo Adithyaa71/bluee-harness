@@ -69,6 +69,7 @@ def _connect() -> kuzu.Connection:
             name STRING,
             kind STRING,
             first_seen STRING,
+            origin STRING,
             PRIMARY KEY(name)
         )
         """
@@ -79,10 +80,25 @@ def _connect() -> kuzu.Connection:
             FROM Entity TO Entity,
             type STRING,
             weight INT64,
-            ts STRING
+            ts STRING,
+            session STRING
         )
         """
     )
+    # Existing databases predate these columns. Adding them is idempotent and
+    # far kinder than asking anyone to delete their graph and rebuild.
+    for table, column, decl in (
+        ("Entity", "origin", "STRING"),
+        ("Rel", "session", "STRING"),
+    ):
+        try:
+            _conn.execute(f"ALTER TABLE {table} ADD IF NOT EXISTS {column} {decl}")
+        except Exception:  # noqa: BLE001 - older Kuzu without IF NOT EXISTS
+            try:
+                _conn.execute(f"ALTER TABLE {table} ADD {column} {decl}")
+            except Exception:
+                pass  # already there
+
     return _conn
 
 
@@ -158,22 +174,25 @@ def query_graph(
 
 
 @server.tool()
-def upsert_entity(name: str, kind: str = "unknown") -> dict[str, Any]:
+def upsert_entity(name: str, kind: str = "unknown", origin: str = "log") -> dict[str, Any]:
     """Create an entity if absent, leaving an existing one untouched.
 
     Args:
         name: Unique entity name.
         kind: app | person | project | file | preference | screen_context.
+        origin: Where it came from - log | seed | code. Entities from seed and
+            code survive a session being deleted; ones from the log do not,
+            unless another session still refers to them.
     """
     conn = _connect()
     conn.execute(
         """
         MERGE (e:Entity {name: $name})
-        ON CREATE SET e.kind = $kind, e.first_seen = $ts
+        ON CREATE SET e.kind = $kind, e.first_seen = $ts, e.origin = $origin
         """,
-        parameters={"name": name, "kind": kind, "ts": _now()},
+        parameters={"name": name, "kind": kind, "ts": _now(), "origin": origin},
     )
-    return {"ok": True, "name": name, "kind": kind}
+    return {"ok": True, "name": name, "kind": kind, "origin": origin}
 
 
 @server.tool()
@@ -182,6 +201,7 @@ def upsert_relation(
     target: str,
     relation: str,
     weight: int = 1,
+    session: str = "",
 ) -> dict[str, Any]:
     """Relate two entities, creating either if needed.
 
@@ -193,6 +213,9 @@ def upsert_relation(
         target: Target entity name.
         relation: e.g. used_with, mentioned_in, prefers, part_of, opened_after.
         weight: Increment applied to an existing edge, or initial weight.
+        session: Which session produced this edge. Empty means it belongs to no
+            single session (seeded facts, the code index). Deleting a session
+            deletes the edges it produced and nothing else.
     """
     conn = _connect()
     ts = _now()
@@ -206,10 +229,10 @@ def upsert_relation(
         conn.execute(
             """
             MATCH (a:Entity)-[r:Rel]->(b:Entity)
-            WHERE a.name = $s AND b.name = $t AND r.type = $rel
+            WHERE a.name = $s AND b.name = $t AND r.type = $rel AND r.session = $sess
             RETURN r.weight AS weight
             """,
-            parameters={"s": source, "t": target, "rel": relation},
+            parameters={"s": source, "t": target, "rel": relation, "sess": session},
         )
     )
 
@@ -218,10 +241,11 @@ def upsert_relation(
         conn.execute(
             """
             MATCH (a:Entity)-[r:Rel]->(b:Entity)
-            WHERE a.name = $s AND b.name = $t AND r.type = $rel
+            WHERE a.name = $s AND b.name = $t AND r.type = $rel AND r.session = $sess
             SET r.weight = $w, r.ts = $ts
             """,
-            parameters={"s": source, "t": target, "rel": relation, "w": new_weight, "ts": ts},
+            parameters={"s": source, "t": target, "rel": relation, "w": new_weight,
+                        "ts": ts, "sess": session},
         )
     else:
         new_weight = weight
@@ -229,13 +253,82 @@ def upsert_relation(
             """
             MATCH (a:Entity), (b:Entity)
             WHERE a.name = $s AND b.name = $t
-            CREATE (a)-[:Rel {type: $rel, weight: $w, ts: $ts}]->(b)
+            CREATE (a)-[:Rel {type: $rel, weight: $w, ts: $ts, session: $sess}]->(b)
             """,
-            parameters={"s": source, "t": target, "rel": relation, "w": weight, "ts": ts},
+            parameters={"s": source, "t": target, "rel": relation, "w": weight,
+                        "ts": ts, "sess": session},
         )
 
     return {"ok": True, "source": source, "target": target,
-            "relation": relation, "weight": new_weight}
+            "relation": relation, "weight": new_weight, "session": session}
+
+
+@server.tool()
+def drop_session(session: str) -> dict[str, Any]:
+    """Remove everything one session contributed to the graph.
+
+    Edges produced by that session go. Entities go only if nothing else refers
+    to them any more and they did not come from the seed file or the code index
+    - an entity that several sessions know about is not one session's to delete.
+
+    Args:
+        session: The session id whose contribution should be removed.
+    """
+    if not session:
+        return {"ok": False, "error": "a session id is required"}
+    conn = _connect()
+
+    before_e = _rows(conn.execute("MATCH (e:Entity) RETURN count(e) AS n"))[0]["n"]
+    before_r = _rows(conn.execute("MATCH ()-[r:Rel]->() RETURN count(r) AS n"))[0]["n"]
+
+    conn.execute(
+        "MATCH ()-[r:Rel]->() WHERE r.session = $sess DELETE r",
+        parameters={"sess": session},
+    )
+    # Orphans, but only the ones this layer owns. Seeded and code entities are
+    # permanent by construction.
+    conn.execute(
+        """
+        MATCH (e:Entity)
+        WHERE NOT EXISTS { MATCH (e)-[:Rel]-() }
+          AND (e.origin IS NULL OR e.origin = 'log')
+        DELETE e
+        """
+    )
+
+    after_e = _rows(conn.execute("MATCH (e:Entity) RETURN count(e) AS n"))[0]["n"]
+    after_r = _rows(conn.execute("MATCH ()-[r:Rel]->() RETURN count(r) AS n"))[0]["n"]
+    return {
+        "ok": True,
+        "session": session,
+        "relations_removed": before_r - after_r,
+        "entities_removed": before_e - after_e,
+        "entities_left": after_e,
+    }
+
+
+@server.tool()
+def session_graph(session: str) -> dict[str, Any]:
+    """What one session contributed: its edges and the entities they touch.
+
+    Args:
+        session: The session id to look at.
+    """
+    conn = _connect()
+    edges = _rows(
+        conn.execute(
+            """
+            MATCH (a:Entity)-[r:Rel]->(b:Entity)
+            WHERE r.session = $sess
+            RETURN a.name AS source, b.name AS target, r.type AS type, r.weight AS weight
+            ORDER BY r.weight DESC
+            """,
+            parameters={"sess": session},
+        )
+    )
+    names = sorted({e["source"] for e in edges} | {e["target"] for e in edges})
+    return {"session": session, "entities": names, "edges": edges,
+            "entity_count": len(names), "edge_count": len(edges)}
 
 
 @server.tool()
@@ -252,12 +345,22 @@ def graph_stats() -> dict[str, Any]:
     kinds = _rows(
         conn.execute("MATCH (e:Entity) RETURN e.kind AS kind, count(e) AS n ORDER BY n DESC")
     )
+    sessions = _rows(
+        conn.execute(
+            """
+            MATCH ()-[r:Rel]->()
+            WHERE r.session <> ''
+            RETURN r.session AS session, count(r) AS n ORDER BY n DESC
+            """
+        )
+    )
     return {
         "db_path": str(DB_PATH),
         "entities": entities,
         "edges": edges,
         "relation_types": by_type,
         "entity_kinds": kinds,
+        "by_session": sessions,
         "known_relations": KNOWN_RELATIONS,
     }
 

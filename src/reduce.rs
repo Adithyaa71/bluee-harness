@@ -45,22 +45,37 @@ pub struct ReduceStats {
 /// true one.
 #[derive(Default)]
 struct GraphFacts {
-    /// name -> kind
-    entities: BTreeMap<String, String>,
-    /// (source, target, relation) -> weight
-    relations: BTreeMap<(String, String, String), i64>,
+    /// name -> (kind, origin). Origin is `log`, `seed` or `code`, and it is
+    /// what decides whether an entity survives its session being deleted.
+    entities: BTreeMap<String, (String, String)>,
+    /// (source, target, relation, session) -> weight.
+    ///
+    /// Session is part of the key on purpose: two sessions that both notice the
+    /// same pair stay as two edges, so deleting one removes only its own
+    /// contribution and the other keeps its weight. Merging them into a single
+    /// edge would make the deletion lossy in exactly the way that matters.
+    relations: BTreeMap<(String, String, String, String), i64>,
+    /// Which session the extractor is currently reading.
+    current: String,
 }
 
 impl GraphFacts {
     fn entity(&mut self, name: impl Into<String>, kind: &str) {
+        self.entity_from(name, kind, "log");
+    }
+
+    fn entity_from(&mut self, name: impl Into<String>, kind: &str, origin: &str) {
         let kind = if kind.is_empty() { "unknown" } else { kind };
-        self.entities.entry(name.into()).or_insert_with(|| kind.into());
+        self.entities
+            .entry(name.into())
+            .or_insert_with(|| (kind.into(), origin.into()));
     }
 
     fn relate(&mut self, source: &str, target: &str, relation: &str) {
+        let session = self.current.clone();
         *self
             .relations
-            .entry((source.into(), target.into(), relation.into()))
+            .entry((source.into(), target.into(), relation.into(), session))
             .or_insert(0) += 1;
     }
 }
@@ -127,13 +142,16 @@ pub async fn run(cfg: &Config) -> Result<ReduceStats> {
     }
     // The repo's structure goes in the same graph: a file on disk is evidence,
     // so this keeps §4c's "nothing without evidence" rule intact.
+    // The repo belongs to no session: deleting a conversation must not delete
+    // bluee's knowledge of its own source.
+    facts.current = String::new();
     for (name, kind) in &code.facts.entities {
-        facts.entity(name, kind);
+        facts.entity_from(name, kind, "code");
     }
     for (source, target, relation) in &code.facts.relations {
         *facts
             .relations
-            .entry((source.clone(), target.clone(), relation.clone()))
+            .entry((source.clone(), target.clone(), relation.clone(), String::new()))
             .or_insert(0) += 1;
     }
     stats.code_symbols = code.symbols;
@@ -165,30 +183,33 @@ pub async fn run(cfg: &Config) -> Result<ReduceStats> {
     // the rebuild above clears the graph - a one-off write would vanish on the
     // next run. Graph = f(event log, seed file), still fully reproducible.
     if let Some(seed) = load_seed(cfg) {
+        facts.current = String::new();
         for e in seed.entities {
-            facts.entity(&e.name, &e.kind);
+            facts.entity_from(&e.name, &e.kind, "seed");
         }
         for r in seed.relations {
+            // Seeded facts belong to no session either: they are the baseline,
+            // and deleting a conversation must not erase the baseline.
             *facts
                 .relations
-                .entry((r.source, r.target, r.relation))
+                .entry((r.source, r.target, r.relation, String::new()))
                 .or_insert(0) += r.weight.max(1);
         }
         stats.entities = facts.entities.len();
         stats.relations = facts.relations.len();
     }
 
-    for (name, kind) in &facts.entities {
+    for (name, (kind, origin)) in &facts.entities {
         registry
             .call(
                 "kuzu_graph",
                 "upsert_entity",
-                serde_json::json!({ "name": name, "kind": kind }),
+                serde_json::json!({ "name": name, "kind": kind, "origin": origin }),
             )
             .await?;
     }
 
-    for ((source, target, relation), weight) in &facts.relations {
+    for ((source, target, relation, session), weight) in &facts.relations {
         registry
             .call(
                 "kuzu_graph",
@@ -198,6 +219,7 @@ pub async fn run(cfg: &Config) -> Result<ReduceStats> {
                     "target": target,
                     "relation": relation,
                     "weight": weight,
+                    "session": session,
                 }),
             )
             .await?;
@@ -334,6 +356,11 @@ fn truncate(s: &str, max: usize) -> String {
 
 /// Turn one session's events into entities and relations.
 fn extract_graph(events: &[Event], facts: &mut GraphFacts) {
+    // Everything this pass records belongs to this session.
+    facts.current = events
+        .first()
+        .map(|e| e.session_id.clone())
+        .unwrap_or_default();
     let mut previous_tool: Option<String> = None;
     let mut servers_seen: BTreeSet<String> = BTreeSet::new();
 
@@ -425,23 +452,89 @@ mod tests {
         let mut facts = GraphFacts::default();
         extract_graph(&events, &mut facts);
 
-        assert_eq!(facts.entities.get("uacc"), Some(&"server".to_string()));
+        assert_eq!(
+            facts.entities.get("uacc"),
+            Some(&("server".to_string(), "log".to_string()))
+        );
         assert_eq!(
             facts.entities.get("uacc.screenshot"),
-            Some(&"tool".to_string())
+            Some(&("tool".to_string(), "log".to_string()))
         );
+        // Everything extracted from a log carries the session that produced it,
+        // which is what makes deleting that session removable rather than a
+        // full rebuild.
+        let sess = "s1".to_string();
         // screenshot -> click, then click -> screenshot
         assert_eq!(
-            facts
-                .relations
-                .get(&("uacc.screenshot".into(), "uacc.click".into(), "used_with".into())),
+            facts.relations.get(&(
+                "uacc.screenshot".into(),
+                "uacc.click".into(),
+                "used_with".into(),
+                sess.clone()
+            )),
             Some(&1)
         );
         assert_eq!(
-            facts
-                .relations
-                .get(&("uacc.click".into(), "uacc.screenshot".into(), "used_with".into())),
+            facts.relations.get(&(
+                "uacc.click".into(),
+                "uacc.screenshot".into(),
+                "used_with".into(),
+                sess
+            )),
             Some(&1)
+        );
+    }
+
+    /// A session's edges are keyed by that session, so one can be dropped
+    /// without disturbing another that saw the same pair.
+    #[test]
+    fn two_sessions_keep_their_edges_apart() {
+        let mk = |session: &str| {
+            let s = session.to_string();
+            (1u64..=2)
+                .map(|seq| Event {
+                    seq,
+                    session_id: s.clone(),
+                    ts: chrono::Utc::now(),
+                    kind: EventKind::ToolCall {
+                        call_id: format!("c{seq}"),
+                        server: "uacc".into(),
+                        tool: if seq == 1 { "a".into() } else { "b".into() },
+                        args: serde_json::json!({}),
+                    },
+                })
+                .collect::<Vec<_>>()
+        };
+
+        let mut facts = GraphFacts::default();
+        extract_graph(&mk("alpha"), &mut facts);
+        extract_graph(&mk("beta"), &mut facts);
+
+        let key = |s: &str| {
+            (
+                "uacc.a".to_string(),
+                "uacc.b".to_string(),
+                "used_with".to_string(),
+                s.to_string(),
+            )
+        };
+        assert_eq!(facts.relations.get(&key("alpha")), Some(&1));
+        assert_eq!(facts.relations.get(&key("beta")), Some(&1));
+        // Only the used_with edges: the extractor also emits part_of edges for
+        // tool -> server, so the total is larger and not what this is about.
+        let used_with = facts
+            .relations
+            .keys()
+            .filter(|(_, _, rel, _)| rel == "used_with")
+            .count();
+        assert_eq!(
+            used_with, 2,
+            "the same pair seen in two sessions must stay two edges, or deleting              one session would silently take the other's evidence with it"
+        );
+        // And every edge must name the session that produced it.
+        assert!(
+            facts.relations.keys().all(|(_, _, _, s)| s == "alpha" || s == "beta"),
+            "an edge with no session could never be cleaned up"
         );
     }
 }

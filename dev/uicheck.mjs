@@ -594,6 +594,51 @@ for (const view of ['terminal', 'graph', 'tasks']) {
 }
 await evaluate("location.href = '/';");
 await sleep(2500);
+log('');
+log('=== + MENU ===');
+await evaluate("document.querySelector('.rb[data-page=\"chat\"]').click()");
+await sleep(600);
+log('opens       :', await evaluate(`
+  document.querySelector('#plus').click();
+  await new Promise(r => setTimeout(r, 300));
+  const m = document.querySelector('#addmenu');
+  const r = m.getBoundingClientRect();
+  return 'open=' + m.classList.contains('on') +
+    ' at ' + Math.round(r.left) + ',' + Math.round(r.top) +
+    ' size ' + Math.round(r.width) + 'x' + Math.round(r.height) +
+    ' | ' + [...m.querySelectorAll('.mi')].map(x => x.textContent.trim()).join(' / ');
+`));
+log('connectors  :', await evaluate(`
+  [...document.querySelectorAll('#addmenu .mi')].find(x => x.dataset.a === 'connectors').click();
+  await new Promise(r => setTimeout(r, 900));
+  const m = document.querySelector('#addmenu');
+  return [...m.querySelectorAll('.mi[data-s]')].map(x =>
+    x.dataset.s + '=' + (x.querySelector('.sw').classList.contains('on') ? 'on' : 'off')).join(', ')
+    || 'no servers listed';
+`));
+log('skills      :', await evaluate(`
+  document.querySelector('#plus').click();
+  await new Promise(r => setTimeout(r, 250));
+  [...document.querySelectorAll('#addmenu .mi')].find(x => x.dataset.a === 'skills').click();
+  await new Promise(r => setTimeout(r, 900));
+  return [...document.querySelectorAll('#addmenu .mi[data-k]')].map(x => x.dataset.k).join(', ')
+    || 'no skills listed';
+`));
+log('insert skill:', await evaluate(`
+  const first = document.querySelector('#addmenu .mi[data-k]');
+  if (!first) return 'nothing to click';
+  first.click();
+  await new Promise(r => setTimeout(r, 300));
+  return 'composer now: ' + JSON.stringify(document.querySelector('#input').value) +
+    ' | menu closed=' + !document.querySelector('#addmenu').classList.contains('on');
+`));
+log('escape      :', await evaluate(`
+  document.querySelector('#plus').click();
+  await new Promise(r => setTimeout(r, 200));
+  window.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }));
+  await new Promise(r => setTimeout(r, 200));
+  return 'closed=' + !document.querySelector('#addmenu').classList.contains('on');
+`));
 
 log('\nconsole errors :', consoleErrors.length ? consoleErrors.join(' | ') : 'none');
 

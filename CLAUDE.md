@@ -800,6 +800,44 @@ missing is a surface that shows it and a way to feed a screenshot back in.
 **f. The `+` composer menu** — files, folder, MCP connectors, plugins, skills —
 as one attachment menu rather than the scattered buttons there now.
 
+**23. Per-session graph and memory — BUILT, and simpler than the sketch.**
+
+The ask was a graph database per session, named by session id, deleted with the
+session or merged into the main one. What was built keeps the outcome and drops
+the file-per-session part, because **separate databases would have made the
+interesting question unanswerable**: "how does this connect to what I did last
+month" is a cross-session query, and N databases cannot answer it.
+
+Instead the provenance lives on the data:
+- `Rel` carries a **`session`** property; `Entity` carries an **`origin`**
+  (`log` / `seed` / `code`).
+- **Session is part of the edge key in the reducer.** Two sessions that notice
+  the same pair stay as two edges. Merging them into one would make deletion
+  lossy in exactly the way that matters - dropping a session would silently take
+  the other's evidence with it. A test covers this.
+- `drop_session` deletes that session's edges, then the entities left with no
+  edges *and* origin `log`. Seeded facts and the code index are permanent by
+  construction, so deleting a conversation cannot erase bluee's knowledge of its
+  own source.
+- Deleting a session now also calls `VectorStore::forget_session`, so its
+  searchable chunks go at the same moment. Waiting for the next `reduce` would
+  mean a deleted conversation stayed findable, which is not what delete means.
+
+**"Merge into the main graph" needs no step:** the main graph *is* the union of
+every session plus the seed and the code index. Keeping a session is the default
+and costs nothing; deleting one is the only action.
+
+*Measured on the live graph:* 1,074 entities / 1,272 edges across 12 sessions.
+Deleting the session that contributed 30 edges removed **exactly 30**, took 12
+orphaned entities with it, left 1,062 - and the code entities survived.
+
+**24. The `+` composer menu — BUILT.** One menu on both composers: add files,
+add a folder to work in, slash commands, MCP connectors with live on/off
+switches, and your saved skills. Picking a skill **puts it in the box rather
+than sending it** - you may want to add to it, and a menu that fires a turn
+behind your back is startling. Rendered once and opened from either composer,
+because two copies of a menu is two things to keep in step.
+
 ### 4g. Desktop app, not a web page
 
 Requested, and correct: the dashboard should be a real local desktop

@@ -599,10 +599,27 @@ async fn delete_session(
     if guard.as_ref().is_some_and(|a| a.session_id() == id) {
         *guard = None;
     }
+    drop(guard);
+
+    // The derived layers go with it, now rather than at the next full rebuild.
+    // Once the log is gone those rows are evidence for nothing, and leaving
+    // them would mean deleting a conversation still left it findable - which is
+    // not what anyone means by delete.
+    let chunks = VectorStore::open(s.cfg.data_dir.join("vectors.db"))
+        .and_then(|v| v.forget_session(&id))
+        .unwrap_or(0);
+
+    let graph = s
+        .registry
+        .call("kuzu_graph", "drop_session", json!({ "session": id }))
+        .await
+        .unwrap_or_else(|e| json!({ "error": e.to_string() }));
 
     Ok(Json(json!({
         "ok": true, "deleted": id,
-        "note": "Run `harness reduce` to drop it from memory too."
+        "chunks_removed": chunks,
+        "graph": graph,
+        "note": "Its memory chunks and its graph edges went with it. Entities other                  sessions still refer to were kept - they are not this one's to delete."
     })))
 }
 

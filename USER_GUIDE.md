@@ -246,6 +246,16 @@ thing you said so you can recognise it.
 - **Delete** — removes it. Click twice; it asks for confirmation because this
   deletes real data permanently.
 
+**Deleting a session now takes its memory with it.** Its searchable chunks and
+the graph edges it contributed go immediately, not at the next `/reduce`. What
+stays: anything another session also knows about, plus the seeded facts and
+bluee's index of its own source. An entity several conversations refer to isn't
+one conversation's to delete.
+
+So a throwaway session genuinely is throwaway — do some scratch work, delete it,
+and it leaves nothing behind. Keep it and it's simply part of the main memory;
+there's no separate step to "merge" it.
+
 Nothing is ever lost automatically. Every conversation you've had is there.
 
 ---

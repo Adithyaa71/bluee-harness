@@ -198,6 +198,10 @@ body{background:var(--bg);color:var(--ink);overflow:hidden;
   color:var(--ink);font:inherit;font-size:13px;padding:9px 11px;resize:none;outline:none;
   max-height:150px;line-height:1.5}
 #pgask textarea:focus{border-color:var(--accent)}
+#pgask .cb{background:transparent;border:1px solid var(--line);color:var(--dim);
+  width:30px;height:30px;border-radius:9px;font-size:16px;cursor:pointer;flex:none;
+  line-height:1;display:grid;place-items:center;transition:color .12s,border-color .12s}
+#pgask .cb:hover{color:var(--accent);border-color:var(--accent)}
 #pgask button{background:var(--accent);border:0;color:#0b0d11;border-radius:9px;
   width:34px;height:34px;font-size:15px;cursor:pointer;flex:none}
 #pgask button:disabled{opacity:.45;cursor:default}
@@ -405,6 +409,33 @@ body{background:var(--bg);color:var(--ink);overflow:hidden;
 #app.solo #memtop{flex:none;max-height:45vh}
 #app.solo.only-graph #glegend{display:flex}
 
+/* ---------- the + menu ----------
+   One menu, opened from either composer. Everything you can bring into a turn
+   in one place, instead of icons scattered around the edges of the window. */
+#addmenu{position:fixed;z-index:200;display:none;min-width:236px;padding:5px;
+  background:var(--panel);border:1px solid var(--line);border-radius:11px;
+  box-shadow:0 18px 50px rgba(0,0,0,.6);
+  animation:menuIn .12s cubic-bezier(.2,.8,.3,1)}
+#addmenu.on{display:block}
+@keyframes menuIn{from{opacity:0;transform:translateY(4px)}to{opacity:1;transform:none}}
+#addmenu .mi{display:flex;align-items:center;gap:9px;padding:7px 9px;border-radius:7px;
+  font-size:12.5px;color:var(--dim);cursor:pointer;white-space:nowrap}
+#addmenu .mi:hover{background:var(--panel2);color:var(--ink)}
+#addmenu .mi .ic{width:16px;text-align:center;font-size:12px;color:var(--faint);flex:none}
+#addmenu .mi .sp{flex:1}
+#addmenu .mi .hint{font-size:10.5px;color:var(--faint);font-family:var(--mono)}
+#addmenu .sep{height:1px;background:var(--line);margin:5px 3px}
+#addmenu .hd{font-size:10px;font-family:var(--mono);color:var(--faint);
+  padding:6px 9px 3px;letter-spacing:.06em;text-transform:uppercase}
+#addmenu .sw{width:26px;height:15px;border-radius:8px;background:var(--line);
+  position:relative;flex:none;transition:background .14s}
+#addmenu .sw::after{content:'';position:absolute;top:2px;left:2px;width:11px;height:11px;
+  border-radius:50%;background:var(--faint);transition:transform .14s,background .14s}
+#addmenu .sw.on{background:var(--accent-dim)}
+#addmenu .sw.on::after{transform:translateX(11px);background:var(--accent)}
+#addmenu .scroll{max-height:280px;overflow-y:auto}
+#addmenu .empty{padding:8px 9px;font-size:11.5px;color:var(--faint)}
+
 .win{position:fixed;z-index:60;display:flex;flex-direction:column;
   background:var(--panel);border:1px solid var(--line);border-radius:12px;
   box-shadow:0 24px 70px rgba(0,0,0,.6), 0 2px 8px rgba(0,0,0,.4);
@@ -537,6 +568,7 @@ body.dragging{cursor:grabbing;user-select:none}
 </style>
 </head>
 <body>
+<div id="addmenu"></div>
 <div id="app" class="no-term">
 
   <div id="rail">
@@ -587,6 +619,7 @@ body.dragging{cursor:grabbing;user-select:none}
           <div id="attached"></div>
           <textarea id="input" rows="1" placeholder="Ask bluee…  (Enter to send, Shift+Enter for newline)"></textarea>
           <div class="crow">
+            <button class="cb" id="plus" title="Add files, folders, connectors, skills">+</button>
             <button class="cb" id="attach" title="Attach a text file">&#128206;</button>
             <button class="cb" id="mic" title="Voice input — not built yet (Phase 5)" disabled>&#127908;</button>
             <input type="file" id="file" hidden multiple
@@ -712,6 +745,7 @@ body.dragging{cursor:grabbing;user-select:none}
       <div id="pgask">
         <div id="pgact"></div>
         <div class="pgrow">
+          <button class="cb" id="pgplus" title="Add files, folders, connectors, skills">+</button>
           <textarea id="pginput" rows="1"
             placeholder="Build or change something here…  (same conversation as Chat)"></textarea>
           <button id="pgsend" title="Send">&uarr;</button>
@@ -2441,6 +2475,161 @@ $('#mempop').onclick=async()=>{
 })();
 $('#greload').onclick=()=>drawGraph(true);
 addEventListener('resize',()=>{ if($('#v-graph').classList.contains('on')) gRender(); });
+
+/* ---------- the + menu ----------
+   Everything you can bring into a turn, in one place: files, a folder to work
+   in, the slash commands, which MCP servers are on, and your saved skills.
+   Opened from either composer and rendered once, because two copies of a menu
+   is two things to keep in step. */
+let menuFrom = null;
+
+function closeMenu(){ $('#addmenu').classList.remove('on'); menuFrom = null; }
+document.addEventListener('click', e => {
+  if (!e.target.closest('#addmenu') && !e.target.closest('#plus') && !e.target.closest('#pgplus'))
+    closeMenu();
+});
+addEventListener('keydown', e => { if (e.key === 'Escape') closeMenu(); });
+
+function showMenu(anchor, html, wire){
+  const m = $('#addmenu');
+  m.innerHTML = html;
+  m.classList.add('on');
+  const r = anchor.getBoundingClientRect();
+  // Above the button by default; below it if there is no room above.
+  m.style.left = Math.max(8, Math.min(innerWidth - m.offsetWidth - 8, r.left)) + 'px';
+  const above = r.top - m.offsetHeight - 8;
+  m.style.top = (above > 8 ? above : r.bottom + 8) + 'px';
+  if (wire) wire(m);
+}
+
+function item(icon, label, hint){
+  return '<div class="mi" data-a="' + label.toLowerCase().replace(/[^a-z]+/g,'-') + '">' +
+    '<span class="ic">' + icon + '</span><span>' + esc(label) + '</span>' +
+    '<span class="sp"></span>' + (hint ? '<span class="hint">' + esc(hint) + '</span>' : '') +
+    '</div>';
+}
+
+function openAddMenu(anchor, target){
+  menuFrom = target;
+  showMenu(anchor,
+    item('&#128206;', 'Add files or photos', 'text') +
+    item('&#128193;', 'Add folder', 'workspace') +
+    item('/', 'Slash commands') +
+    '<div class="sep"></div>' +
+    item('&#9783;', 'Connectors', 'MCP') +
+    item('&#10022;', 'Skills'),
+    m => {
+      const go = (name, fn) => {
+        const el = [...m.querySelectorAll('.mi')].find(x => x.dataset.a === name);
+        if (el) el.onclick = fn;
+      };
+      go('add-files-or-photos', () => { closeMenu(); $('#file').click(); });
+      go('add-folder', () => {
+        closeMenu();
+        document.querySelector('.rb[data-page="play"]').click();
+        setTimeout(() => {
+          $('#pgfiles').classList.remove('hide');
+          $('#pgrootadd').classList.add('on');
+          $('#pgrootpath').focus();
+        }, 260);
+      });
+      go('slash-commands', () => {
+        closeMenu();
+        const box = target === 'pg' ? $('#pginput') : $('#input');
+        box.focus(); box.value = '/';
+        box.dispatchEvent(new Event('input', { bubbles: true }));
+      });
+      go('connectors', () => openConnectors(anchor));
+      go('skills', () => openSkillsMenu(anchor));
+    });
+}
+
+async function openConnectors(anchor){
+  showMenu(anchor, '<div class="hd">MCP connectors</div><div class="empty">loading…</div>');
+  const d = await api('/api/mcp').catch(() => ({ servers: [] }));
+  const rows = (d.servers || []).map(sv =>
+    '<div class="mi" data-s="' + esc(sv.name) + '">' +
+      '<span class="ic">' + (sv.connected ? '&#9679;' : '&#9675;') + '</span>' +
+      '<span>' + esc(sv.name) + '</span>' +
+      '<span class="sp"></span>' +
+      '<span class="hint">' + (sv.connected ? (sv.tools || 0) + ' tools' : 'off') + '</span>' +
+      '<span class="sw' + (sv.enabled !== false ? ' on' : '') + '"></span>' +
+    '</div>').join('');
+  showMenu(anchor,
+    '<div class="hd">MCP connectors</div>' +
+    '<div class="scroll">' + (rows || '<div class="empty">none configured</div>') + '</div>' +
+    '<div class="sep"></div>' +
+    item('&#9881;', 'Manage connectors', 'settings'),
+    m => {
+      m.querySelectorAll('.mi[data-s]').forEach(row => {
+        row.onclick = async () => {
+          // Toggling writes mcps/servers.json; servers are launched once at
+          // startup, so this takes effect on the next run and says so.
+          const sw = row.querySelector('.sw');
+          const on = !sw.classList.contains('on');
+          sw.classList.toggle('on', on);
+          const file = await api('/api/mcp').catch(() => null);
+          if (!file) return;
+          const target = (file.servers || []).find(x => x.name === row.dataset.s);
+          if (target) target.enabled = on;
+          await api('/api/mcp', { method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ servers: file.servers }) }).catch(() => {});
+          row.querySelector('.hint').textContent = on ? 'on at restart' : 'off at restart';
+        };
+      });
+      const manage = [...m.querySelectorAll('.mi')].find(x => x.dataset.a === 'manage-connectors');
+      if (manage) manage.onclick = () => {
+        closeMenu();
+        document.querySelector('.rb[data-page="set"]').click();
+        setTimeout(() => {
+          const b = [...$$('#settabs button')].find(x => x.dataset.st === 'mcp');
+          if (b) b.click();
+        }, 200);
+      };
+    });
+}
+
+async function openSkillsMenu(anchor){
+  showMenu(anchor, '<div class="hd">Skills</div><div class="empty">loading…</div>');
+  const d = await api('/api/skills').catch(() => ({ skills: [] }));
+  const rows = (d.skills || []).map(sk =>
+    '<div class="mi" data-k="' + esc(sk.name) + '">' +
+      '<span class="ic">&#10022;</span><span>' + esc(sk.name) + '</span>' +
+      '<span class="sp"></span><span class="hint">' + esc(sk.category || '') + '</span>' +
+    '</div>').join('');
+  showMenu(anchor,
+    '<div class="hd">Skills</div>' +
+    '<div class="scroll">' + (rows || '<div class="empty">none saved yet</div>') + '</div>' +
+    '<div class="sep"></div>' +
+    item('&#9881;', 'Manage skills', 'settings'),
+    m => {
+      m.querySelectorAll('.mi[data-k]').forEach(row => {
+        row.onclick = () => {
+          // Puts it in the box rather than sending: you may want to add to it,
+          // and a menu that fires off a turn behind your back is startling.
+          const box = menuFrom === 'pg' ? $('#pginput') : $('#input');
+          closeMenu();
+          box.focus();
+          box.value = (box.value ? box.value.trim() + ' ' : '') +
+            'run the "' + row.dataset.k + '" skill';
+          box.dispatchEvent(new Event('input', { bubbles: true }));
+        };
+      });
+      const manage = [...m.querySelectorAll('.mi')].find(x => x.dataset.a === 'manage-skills');
+      if (manage) manage.onclick = () => {
+        closeMenu();
+        document.querySelector('.rb[data-page="set"]').click();
+        setTimeout(() => {
+          const b = [...$$('#settabs button')].find(x => x.dataset.st === 'skills');
+          if (b) b.click();
+        }, 200);
+      };
+    });
+}
+
+$('#plus').onclick = e => { e.stopPropagation(); openAddMenu($('#plus'), 'chat'); };
+$('#pgplus').onclick = e => { e.stopPropagation(); openAddMenu($('#pgplus'), 'pg'); };
 
 /* ---------- floating windows ----------
    One reusable window. `openWindow` moves an EXISTING element into it rather
