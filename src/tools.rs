@@ -27,6 +27,9 @@ use crate::skills::SkillStore;
 pub const WITHHELD_FROM_MODEL: &[&str] = &["kuzu_graph__upsert_entity", "kuzu_graph__upsert_relation"];
 
 pub struct NativeTools {
+    /// Needed for the granted-folder lookups: which roots exist is config, not
+    /// something a tool should carry its own copy of.
+    cfg: crate::config::Config,
     store: VectorStore,
     artifacts: ArtifactStore,
     skills: SkillStore,
@@ -36,11 +39,12 @@ pub struct NativeTools {
 }
 
 impl NativeTools {
-    pub fn open(data_dir: &std::path::Path, skills_dir: &std::path::Path) -> Result<Self> {
+    pub fn open(cfg: &crate::config::Config) -> Result<Self> {
         Ok(Self {
-            store: VectorStore::open(data_dir.join("vectors.db"))?,
-            artifacts: ArtifactStore::open(data_dir)?,
-            skills: SkillStore::open(skills_dir)?,
+            store: VectorStore::open(cfg.data_dir.join("vectors.db"))?,
+            artifacts: ArtifactStore::open(&cfg.data_dir)?,
+            skills: SkillStore::open(&cfg.skills_dir)?,
+            cfg: cfg.clone(),
             embedder: None,
         })
     }
@@ -78,6 +82,8 @@ impl NativeTools {
                 | "read_source"
                 | "list_files"
                 | "delete_file"
+                | "list_folders"
+                | "read_file"
         )
     }
 
@@ -217,10 +223,34 @@ impl NativeTools {
                 }),
             },
             ToolDef {
-                name: "list_files".into(),
-                description: "List the files and folders in the playground folder - everything                     you have built, as it sits on disk."
+                name: "list_folders".into(),
+                description: "Which folders you have been granted access to. Adithya grants                     these; you cannot add one yourself. Call this first if you are unsure which                     folder a request is about."
                     .into(),
                 parameters: serde_json::json!({ "type": "object", "properties": {} }),
+            },
+            ToolDef {
+                name: "list_files".into(),
+                description: "List files and folders inside a granted folder. Defaults to the                     playground - everything you have built, as it sits on disk. Pass `root`                     (from list_folders) to look in another granted folder."
+                    .into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "root": { "type": "string", "description": "Granted folder id. Defaults to \"playground\"." }
+                    }
+                }),
+            },
+            ToolDef {
+                name: "read_file".into(),
+                description: "Read a text file inside a granted folder, by the path list_files                     gave you. For your own source code use read_source instead."
+                    .into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Path relative to the granted folder." },
+                        "root": { "type": "string", "description": "Granted folder id. Defaults to \"playground\"." }
+                    },
+                    "required": ["path"]
+                }),
             },
             ToolDef {
                 name: "delete_file".into(),
@@ -229,7 +259,8 @@ impl NativeTools {
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "path": { "type": "string", "description": "Path relative to the playground folder." }
+                        "path": { "type": "string", "description": "Path relative to the granted folder." },
+                        "root": { "type": "string", "description": "Granted folder id. Defaults to \"playground\"." }
                     },
                     "required": ["path"]
                 }),
@@ -465,19 +496,60 @@ impl NativeTools {
                 }))
             }
 
+            "list_folders" => {
+                let roots: Vec<serde_json::Value> = crate::roots::load(&self.cfg)
+                    .into_iter()
+                    .map(|r| serde_json::json!({
+                        "id": r.id, "label": r.label,
+                        "path": crate::roots::pretty(&r.path),
+                        "exists": r.path.is_dir(),
+                    }))
+                    .collect();
+                Ok(serde_json::json!({
+                    "folders": roots,
+                    "note": "Adithya grants these. You cannot add one - ask him to."
+                }))
+            }
+
             "list_files" => {
-                let root = self.artifacts.root().to_path_buf();
-                let nodes = crate::artifacts::tree(&root)?;
-                Ok(serde_json::json!({ "files": nodes }))
+                let id = args.get("root").and_then(|v| v.as_str()).unwrap_or("playground");
+                match crate::roots::get(&self.cfg, id) {
+                    Ok(r) => Ok(serde_json::json!({
+                        "root": r.id, "label": r.label,
+                        "files": crate::artifacts::tree(&r.path)?,
+                    })),
+                    Err(e) => Ok(serde_json::json!({ "root": id, "error": e.to_string() })),
+                }
+            }
+
+            "read_file" => {
+                let path = args.get("path").and_then(|v| v.as_str())
+                    .context("read_file requires `path`")?;
+                let id = args.get("root").and_then(|v| v.as_str()).unwrap_or("playground");
+                match crate::roots::resolve(&self.cfg, id, path) {
+                    Ok((r, full)) => match std::fs::read_to_string(&full) {
+                        Ok(text) => Ok(serde_json::json!({
+                            "root": r.id, "path": path,
+                            "lines": text.lines().count(), "text": text,
+                        })),
+                        Err(_) => Ok(serde_json::json!({
+                            "root": r.id, "path": path,
+                            "error": "not a text file",
+                        })),
+                    },
+                    Err(e) => Ok(serde_json::json!({ "path": path, "error": e.to_string() })),
+                }
             }
 
             "delete_file" => {
                 let path = args.get("path").and_then(|v| v.as_str())
                     .context("delete_file requires `path`")?;
-                let root = self.artifacts.root().to_path_buf();
-                match crate::artifacts::delete_path(&root, path) {
-                    Ok((folder, n)) => Ok(serde_json::json!({
-                        "deleted": path, "folder": folder, "files_removed": n,
+                let id = args.get("root").and_then(|v| v.as_str()).unwrap_or("playground");
+                match crate::roots::get(&self.cfg, id)
+                    .and_then(|r| crate::artifacts::delete_path(&r.path, path).map(|x| (r, x)))
+                {
+                    Ok((r, (folder, n))) => Ok(serde_json::json!({
+                        "root": r.id, "deleted": path, "folder": folder, "files_removed": n,
                     })),
                     Err(e) => Ok(serde_json::json!({ "path": path, "error": e.to_string() })),
                 }

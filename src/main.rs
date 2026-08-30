@@ -11,6 +11,7 @@ mod memory;
 mod providers;
 mod pty;
 mod reduce;
+mod roots;
 mod skills;
 mod tools;
 mod vision;
@@ -340,7 +341,7 @@ async fn chat(cfg: Config) -> Result<()> {
     // The harness's own memory tools come first: recall should be as reachable
     // as action, and putting them at the head of the list keeps them visible
     // when the tool list is long.
-    let mut native = native_tools::NativeTools::open(&cfg.data_dir, &cfg.skills_dir)?;
+    let mut native = native_tools::NativeTools::open(&cfg)?;
     let mut tool_defs: Vec<llm::ToolDef> = native_tools::NativeTools::defs();
     let native_count = tool_defs.len();
 

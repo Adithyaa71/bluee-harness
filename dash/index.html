@@ -392,6 +392,28 @@ body{background:var(--bg);color:var(--ink);overflow:hidden;
 .pgf-head{display:flex;align-items:center;gap:6px;padding:8px 10px;flex:none;
   border-bottom:1px solid var(--line)}
 .pgf-head .t{font-size:11.5px;color:var(--faint);font-family:var(--mono);flex:1}
+.rootrow{display:flex;gap:5px;margin-bottom:6px}
+.rootrow{position:relative}
+.rootrow select{flex:1;min-width:0;background:var(--panel2);border:1px solid var(--line);
+  border-radius:7px;color:var(--ink);font-size:12px;padding:5px 24px 5px 8px;outline:none;
+  font-family:var(--mono);appearance:none;-webkit-appearance:none;cursor:pointer}
+.rootrow select:hover{border-color:var(--accent)}
+.rootrow::after{content:'\25be';position:absolute;right:36px;top:6px;
+  color:var(--faint);font-size:10px;pointer-events:none}
+.rootpath{font-size:10px;font-family:var(--mono);color:var(--faint);
+  margin:-2px 0 6px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.rootrow select:focus{border-color:var(--accent)}
+#pgrootadd{display:none;margin-bottom:7px}
+#pgrootadd.on{display:block}
+#pgrootpath{width:100%;background:var(--panel2);border:1px solid var(--line);
+  border-radius:7px;color:var(--ink);font-size:11.5px;padding:6px 8px;outline:none;
+  font-family:var(--mono);margin-bottom:5px}
+#pgrootpath:focus{border-color:var(--accent)}
+#pgrootadd .rowbtns{display:flex;gap:5px}
+#pgrootadd .btn{padding:4px 9px;font-size:11.5px}
+.rootmsg{font-size:11px;font-family:var(--mono);margin-top:5px;color:var(--faint);
+  line-height:1.45;word-break:break-word}
+.rootmsg.bad{color:var(--bad)} .rootmsg.ok{color:var(--ok)}
 #pgfilter{width:100%;background:var(--panel2);border:1px solid var(--line);
   border-radius:7px;color:var(--ink);font-size:12px;padding:6px 9px;outline:none}
 #pgfilter:focus{border-color:var(--accent)}
@@ -412,9 +434,17 @@ body{background:var(--bg);color:var(--ink);overflow:hidden;
 #pgmain{flex:1;min-width:0;display:flex;flex-direction:column}
 #pgview{flex:1;min-height:0;display:none;flex-direction:column}
 #pgview.on{display:flex}
-#pgcode{flex:1;min-height:0;overflow:auto;margin:0;padding:14px 16px;
+#pgcodewrap{flex:1;min-height:0;display:none;overflow:auto;background:var(--bg)}
+#pgcodewrap.on{display:flex}
+#pggutter{flex:none;padding:14px 10px 14px 14px;text-align:right;
+  font-family:var(--mono);font-size:12px;line-height:1.6;color:#3d4655;
+  user-select:none;background:var(--bg);position:sticky;left:0;
+  border-right:1px solid var(--line)}
+#pgcode{flex:1;min-width:0;margin:0;padding:14px 16px;
   font-family:var(--mono);font-size:12px;line-height:1.6;color:#c9d2de;
   background:var(--bg);white-space:pre;tab-size:2}
+#pgcodewrap.soft #pgcode{white-space:pre-wrap;word-break:break-word}
+#pgcodewrap.soft #pggutter{display:none}
 .ghint{color:var(--faint);font-size:11px;margin-left:10px}
 
 </style>
@@ -504,7 +534,23 @@ body{background:var(--bg);color:var(--ink);overflow:hidden;
             <button class="win-btn" id="pgfrel" title="Refresh">&#8635;</button>
             <button class="win-btn" id="pgfhide" title="Collapse the panel">&#10094;</button>
           </div>
-          <div class="pgf-wrap"><input id="pgfilter" placeholder="Filter files…"></div>
+          <div class="pgf-wrap">
+            <div class="rootrow">
+              <select id="pgroot" title="Which folder you are looking at"></select>
+              <button class="win-btn" id="pgroadd" title="Grant access to a folder">+</button>
+            </div>
+            <div class="rootpath" id="pgrootpathlbl"></div>
+            <div id="pgrootadd">
+              <input id="pgrootpath" placeholder="D:\path\to\your\project" spellcheck="false">
+              <div class="rowbtns">
+                <button class="btn" id="pgrootok">Grant</button>
+                <button class="btn sec" id="pgrootcancel">Cancel</button>
+                <button class="btn sec" id="pgrootrm" title="Stop bluee using this folder">Revoke</button>
+              </div>
+              <div class="rootmsg" id="pgrootmsg"></div>
+            </div>
+            <input id="pgfilter" placeholder="Filter files…">
+          </div>
           <div id="pgtree"></div>
         </div>
         <div id="pgdrag" title="Drag to resize"></div>
@@ -518,9 +564,11 @@ body{background:var(--bg);color:var(--ink);overflow:hidden;
           <span class="am" id="pgmeta"></span>
           <div class="spacer"></div>
           <button class="ghost" id="pgsrc">Source</button>
+          <button class="ghost" id="pgwrapbtn" title="Soft wrap long lines">wrap</button>
+          <button class="ghost" id="pgterm" title="Open a terminal in this folder">terminal here</button>
           <button class="ghost" id="pgpop">open window</button>
         </div>
-        <pre id="pgcode"></pre>
+        <div id="pgcodewrap"><div id="pggutter"></div><pre id="pgcode"></pre></div>
         <iframe id="pgframe" style="display:none;flex:1;border:0;width:100%;background:#0f1116"
                 sandbox="allow-scripts allow-forms allow-popups"></iframe>
       </div>
@@ -1480,6 +1528,65 @@ $('#aback').onclick=()=>{ $('#aview').classList.remove('on'); $('#playbody').sty
 $('#pgback').onclick=()=>{ $('#pgview').classList.remove('on'); $('#playbody').style.display='';
   filePick=null; renderTree(); };
 $('#pgfrel').onclick=loadFiles;
+$('#pgwrapbtn').onclick=()=>{ $('#pgcodewrap').classList.toggle('soft'); syncWrapBtn(); };
+/* "Work in that directory": open the terminal and cd into the granted folder.
+   Typed rather than spawned with a cwd, so it works for every shell the picker
+   offers - powershell, cmd, bash, or an ssh session - and so you SEE the command
+   that ran instead of the shell silently starting somewhere else. */
+$('#pgterm').onclick=()=>{
+  const cur=fileRoots.find(r=>r.id===fileRoot);
+  if(!cur) return;
+  if(app.classList.contains('no-term'))
+    document.querySelector('.rb[data-toggle="term"]').click();
+  setTimeout(()=>{
+    try{
+      openTerm();
+      ws && ws.readyState===1 &&
+        ws.send(JSON.stringify({type:'input',data:'cd "'+cur.path+'"' + String.fromCharCode(13)}));
+      term && term.focus();
+    }catch(_){}
+  },400);
+};
+$('#pgroot').onchange=e=>{ fileRoot=e.target.value; filePick=null; fileOpen={};
+  $('#pgview').classList.remove('on'); $('#playbody').style.display='';
+  $('#pgrootmsg').textContent=''; loadFiles(); };
+$('#pgroadd').onclick=()=>{
+  const box=$('#pgrootadd'); box.classList.toggle('on');
+  if(box.classList.contains('on')) $('#pgrootpath').focus();
+};
+$('#pgrootcancel').onclick=()=>{ $('#pgrootadd').classList.remove('on');
+  $('#pgrootmsg').textContent=''; };
+async function grantRoot(){
+  const path=$('#pgrootpath').value.trim();
+  const m=$('#pgrootmsg');
+  if(!path){ m.className='rootmsg bad'; m.textContent='paste a folder path'; return; }
+  m.className='rootmsg'; m.textContent='checking…';
+  const r=await api('/api/roots',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({path})}).catch(e=>({error:String(e)}));
+  if(r.ok){
+    m.className='rootmsg ok'; m.textContent='granted: '+r.path;
+    fileRoot=r.id; $('#pgrootpath').value='';
+    $('#pgrootadd').classList.remove('on');
+    filePick=null; fileOpen={}; loadFiles();
+  } else { m.className='rootmsg bad'; m.textContent=r.error||'could not grant that folder'; }
+}
+$('#pgrootok').onclick=grantRoot;
+$('#pgrootpath').addEventListener('keydown',e=>{ if(e.key==='Enter'){ e.preventDefault(); grantRoot(); } });
+$('#pgrootrm').onclick=async()=>{
+  const m=$('#pgrootmsg');
+  if(fileRoot==='playground'){ m.className='rootmsg bad';
+    m.textContent='the playground folder stays'; return; }
+  const btn=$('#pgrootrm');
+  if(btn.dataset.armed!=='1'){ btn.dataset.armed='1'; btn.textContent='Revoke — sure?';
+    setTimeout(()=>{ btn.dataset.armed='0'; btn.textContent='Revoke'; },3500); return; }
+  btn.dataset.armed='0'; btn.textContent='Revoke';
+  const r=await api('/api/roots/remove',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({id:fileRoot})}).catch(e=>({error:String(e)}));
+  if(r.ok){ fileRoot='playground'; m.className='rootmsg ok';
+    m.textContent='access removed (the folder itself is untouched)';
+    $('#pgrootadd').classList.remove('on'); loadFiles(); }
+  else { m.className='rootmsg bad'; m.textContent=r.error||'failed'; }
+};
 function setFiles(open){
   $('#pgfiles').classList.toggle('hide',!open);
   $('#pgwrap').classList.toggle('collapsed',!open);
@@ -1981,6 +2088,23 @@ function popSide(){
    the live page for HTML, and delete. Scoped to the playground folder on the
    server side - nothing else on the machine is reachable through it. */
 let fileTree = [], filePick = null, fileOpen = {};
+/* Which granted folder the panel is showing. Granting is a human act - there is
+   deliberately no tool that adds one, because a boundary the thing inside can
+   move is not a boundary. */
+let fileRoot = 'playground', fileRoots = [];
+
+async function loadRoots(){
+  const d = await api('/api/roots').catch(() => ({ roots: [] }));
+  fileRoots = d.roots || [];
+  if (!fileRoots.some(r => r.id === fileRoot)) fileRoot = 'playground';
+  const sel = $('#pgroot');
+  sel.innerHTML = fileRoots.map(r =>
+    '<option value="' + esc(r.id) + '"' + (r.id === fileRoot ? ' selected' : '') + '>' +
+    esc(r.label) + (r.exists ? '' : ' (missing)') + '</option>').join('');
+  const cur = fileRoots.find(r => r.id === fileRoot);
+  sel.title = cur ? cur.path : '';
+  $('#pgrootpathlbl').textContent = cur ? cur.path : '';
+}
 
 function fmtSize(n){
   if (!n) return '';
@@ -1998,10 +2122,14 @@ function fileIcon(name, dir){
 }
 
 async function loadFiles(){
-  const d = await api('/api/files').catch(() => ({ files: [] }));
+  await loadRoots();
+  const d = await api('/api/files?root=' + encodeURIComponent(fileRoot))
+    .catch(() => ({ files: [], error: 'could not read that folder' }));
   fileTree = d.files || [];
+  fileErr = d.error || null;
   renderTree();
 }
+let fileErr = null;
 
 function renderTree(){
   const q = ($('#pgfilter').value || '').toLowerCase();
@@ -2030,8 +2158,13 @@ function renderTree(){
 
   const el = $('#pgtree');
   if (!fileTree.length) {
-    el.innerHTML = '<div class="sidenote">Nothing built yet. Ask bluee to make something ' +
-                   'and the files appear here.</div>';
+    const cur = fileRoots.find(r => r.id === fileRoot);
+    el.innerHTML = '<div class="sidenote">' + (
+      fileErr ? esc(fileErr)
+      : cur && !cur.exists ? 'That folder is no longer on disk.'
+      : fileRoot === 'playground'
+        ? 'Nothing built yet. Ask bluee to make something and the files appear here.'
+        : 'This folder is empty.') + '</div>';
     return;
   }
   el.innerHTML = fileTree.map(n => row(n, 0)).join('');
@@ -2072,7 +2205,7 @@ async function openFile(path){
 
   // An HTML file is more useful rendered than read, so show it running - with
   // a Source toggle for when you want the code instead.
-  const isHtml = /\.html?$/i.test(path);
+  const isHtml = /\.html?$/i.test(path) && canRender();
   $('#pgsrc').style.display = isHtml ? '' : 'none';
   $('#pgsrc').textContent = 'Source';
   $('#pgsrc').dataset.mode = 'render';
@@ -2086,25 +2219,48 @@ function artifactUrl(path){
   return '/artifacts/' + path.split('/').map(encodeURIComponent).join('/');
 }
 
+/* Only the playground folder is served over HTTP. A granted project folder is
+   read through the API instead, so its HTML shows as source rather than being
+   silently served to the browser - which would be a quiet way to expose a
+   folder you granted for reading. */
+const canRender = () => fileRoot === 'playground';
+
 function showRendered(path){
-  $('#pgcode').style.display = 'none';
+  $('#pgcodewrap').classList.remove('on');
   $('#pgframe').style.display = '';
   $('#pgframe').src = artifactUrl(path);
   $('#pgmeta').textContent = 'rendered';
 }
 
 async function showSource(path){
-  const d = await api('/api/file?path=' + encodeURIComponent(path)).catch(e => ({ error: String(e) }));
+  const d = await api('/api/file?root=' + encodeURIComponent(fileRoot) +
+    '&path=' + encodeURIComponent(path)).catch(e => ({ error: String(e) }));
   $('#pgframe').style.display = 'none';
-  $('#pgcode').style.display = '';
-  if (d.error) { $('#pgcode').textContent = d.error; $('#pgmeta').textContent = ''; return; }
+  $('#pgcodewrap').classList.add('on');
+  const setCode = (text, lines) => {
+    $('#pgcode').textContent = text;
+    // Gutter is a sibling column rather than numbers baked into the text, so
+    // selecting the code copies the code and not a column of digits.
+    $('#pggutter').textContent = lines
+      ? Array.from({ length: lines }, (_, i) => i + 1).join('\n') : '';
+  };
+  if (d.error) { setCode(d.error, 0); $('#pgmeta').textContent = ''; return; }
   if (d.binary) {
-    $('#pgcode').textContent = d.note || 'Binary file.';
+    setCode(d.note || 'Binary file.', 0);
     $('#pgmeta').textContent = fmtSize(d.size);
     return;
   }
-  $('#pgcode').textContent = d.text;
-  $('#pgmeta').textContent = fmtSize(d.size) + ' · ' + d.text.split('\n').length + ' lines';
+  const lines = d.text.split('\n').length;
+  setCode(d.text, lines);
+  // Prose wraps by default, code does not - wrapping source ruins alignment,
+  // and not wrapping a paragraph means reading sideways.
+  $('#pgcodewrap').classList.toggle('soft', /\.(md|txt|log)$/i.test(path));
+  syncWrapBtn();
+  $('#pgmeta').textContent = fmtSize(d.size) + ' · ' + lines + ' lines';
+}
+
+function syncWrapBtn(){
+  $('#pgwrapbtn').classList.toggle('on', $('#pgcodewrap').classList.contains('soft'));
 }
 
 async function deleteFile(path, node, isDir){
@@ -2126,7 +2282,7 @@ async function deleteFile(path, node, isDir){
   }
   const r = await api('/api/file/delete', {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ path })
+    body: JSON.stringify({ path, root: fileRoot })
   }).catch(e => ({ error: String(e) }));
   if (r.ok) {
     if (filePick === path || (filePick || '').startsWith(path + '/')) {

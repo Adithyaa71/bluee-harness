@@ -657,6 +657,52 @@ source view  -> 4798 chars, visible
 console errors: none
 ```
 
+**18. Granted folders — bluee can work in a directory you point it at.**
+`src/roots.rs`. The playground was the only place it could see; now any folder
+on the machine can be granted, the same shape as handing a coding agent a
+working directory.
+
+**Granting is a human act, and that is the whole design.** There is no tool that
+adds a root and there should never be — a boundary the thing inside can move is
+not a boundary. The model gets `list_folders`, and `list_files` / `read_file` /
+`delete_file` take a `root`; it can see and work inside granted folders and
+cannot create one. Revoking removes access, never the folder.
+
+*Containment is checked by resolving, not by pattern.* `roots::resolve`
+canonicalises and compares prefixes, so `..`, absolute paths and symlink escapes
+all fail the same way. Verified live through the running UI: `../.env` against a
+granted folder came back `path must stay inside \`persona\``.
+
+*One guard against a slip, not against an adversary:* a drive root or a system
+folder is refused. The owner builds his own guards and can edit `roots.json` by
+hand — this just stops a delete tool ending up pointed at `C:\`. Counting
+**named** components matters here: `C:\` is two components on Windows (a Prefix
+and a RootDir) and zero directory names, which is what actually makes it a root.
+
+*Only the playground renders live.* A granted project folder is read through the
+API and shown as source, never served over HTTP — silently serving a folder you
+granted for reading would be a quiet way to widen what you agreed to.
+
+**19. UI pass, run against a real browser each round.** Each of these was seen
+in a screenshot or a measurement, not guessed:
+- `canonicalize` leaks Windows' `\?\` extended-length prefix into every path
+  the UI shows. `roots::pretty` strips it for anything a person reads.
+- Source view gained a **gutter and a wrap toggle**. The gutter is a sibling
+  column rather than numbers baked into the text, so selecting the code copies
+  the code and not a column of digits. Prose (`.md`, `.txt`, `.log`) wraps by
+  default and code does not — wrapping source ruins alignment, and not wrapping
+  a paragraph means reading sideways.
+- The root picker was a default `<select>`; now styled, with the folder's real
+  path under it.
+- **"terminal here"** opens the terminal and `cd`s into the granted folder.
+  Typed rather than spawned with a cwd, so it works for powershell, cmd, bash
+  *and* an ssh session, and you see the command that ran instead of the shell
+  silently starting somewhere else.
+- The UI check now **clears `localStorage` and reloads first**. Panel width and
+  the collapsed flag persist, so without it a run inherited the previous run's
+  state and the numbers stopped being comparable — a test that is not
+  reproducible is not evidence.
+
 ### 4g. Desktop app, not a web page
 
 Requested, and correct: the dashboard should be a real local desktop

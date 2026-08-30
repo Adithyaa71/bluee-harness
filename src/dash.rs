@@ -107,6 +107,8 @@ pub async fn serve_on(cfg: Config, std_listener: std::net::TcpListener) -> Resul
         .route("/api/files", get(list_files))
         .route("/api/file", get(read_file))
         .route("/api/file/delete", post(delete_file))
+        .route("/api/roots", get(list_roots).post(add_root))
+        .route("/api/roots/remove", post(remove_root))
         .route("/artifacts/{id}/", get(artifact_root))
         .route("/artifacts/{id}/{*path}", get(artifact_file))
         .route("/api/chat", post(chat))
@@ -1057,19 +1059,75 @@ async fn current_session(State(s): State<Shared>) -> impl IntoResponse {
 struct FileRef {
     #[serde(default)]
     path: String,
+    /// Which granted folder the path is relative to. Defaults to the
+    /// playground so every existing caller keeps working.
+    #[serde(default = "default_root")]
+    root: String,
 }
 
-fn playground_root(s: &Shared) -> Result<std::path::PathBuf, (StatusCode, Json<Value>)> {
-    Ok(ArtifactStore::open(&s.cfg.data_dir)
-        .map_err(fail)?
-        .root()
-        .to_path_buf())
+fn default_root() -> String {
+    "playground".into()
 }
 
-async fn list_files(State(s): State<Shared>) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let root = playground_root(&s)?;
-    let nodes = crate::artifacts::tree(&root).map_err(fail)?;
-    Ok(Json(json!({ "root": root.display().to_string(), "files": nodes })))
+#[derive(Deserialize)]
+struct RootAdd {
+    path: String,
+    #[serde(default)]
+    label: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RootRef {
+    id: String,
+}
+
+async fn list_roots(State(s): State<Shared>) -> impl IntoResponse {
+    let roots: Vec<Value> = crate::roots::load(&s.cfg)
+        .into_iter()
+        .map(|r| {
+            json!({
+                "id": r.id, "label": r.label, "builtin": r.builtin,
+                "path": crate::roots::pretty(&r.path),
+                // Say whether it is still there: a folder can be moved or
+                // deleted after it was granted, and a tree that silently comes
+                // back empty is worse than one that says why.
+                "exists": r.path.is_dir(),
+            })
+        })
+        .collect();
+    Json(json!({
+        "roots": roots,
+        "note": "Granting a folder is something you do, not something bluee can do.                  It reads, writes and deletes only inside these."
+    }))
+}
+
+async fn add_root(
+    State(s): State<Shared>,
+    Json(b): Json<RootAdd>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let r = crate::roots::add(&s.cfg, &b.path, b.label.as_deref()).map_err(fail)?;
+    Ok(Json(json!({ "ok": true, "id": r.id, "label": r.label,
+                    "path": crate::roots::pretty(&r.path) })))
+}
+
+async fn remove_root(
+    State(s): State<Shared>,
+    Json(b): Json<RootRef>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    crate::roots::remove(&s.cfg, &b.id).map_err(fail)?;
+    Ok(Json(json!({ "ok": true, "removed": b.id })))
+}
+
+async fn list_files(
+    State(s): State<Shared>,
+    Query(q): Query<FileRef>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let root = crate::roots::get(&s.cfg, &q.root).map_err(fail)?;
+    let nodes = crate::artifacts::tree(&root.path).map_err(fail)?;
+    Ok(Json(json!({
+        "root": crate::roots::pretty(&root.path),
+        "root_id": root.id, "label": root.label, "files": nodes,
+    })))
 }
 
 /// Read one file for the preview pane. Binary files are reported as such
@@ -1078,8 +1136,7 @@ async fn read_file(
     State(s): State<Shared>,
     Query(q): Query<FileRef>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let root = playground_root(&s)?;
-    let full = crate::artifacts::resolve(&root, &q.path).map_err(fail)?;
+    let (_, full) = crate::roots::resolve(&s.cfg, &q.root, &q.path).map_err(fail)?;
     let bytes = std::fs::read(&full).map_err(fail)?;
     let size = bytes.len();
     match String::from_utf8(bytes) {
@@ -1097,9 +1154,10 @@ async fn delete_file(
     State(s): State<Shared>,
     Json(b): Json<FileRef>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let root = playground_root(&s)?;
-    let (was_dir, n) = crate::artifacts::delete_path(&root, &b.path).map_err(fail)?;
-    Ok(Json(json!({ "ok": true, "path": b.path, "folder": was_dir, "files_removed": n })))
+    let root = crate::roots::get(&s.cfg, &b.root).map_err(fail)?;
+    let (was_dir, n) = crate::artifacts::delete_path(&root.path, &b.path).map_err(fail)?;
+    Ok(Json(json!({ "ok": true, "path": b.path, "root": root.id,
+                    "folder": was_dir, "files_removed": n })))
 }
 
 #[derive(Deserialize)]

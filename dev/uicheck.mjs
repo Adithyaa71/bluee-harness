@@ -101,7 +101,11 @@ async function shot(name) {
 const out = [];
 const log = (...a) => { out.push(a.join(' ')); console.log(...a); };
 
-await sleep(2500);   // let boot fetches settle
+// Start from a known state: the panel width and collapsed flag persist in
+// localStorage, so without this a run inherits whatever the last run left and
+// the numbers stop being comparable.
+await evaluate("try{ localStorage.clear(); }catch(_){}; location.reload();");
+await sleep(3000);   // let boot fetches settle
 
 // ---------------------------------------------------------------- checks
 log('=== PAGE ===');
@@ -190,6 +194,78 @@ log('source view :', await evaluate(`
   await new Promise(r=>setTimeout(r,600));
   const co=document.querySelector('#pgcode');
   return 'code chars=' + co.textContent.length + ' visible=' + (co.offsetParent !== null);
+`));
+
+// Grant a real folder and work inside it - the "open a directory" flow.
+log('\n=== GRANTED FOLDERS ===');
+log('picker      :', await evaluate(
+  "return [...document.querySelectorAll('#pgroot option')].map(o=>o.value).join(', ')"));
+
+const grantPath = process.env.GRANT_PATH || (process.cwd() + '\\persona');
+log('granting    :', grantPath);
+log('grant       :', await evaluate(`
+  document.querySelector('#pgroadd').click();
+  const inp = document.querySelector('#pgrootpath');
+  inp.value = ${JSON.stringify(grantPath)};
+  document.querySelector('#pgrootok').click();
+  await new Promise(r => setTimeout(r, 1800));
+  return document.querySelector('#pgrootmsg').textContent;
+`));
+log('now showing :', await evaluate(`
+  return document.querySelector('#pgroot').value + ' | ' +
+    document.querySelectorAll('#pgtree .fnode').length + ' rows: ' +
+    [...document.querySelectorAll('#pgtree .fnode .nm')].map(e => e.textContent).join(', ');
+`));
+log('open a file :', await evaluate(`
+  const f = [...document.querySelectorAll('#pgtree .fnode')].find(r => r.dataset.d === '0');
+  if (!f) return 'no file row';
+  f.click();
+  await new Promise(r => setTimeout(r, 1000));
+  return f.dataset.p + ' -> ' + document.querySelector('#pgcode').textContent.length +
+    ' chars, visible=' + (document.querySelector('#pgcode').offsetParent !== null);
+`));
+log('code gutter :', await evaluate(`
+  const j = [...document.querySelectorAll('#pgtree .fnode')]
+    .find(r => r.querySelector('.nm').textContent.endsWith('.json'));
+  if (!j) return 'no json file';
+  j.click();
+  await new Promise(r => setTimeout(r, 900));
+  const w = document.querySelector('#pgcodewrap');
+  const g = document.querySelector('#pggutter');
+  return 'soft=' + w.classList.contains('soft') +
+         ' gutter lines=' + (g.textContent ? g.textContent.split('\\n').length : 0) +
+         ' gutter visible=' + (g.offsetParent !== null);
+`));
+log('wrap toggle :', await evaluate(`
+  document.querySelector('#pgwrapbtn').click();
+  await new Promise(r => setTimeout(r, 200));
+  const w = document.querySelector('#pgcodewrap');
+  const on = document.querySelector('#pgwrapbtn').classList.contains('on');
+  return 'soft=' + w.classList.contains('soft') + ' button-lit=' + on +
+         ' gutter hidden=' + (document.querySelector('#pggutter').offsetParent === null);
+`));
+log('terminal here:', await evaluate(`
+  document.querySelector('#pgterm').click();
+  await new Promise(r => setTimeout(r, 1600));
+  const t = document.querySelector('#term');
+  const r = t.getBoundingClientRect();
+  return 'terminal ' + Math.round(r.width) + 'x' + Math.round(r.height) +
+         ' shown=' + (r.height > 40);
+`));
+log('shot        :', await shot('granted-folder'));
+log('escape test :', await evaluate(`
+  const r = await fetch('/api/file?root=' + document.querySelector('#pgroot').value +
+    '&path=' + encodeURIComponent('../.env')).then(x => x.json());
+  return r.error || ('LEAKED ' + (r.text || '').slice(0, 40));
+`));
+log('revoke      :', await evaluate(`
+  const b = document.querySelector('#pgrootrm');
+  if (!document.querySelector('#pgrootadd').classList.contains('on'))
+    document.querySelector('#pgroadd').click();
+  b.click(); await new Promise(r => setTimeout(r, 250));
+  b.click(); await new Promise(r => setTimeout(r, 1400));
+  return document.querySelector('#pgrootmsg').textContent + ' | now on ' +
+    document.querySelector('#pgroot').value;
 `));
 
 log('\n=== GRAPH ===');

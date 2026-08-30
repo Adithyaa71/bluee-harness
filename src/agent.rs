@@ -146,7 +146,7 @@ impl Agent {
             .ok()
             .map(|v| v.split(',').map(|s| s.trim().to_string()).collect());
 
-        let native = NativeTools::open(&cfg.data_dir, &cfg.skills_dir)?;
+        let native = NativeTools::open(cfg)?;
         let mut tool_defs = NativeTools::defs();
         let native_count = tool_defs.len();
 
