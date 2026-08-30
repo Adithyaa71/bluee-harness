@@ -115,6 +115,8 @@ pub async fn serve_on(cfg: Config, std_listener: std::net::TcpListener) -> Resul
         .route("/api/window", post(open_window))
         .route("/api/roots", get(list_roots).post(add_root))
         .route("/api/roots/remove", post(remove_root))
+        .route("/api/roots/rename", post(rename_root))
+        .route("/api/browser", get(browser_state).post(browser_act))
         .route("/artifacts/{id}/", get(artifact_root))
         .route("/artifacts/{id}/{*path}", get(artifact_file))
         .route("/api/chat", post(chat))
@@ -1148,6 +1150,99 @@ struct RootAdd {
 #[derive(Deserialize)]
 struct RootRef {
     id: String,
+}
+
+#[derive(Deserialize)]
+struct RootRename {
+    id: String,
+    label: String,
+}
+
+/// Rename a workspace. The label is what you call it; the id and the path do
+/// not move, so nothing that referenced it breaks.
+async fn rename_root(
+    State(s): State<Shared>,
+    Json(b): Json<RootRename>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let label = b.label.trim();
+    if label.is_empty() {
+        return Err(fail(anyhow::anyhow!("a workspace name cannot be empty")));
+    }
+    crate::roots::rename(&s.cfg, &b.id, label).map_err(fail)?;
+    Ok(Json(json!({ "ok": true, "id": b.id, "label": label })))
+}
+
+// ------------------------------------------------- the real browser (§4f-c)
+
+/// Status plus the open tabs, in one call.
+///
+/// A thin proxy over SnareVec's CDP tools rather than a second browser: this
+/// drives the browser Adithya is actually using, with his session and his
+/// cookies, which is the whole point - a headless one would be logged out of
+/// everything and show him nothing he recognises.
+async fn browser_state(State(s): State<Shared>) -> impl IntoResponse {
+    let status = s
+        .registry
+        .call("snarevec", "browser_status", json!({}))
+        .await
+        .unwrap_or_else(|e| json!({ "error": e.to_string() }));
+
+    let reachable = !status.get("error").is_some()
+        && status.to_string().to_lowercase().contains("running");
+
+    let tabs = if reachable {
+        s.registry
+            .call("snarevec", "browser_list_tabs", json!({}))
+            .await
+            .unwrap_or_else(|e| json!({ "error": e.to_string() }))
+    } else {
+        json!(null)
+    };
+
+    Json(json!({
+        "status": status,
+        "tabs": tabs,
+        "note": "SnareVec drives your own browser. If this says not running, start the                  SnareVec workbench - the daemon idles out, which is normal, not a fault."
+    }))
+}
+
+#[derive(Deserialize)]
+struct BrowserAct {
+    action: String,
+    #[serde(default)]
+    tab: Option<String>,
+    #[serde(default)]
+    url: Option<String>,
+}
+
+async fn browser_act(
+    State(s): State<Shared>,
+    Json(b): Json<BrowserAct>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let (tool, args) = match b.action.as_str() {
+        "screenshot" => (
+            "browser_screenshot",
+            match &b.tab {
+                Some(t) => json!({ "tab_id": t }),
+                None => json!({}),
+            },
+        ),
+        "navigate" => (
+            "browser_navigate",
+            json!({ "url": b.url.clone().unwrap_or_default() }),
+        ),
+        "tabs" => ("browser_list_tabs", json!({})),
+        "info" => (
+            "browser_get_page_info",
+            match &b.tab {
+                Some(t) => json!({ "tab_id": t }),
+                None => json!({}),
+            },
+        ),
+        other => return Err(fail(anyhow::anyhow!("unknown browser action: {other}"))),
+    };
+    let out = s.registry.call("snarevec", tool, args).await.map_err(fail)?;
+    Ok(Json(out))
 }
 
 async fn list_roots(State(s): State<Shared>) -> impl IntoResponse {

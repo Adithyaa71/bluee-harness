@@ -152,6 +152,29 @@ log('preview     :', await evaluate(`
          ' | code ' + Math.round(cb.width) + 'x' + Math.round(cb.height);
 `));
 log('shot        :', await shot('playground'));
+log('browser btn :', await evaluate(`
+  const b = document.querySelector('#pgbrowse');
+  b.click();
+  await new Promise(r => setTimeout(r, 2200));
+  const p = document.querySelector('#pgweb');
+  const view = document.querySelector('#webview').textContent.trim().slice(0, 90);
+  return 'panel open=' + p.classList.contains('on') +
+    ' width=' + Math.round(p.getBoundingClientRect().width) +
+    ' | ' + view;
+`));
+log('browser off :', await evaluate(`
+  document.querySelector('#webclose').click();
+  await new Promise(r => setTimeout(r, 300));
+  return 'closed=' + !document.querySelector('#pgweb').classList.contains('on') +
+    ' files still there=' + (document.querySelector('#pgfiles').getBoundingClientRect().width > 0);
+`));
+log('rename      :', await evaluate(`
+  const before = document.querySelector('#pgroot').value;
+  document.querySelector('#pgrename').click();
+  await new Promise(r => setTimeout(r, 250));
+  const msg = document.querySelector('#pgrootmsg').textContent;
+  return 'on playground -> ' + JSON.stringify(msg);
+`));
 
 // The panel controls, actually exercised.
 log('collapse    :', await evaluate(`

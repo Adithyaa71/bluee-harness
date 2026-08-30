@@ -501,6 +501,23 @@ body.dragging{cursor:grabbing;user-select:none}
 .fnode:hover .del{opacity:1}
 .fnode .del:hover{color:var(--bad)}
 .fkids{margin-left:11px;border-left:1px solid var(--line);padding-left:4px}
+#pgweb{display:none;flex-direction:column;min-width:0;border-right:1px solid var(--line);
+  background:var(--panel);width:460px;flex:none}
+#pgweb.on{display:flex}
+#pgweb .webbar{display:flex;align-items:center;gap:6px;padding:7px 9px;flex:none;
+  border-bottom:1px solid var(--line)}
+#pgweb select{max-width:120px;background:var(--panel2);border:1px solid var(--line);
+  border-radius:6px;color:var(--ink);font-size:11.5px;padding:4px 6px;outline:none;
+  font-family:var(--mono)}
+#weburl{flex:1;min-width:60px;background:var(--panel2);border:1px solid var(--line);
+  border-radius:6px;color:var(--ink);font-size:11.5px;padding:5px 8px;outline:none;
+  font-family:var(--mono)}
+#weburl:focus{border-color:var(--accent)}
+#pgweb .wstat{font-size:10.5px;font-family:var(--mono);color:var(--faint)}
+#pgweb .wlive{font-size:10.5px;color:var(--dim);display:flex;align-items:center;gap:3px}
+#webview{flex:1;min-height:0;overflow:auto;background:#0a0c10;display:flex;
+  align-items:flex-start;justify-content:center}
+#webview img{max-width:100%;display:block}
 #pgmain{flex:1;min-width:0;display:flex;flex-direction:column}
 #pgview{flex:1;min-height:0;display:none;flex-direction:column}
 #pgview.on{display:flex}
@@ -611,7 +628,8 @@ body.dragging{cursor:grabbing;user-select:none}
         <span class="lbl">topic</span>
         <div id="topics" style="display:flex;gap:6px;flex-wrap:wrap"></div>
         <div class="spacer"></div>
-        <button class="ghost" id="pgtoggle" title="Show or hide the file tree">files</button>
+        <button class="ghost on" id="pgtoggle" title="Show or hide the file tree">files</button>
+        <button class="ghost" id="pgbrowse" title="Look at your real browser">browser</button>
         <button class="ghost" id="areload">refresh</button>
       </div>
       <div id="pgwrap">
@@ -627,6 +645,7 @@ body.dragging{cursor:grabbing;user-select:none}
               <button class="win-btn" id="pgroadd" title="Grant access to a folder">+</button>
             </div>
             <div class="rootpath" id="pgrootpathlbl"></div>
+          <button class="win-btn" id="pgrename" title="Rename this workspace">&#9998;</button>
             <div id="pgrootgone">
               <span>This folder is gone from disk.</span>
               <button class="btn sec" id="pgrootgonerm">Remove it</button>
@@ -645,6 +664,19 @@ body.dragging{cursor:grabbing;user-select:none}
           <div id="pgtree"></div>
         </div>
         <div id="pgdrag" title="Drag to resize"></div>
+        <div id="pgweb">
+          <div class="webbar">
+            <button class="ghost" id="webrefresh" title="Refresh tabs and view">&#8635;</button>
+            <select id="webtabs" title="Which tab to look at"></select>
+            <input id="weburl" placeholder="Type a URL and press Enter…" spellcheck="false">
+            <span class="wstat" id="webstat"></span>
+            <div class="spacer"></div>
+            <label class="wlive"><input type="checkbox" id="weblive"> live</label>
+            <button class="win-btn" id="webpop" title="Open in a window">&#8599;</button>
+            <button class="win-btn" id="webclose" title="Close the browser view">&#10005;</button>
+          </div>
+          <div id="webview"><div class="sidenote" style="padding:16px">Loading…</div></div>
+        </div>
         <button id="pgshow" title="Show files">&#10095;</button>
         <div id="pgmain">
       <div id="playbody"></div>
@@ -792,6 +824,10 @@ function bootSolo(){
       $('#aframe').src='/artifacts/'+encodeURIComponent(soloId)+'/';
       $('#aname').textContent=soloId;
     },80);
+  } else if(soloView==='browser'){
+    show('#v-play');
+    setTimeout(()=>{ $('#pgweb').classList.add('on'); $('#pgweb').style.width='100%';
+      $('#pgmain').style.display='none'; webLoad(); },80);
   } else if(soloView==='tasks'||soloView==='log'){
     show('#v-chat');
     app.classList.remove('no-side');
@@ -1693,6 +1729,143 @@ $('#pgrootgonerm').onclick=async()=>{
 $('#pgback').onclick=()=>{ $('#pgview').classList.remove('on'); $('#playbody').style.display='';
   filePick=null; renderTree(); };
 $('#pgfrel').onclick=loadFiles;
+
+/* ---------- the real browser, in the playground ----------
+   Not an embedded browser: this looks at the one you are actually using, via
+   SnareVec's CDP tools. That matters - your session, your cookies, your logged
+   in pages. A headless browser here would show you nothing you recognise.
+
+   It is a screenshot rather than a live stream on purpose: the point is that
+   bluee and you are looking at the SAME thing, and a screenshot is exactly what
+   bluee can also fetch. */
+let webTimer=null, webTab=null;
+
+function webBusy(t){ $('#webstat').textContent=t||''; }
+
+async function webLoad(){
+  webBusy('checking…');
+  const d=await api('/api/browser').catch(e=>({error:String(e)}));
+  const txt=JSON.stringify(d.status||{});
+  const up=/running|connected|ok/i.test(txt) && !/not running/i.test(txt);
+  if(!up){
+    $('#webtabs').innerHTML='';
+    $('#webview').innerHTML='<div class="sidenote" style="padding:16px;max-width:340px">'+
+      '<b>The browser bridge is not running.</b><br><br>'+
+      'SnareVec drives your own browser, and its daemon idles out when unused '+
+      '&mdash; that is normal, not a fault. Start the SnareVec workbench and hit refresh.'+
+      '</div>';
+    webBusy('offline');
+    return;
+  }
+  // Tab shapes differ between versions, so pull ids and titles defensively
+  // rather than assuming one schema.
+  const raw=JSON.stringify(d.tabs||{});
+  let tabs=[];
+  try{
+    const t=d.tabs;
+    const arr=Array.isArray(t)?t:(t&&(t.tabs||t.rows||t.result))||[];
+    tabs=(Array.isArray(arr)?arr:[]).map(x=>({
+      id:String(x.tab_id||x.id||x.targetId||''),
+      title:String(x.title||x.url||'tab'),
+    })).filter(x=>x.id);
+  }catch(_){}
+  $('#webtabs').innerHTML=tabs.map(t=>
+    '<option value="'+esc(t.id)+'"'+(t.id===webTab?' selected':'')+'>'+
+    esc(t.title.slice(0,40))+'</option>').join('') ||
+    '<option value="">(active tab)</option>';
+  if(!webTab&&tabs.length) webTab=tabs[0].id;
+  webBusy(tabs.length?tabs.length+' tabs':'ready');
+  webShot();
+}
+
+async function webShot(){
+  webBusy('capturing…');
+  const d=await api('/api/browser',{method:'POST',
+    headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({action:'screenshot',tab:webTab||undefined})})
+    .catch(e=>({error:String(e)}));
+  // The image comes back as base64 under one of a few key names depending on
+  // the tool version; find the first thing that looks like image data.
+  const find=o=>{
+    if(!o||typeof o!=='object') return null;
+    for(const [k,v] of Object.entries(o)){
+      if(typeof v==='string'&&v.length>200&&/^[A-Za-z0-9+/=]+$/.test(v.slice(0,80))) return v;
+      if(typeof v==='string'&&v.startsWith('data:image')) return v;
+      if(typeof v==='object'){ const hit=find(v); if(hit) return hit; }
+    }
+    return null;
+  };
+  const b64=find(d);
+  if(!b64){
+    $('#webview').innerHTML='<div class="sidenote" style="padding:16px">'+
+      esc((d&&d.error)||'No image came back from that tab.')+'</div>';
+    webBusy('no image'); return;
+  }
+  const src=b64.startsWith('data:')?b64:'data:image/png;base64,'+b64;
+  $('#webview').innerHTML='<img alt="browser tab">';
+  $('#webview img').src=src;
+  webBusy(new Date().toLocaleTimeString());
+}
+
+function webToggle(on){
+  const panel=$('#pgweb');
+  const show=on===undefined?!panel.classList.contains('on'):on;
+  panel.classList.toggle('on',show);
+  $('#pgbrowse').classList.toggle('on',show);
+  if(show) webLoad(); else { clearInterval(webTimer); webTimer=null; $('#weblive').checked=false; }
+}
+$('#pgbrowse').onclick=()=>webToggle();
+$('#webclose').onclick=()=>webToggle(false);
+$('#webrefresh').onclick=webLoad;
+$('#webtabs').onchange=e=>{ webTab=e.target.value; webShot(); };
+$('#weblive').onchange=e=>{
+  clearInterval(webTimer); webTimer=null;
+  // 3s, not faster: each tick is a real screenshot over CDP, and hammering it
+  // would slow the browser you are trying to watch.
+  if(e.target.checked) webTimer=setInterval(webShot,3000);
+};
+$('#weburl').addEventListener('keydown',async e=>{
+  if(e.key!=='Enter') return;
+  e.preventDefault();
+  const url=$('#weburl').value.trim(); if(!url) return;
+  webBusy('navigating…');
+  await api('/api/browser',{method:'POST',headers:{'Content-Type':'application/json'},
+    body:JSON.stringify({action:'navigate',url})}).catch(()=>{});
+  setTimeout(webLoad,900);
+});
+$('#webpop').onclick=()=>popOut('browser',{title:'bluee - browser',w:900,h:700});
+
+/* Rename the workspace. The id and path do not move, so nothing that already
+   referred to this folder breaks. */
+$('#pgrename').onclick=async()=>{
+  const cur=fileRoots.find(r=>r.id===fileRoot);
+  if(!cur) return;
+  const m=$('#pgrootmsg');
+  if(cur.builtin||cur.id==='playground'){
+    m.className='rootmsg bad'; m.textContent='the playground keeps its name'; return;
+  }
+  const lbl=$('#pgrootpathlbl');
+  const inp=document.createElement('input');
+  inp.className='fin'; inp.value=cur.label;
+  inp.style.cssText='width:100%;font-size:12px;margin-bottom:6px';
+  lbl.replaceWith(inp); inp.focus(); inp.select();
+  const done=async save=>{
+    const v=inp.value.trim();
+    inp.replaceWith(lbl);
+    if(save&&v&&v!==cur.label){
+      const r=await api('/api/roots/rename',{method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({id:fileRoot,label:v})}).catch(e=>({error:String(e)}));
+      if(!r.ok){ m.className='rootmsg bad'; m.textContent=r.error||'failed'; }
+    }
+    loadFiles();
+  };
+  inp.addEventListener('keydown',e=>{
+    if(e.key==='Enter'){ e.preventDefault(); done(true); }
+    if(e.key==='Escape'){ e.preventDefault(); done(false); }
+  });
+  inp.addEventListener('blur',()=>done(true),{once:true});
+};
 $('#pgwrapbtn').onclick=()=>{ $('#pgcodewrap').classList.toggle('soft'); syncWrapBtn(); };
 /* "Work in that directory": open the terminal and cd into the granted folder.
    Typed rather than spawned with a cwd, so it works for every shell the picker

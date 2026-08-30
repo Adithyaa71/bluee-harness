@@ -169,6 +169,20 @@ pub fn remove(cfg: &Config, id: &str) -> Result<()> {
     save(cfg, &roots)
 }
 
+/// Rename a granted folder. The id and path are untouched - only what you call
+/// it changes, so anything already referring to it keeps working.
+pub fn rename(cfg: &Config, id: &str, label: &str) -> Result<()> {
+    if id == "playground" {
+        bail!("the playground folder keeps its name");
+    }
+    let mut roots = load(cfg);
+    let Some(r) = roots.iter_mut().find(|r| r.id == id) else {
+        bail!("no granted folder with id `{id}`");
+    };
+    r.label = label.chars().take(60).collect();
+    save(cfg, &roots)
+}
+
 pub fn get(cfg: &Config, id: &str) -> Result<Root> {
     load(cfg)
         .into_iter()

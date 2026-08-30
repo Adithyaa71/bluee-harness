@@ -276,6 +276,14 @@ right, let's do trading
 and it pulls up what it built last time plus what you discussed. Not a blank
 page — where you left off.
 
+**FILES / browser** — two buttons top right of the Playground. `files` shows
+the folder tree, `browser` looks at your real browser.
+
+**"Filter files…" is just a search box for the tree.** Type `chart` and only
+rows matching `chart` stay visible — it hides the rest of the tree, nothing
+more. With three files it does nothing useful; with a real project folder open
+it is how you find something without scrolling.
+
 **The FILES panel down the left is the folder itself.** Everything bluee has
 built, as it sits on disk. Filter it, click a file to open it — HTML runs live
 with a **Source** toggle, anything else shows as text. **open window** floats it
