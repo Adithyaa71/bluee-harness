@@ -725,6 +725,81 @@ nothing. The drag test inherited a pin from the previous step and "passed"
 without proving anything. Both now start from a known state and assert the
 precondition as well as the result.
 
+**21. System tools — and a guard that failed its first real test.**
+`src/system.rs`: `run_command`, `open_path`, `open_app`.
+
+*What is and is not bounded, stated plainly.* Every command runs with its
+working directory set to a granted folder, and the model cannot grant itself a
+folder — so it chooses *what* runs, never *where from*. But a shell reaches the
+whole machine regardless of cwd. **This is not a sandbox and must not be
+described as one.** What it gives instead is visibility: every command is a
+logged tool call carrying its full text, exit code, and output.
+
+*The guard that did not hold.* The first version took a `confirm: true` flag for
+a denylist of machine-ending commands. Tested against the real model — asked to
+"try running `format C: /q`" — **it set `confirm: true` itself and ran it.** It
+survived only because Windows demanded elevation. A confirmation the model can
+grant itself is not a confirmation; it is decoration. The flag is gone and those
+commands are refused unconditionally, with no override on the tool at all.
+
+Re-verified after the change: `echo hello` ran and returned cleanly, and asked
+again for the destructive one the model answered *"I'm not running that one,
+regardless of the authorisation."*
+
+*Other limits worth knowing:* output is clipped to 20k characters from the
+middle (a build log would otherwise eat the context window), and a command that
+hangs is killed at its timeout rather than taking the turn with it — both
+covered by tests.
+
+**22. Memory and Graph on one page; artifacts and the graph pop out.**
+The Memory page now carries the graph beneath it, with a draggable divider.
+**One canvas, moved between hosts** rather than a second one — two canvases
+would mean two layouts and two copies of the data to keep in step, for nothing.
+It moves to the Memory pane, into a floating window, or back to the Graph page,
+and returns to wherever you actually are when the window closes.
+
+**A granted folder deleted in Explorer now says so** rather than silently coming
+back empty: the row is marked *missing*, a red banner appears, and one click
+removes it. Verified live — the model itself reported the deleted folder as
+"doesn't actually exist on disk".
+
+### 4h. Requested next, sized honestly (not yet built)
+
+Recorded so none of it is lost, with the reason each is a separate pass.
+
+**a. Per-session graph and memory, merged or discarded on session close.**
+Genuinely possible and architecturally clean, because it is the same
+scope-column trick `/compact` already uses (§4f-d.6): vector chunks gain
+`scope = "session:<id>"`, and the graph gains a `session` property on entities
+and edges. Deleting a session then deletes its derived rows; keeping it promotes
+them to `global`. The work is in the reducer and in kùzu's schema, not in the
+idea. **One caveat to decide first:** a per-session graph means an entity can
+exist twice (once session-scoped, once global) and the merge has to reconcile
+them, which is where this stops being trivial.
+
+**b. Accessing a large codebase.** See the answer given to Adithya: the current
+`codemap.rs` scales to a few thousand files, and the honest limit is that it
+indexes *declarations*, not call graphs — so "what breaks if I change this
+function" is a question it cannot answer today. A Neovim MCP with LSP behind it
+is a good answer to exactly that, because an LSP gives real references and call
+hierarchies rather than guessed ones. Worth doing when a large repo is actually
+in play.
+
+**c. Per-workspace MCP configuration** — a granted folder should be able to say
+which servers it wants. This is the §4f tool-scoping idea with a concrete
+trigger, and it is the same mechanism as `HARNESS_TOOL_SERVERS`.
+
+**d. Multiple terminal sessions with tmux-style resume.** `PtyManager` already
+keys sessions by name, so this is tabs in the UI plus a picker; the tmux part is
+wrapping real tmux rather than reimplementing persistence (§4f).
+
+**e. A browser panel in the playground.** SnareVec already exposes 16 CDP
+`browser_*` tools against the real browser, so the capability exists; what is
+missing is a surface that shows it and a way to feed a screenshot back in.
+
+**f. The `+` composer menu** — files, folder, MCP connectors, plugins, skills —
+as one attachment menu rather than the scattered buttons there now.
+
 ### 4g. Desktop app, not a web page
 
 Requested, and correct: the dashboard should be a real local desktop
