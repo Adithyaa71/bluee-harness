@@ -86,6 +86,11 @@ else here.
 Below the divider: **>_** opens the terminal, and the **◫** button (top right,
 next to *new chat*) shows or hides the right panel.
 
+**Both can float.** The **↗** button on the terminal bar or the right panel pops
+it out into a proper window — drag it by its header, resize from the edges,
+maximise, Escape to close. The terminal keeps running the whole time; popping it
+out does not restart your shell.
+
 **Right panel** — two tabs:
 
 - **LOG** — the raw event trace of the current session
@@ -205,6 +210,11 @@ the current session immediately, which is a second reason to use it.
 To ask memory something directly, use the **Memory** page. To see the shape of
 what it knows, use the **Graph** page.
 
+**The Graph page:** scroll to zoom, drag to move, double-click to fit it all
+back on screen, hover a dot to name it. Labels appear as you zoom in — at 1,013
+entities everything at once is unreadable, so detail arrives when you go
+looking for it.
+
 ---
 
 ## Sessions — your past conversations
@@ -248,6 +258,16 @@ right, let's do trading
 
 and it pulls up what it built last time plus what you discussed. Not a blank
 page — where you left off.
+
+**The FILES panel down the left is the folder itself.** Everything bluee has
+built, as it sits on disk. Filter it, click a file to open it — HTML runs live
+with a **Source** toggle, anything else shows as text. **open window** floats it
+in its own window you can drag and resize. The **x** on a row deletes it; click
+twice, because it removes the real file.
+
+bluee can do this too — ask it to list or clean up files in the playground and
+it will. That is bounded to the playground folder; nothing else on your machine
+is reachable through it.
 
 Artifacts are real files at `data/artifacts/<name>/index.html`. Open, edit or
 delete them yourself; bluee doesn't own them.

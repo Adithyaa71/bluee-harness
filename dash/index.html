@@ -333,6 +333,74 @@ body{background:var(--bg);color:var(--ink);overflow:hidden;
   color:var(--ink);border-radius:6px;padding:3px 8px;font-size:11.5px;font-family:var(--mono)}
 #termbar input{width:190px}
 #xt{flex:1;min-height:0;padding:6px 8px}
+
+/* ---------- floating panels ----------
+   Modelled on the detachable panels in the Claude Code GUI: a titled window
+   you can drag by its header, resize from any edge, maximise, or close. The
+   terminal and the log/tasks panel can each be popped out of the layout into
+   one of these, which is the point - a terminal pinned to a 300px strip at the
+   bottom is not a terminal you can work in. */
+.win{position:fixed;z-index:60;display:flex;flex-direction:column;
+  background:var(--panel);border:1px solid var(--line);border-radius:12px;
+  box-shadow:0 24px 70px rgba(0,0,0,.6), 0 2px 8px rgba(0,0,0,.4);
+  min-width:340px;min-height:200px;overflow:hidden;
+  animation:winIn .16s cubic-bezier(.2,.8,.3,1)}
+@keyframes winIn{from{opacity:0;transform:translateY(6px) scale(.985)}
+  to{opacity:1;transform:none}}
+.win.max{left:14px!important;top:14px!important;
+  width:calc(100vw - 28px)!important;height:calc(100vh - 28px)!important}
+.win-head{display:flex;align-items:center;gap:8px;height:38px;flex:none;
+  padding:0 6px 0 12px;background:var(--panel2);border-bottom:1px solid var(--line);
+  cursor:grab;user-select:none}
+.win-head.drag{cursor:grabbing}
+.win-title{font-size:12.5px;color:var(--ink);font-weight:500;letter-spacing:.01em}
+.win-sub{font-size:11px;color:var(--faint);font-family:var(--mono)}
+.win-head .sp{flex:1}
+.win-btn{width:26px;height:26px;border:0;background:transparent;color:var(--dim);
+  border-radius:6px;cursor:pointer;font-size:13px;line-height:1;display:grid;
+  place-items:center;transition:background .12s,color .12s}
+.win-btn:hover{background:var(--line);color:var(--ink)}
+.win-btn.close:hover{background:#3a1e22;color:var(--bad)}
+.win-body{flex:1;min-height:0;overflow:auto;position:relative}
+.win-body.pad{padding:10px 12px}
+.win-grip{position:absolute;z-index:2}
+.win-grip.e{right:0;top:0;width:6px;height:100%;cursor:ew-resize}
+.win-grip.s{left:0;bottom:0;height:6px;width:100%;cursor:ns-resize}
+.win-grip.se{right:0;bottom:0;width:14px;height:14px;cursor:nwse-resize}
+
+/* ---------- playground: files + preview ---------- */
+#pgwrap{flex:1;min-height:0;display:flex}
+#pgfiles{width:250px;flex:none;border-right:1px solid var(--line);
+  display:flex;flex-direction:column;background:var(--panel);min-height:0}
+#pgfiles.hide{display:none}
+.pgf-head{display:flex;align-items:center;gap:6px;padding:8px 10px;flex:none;
+  border-bottom:1px solid var(--line)}
+.pgf-head .t{font-size:11.5px;color:var(--faint);font-family:var(--mono);flex:1}
+#pgfilter{width:100%;background:var(--panel2);border:1px solid var(--line);
+  border-radius:7px;color:var(--ink);font-size:12px;padding:6px 9px;outline:none}
+#pgfilter:focus{border-color:var(--accent)}
+.pgf-wrap{padding:6px 8px;flex:none}
+#pgtree{flex:1;overflow:auto;padding:4px 6px 12px}
+.fnode{display:flex;align-items:center;gap:6px;padding:4px 7px;border-radius:6px;
+  font-size:12.5px;color:var(--dim);cursor:pointer;white-space:nowrap;
+  overflow:hidden;text-overflow:ellipsis}
+.fnode:hover{background:var(--panel2);color:var(--ink)}
+.fnode.on{background:var(--accent-dim);color:var(--accent)}
+.fnode .ic{width:13px;flex:none;text-align:center;color:var(--faint);font-size:11px}
+.fnode .nm{overflow:hidden;text-overflow:ellipsis}
+.fnode .sz{margin-left:auto;font-size:10px;color:var(--faint);font-family:var(--mono)}
+.fnode .del{opacity:0;margin-left:6px;color:var(--faint);font-size:12px;flex:none}
+.fnode:hover .del{opacity:1}
+.fnode .del:hover{color:var(--bad)}
+.fkids{margin-left:11px;border-left:1px solid var(--line);padding-left:4px}
+#pgmain{flex:1;min-width:0;display:flex;flex-direction:column}
+#pgview{flex:1;min-height:0;display:none;flex-direction:column}
+#pgview.on{display:flex}
+#pgcode{flex:1;min-height:0;overflow:auto;margin:0;padding:14px 16px;
+  font-family:var(--mono);font-size:12px;line-height:1.6;color:#c9d2de;
+  background:var(--bg);white-space:pre;tab-size:2}
+.ghint{color:var(--faint);font-size:11px;margin-left:10px}
+
 </style>
 </head>
 <body>
@@ -410,9 +478,34 @@ body{background:var(--bg);color:var(--ink);overflow:hidden;
         <span class="lbl">topic</span>
         <div id="topics" style="display:flex;gap:6px;flex-wrap:wrap"></div>
         <div class="spacer"></div>
+        <button class="ghost" id="pgtoggle" title="Show or hide the file tree">files</button>
         <button class="ghost" id="areload">refresh</button>
       </div>
+      <div id="pgwrap">
+        <div id="pgfiles">
+          <div class="pgf-head">
+            <span class="t">FILES</span>
+            <button class="win-btn" id="pgfnew" title="Open the folder on disk">&#8599;</button>
+            <button class="win-btn" id="pgfrel" title="Refresh">&#8635;</button>
+          </div>
+          <div class="pgf-wrap"><input id="pgfilter" placeholder="Filter files…"></div>
+          <div id="pgtree"></div>
+        </div>
+        <div id="pgmain">
       <div id="playbody"></div>
+      <div id="pgview">
+        <div id="abar">
+          <button class="ghost" id="pgback">&larr; all</button>
+          <span class="an" id="pgname"></span>
+          <span class="am" id="pgmeta"></span>
+          <div class="spacer"></div>
+          <button class="ghost" id="pgsrc">Source</button>
+          <button class="ghost" id="pgpop">open window</button>
+        </div>
+        <pre id="pgcode"></pre>
+        <iframe id="pgframe" style="display:none;flex:1;border:0;width:100%;background:#0f1116"
+                sandbox="allow-scripts allow-forms allow-popups"></iframe>
+      </div>
       <div id="aview">
         <div id="abar">
           <button class="ghost" id="aback">&larr; all</button>
@@ -422,6 +515,8 @@ body{background:var(--bg);color:var(--ink);overflow:hidden;
           <button class="ghost" id="aopen">open in browser</button>
         </div>
         <iframe id="aframe" sandbox="allow-scripts allow-forms allow-popups"></iframe>
+      </div>
+        </div>
       </div>
 
       <div id="pgask">
@@ -456,6 +551,8 @@ body{background:var(--bg);color:var(--ink);overflow:hidden;
     <div id="sidetabs">
       <button class="on" data-sp="log">LOG</button>
       <button data-sp="tasks">TASKS</button>
+      <div class="spacer"></div>
+      <button class="win-btn" id="sidepop" title="Open in a window">&#8599;</button>
     </div>
     <div class="sp on" id="sp-log"><div class="sidenote">No active session yet — send a message.</div></div>
     <div class="sp" id="sp-tasks"></div>
@@ -474,6 +571,7 @@ body{background:var(--bg);color:var(--ink);overflow:hidden;
       <span class="t" id="termstat"></span>
       <div class="spacer"></div>
       <button class="ghost" id="termnew">new session</button>
+      <button class="win-btn" id="termpop" title="Open in a window">&#8599;</button>
     </div>
     <div id="xt"></div>
   </div>
@@ -505,7 +603,7 @@ $$('.rb[data-page]').forEach(b=>b.onclick=()=>{
   $$('.view').forEach(x=>x.classList.remove('on'));
   b.classList.add('on'); $('#v-'+b.dataset.page).classList.add('on');
   if(b.dataset.page==='graph') requestAnimationFrame(drawGraph);
-  if(b.dataset.page==='play') loadPlayground();
+  if(b.dataset.page==='play'){ loadPlayground(); loadFiles(); }
   if(b.dataset.page==='set') loadSettings();
   if(b.dataset.page==='sess') loadSessions();
   if(b.dataset.page==='memory') $('#msearch').focus();
@@ -583,7 +681,7 @@ function chatSocket(){
     if(e.type==='done'){
       thinking(false);
       if(pgMirror){ pgMirror=false; $('#pgsend').disabled=false;
-                    pgLine('<span style="color:var(--faint)">done</span>'); loadPlayground(); }
+                    pgLine('<span style="color:var(--faint)">done</span>'); loadPlayground(); loadFiles(); }
       if(e.session){ currentSession=e.session; $('#tmeta').textContent=e.model+' · '+e.session;
                      showTitle(e.title); }
       if(!liveHtml && liveBody) liveBody.innerHTML='<p style="color:var(--faint)">(no reply)</p>';
@@ -1355,6 +1453,31 @@ function openArtifact(id){
   $('#aopen').onclick=()=>window.open(url,'_blank');
 }
 $('#aback').onclick=()=>{ $('#aview').classList.remove('on'); $('#playbody').style.display=''; };
+$('#pgback').onclick=()=>{ $('#pgview').classList.remove('on'); $('#playbody').style.display='';
+  filePick=null; renderTree(); };
+$('#pgfrel').onclick=loadFiles;
+$('#pgfnew').onclick=()=>window.open('/api/files','_blank');
+$('#pgtoggle').onclick=()=>{ $('#pgfiles').classList.toggle('hide');
+  $('#pgtoggle').classList.toggle('on'); };
+$('#pgfilter').addEventListener('input',renderTree);
+$('#pgsrc').onclick=()=>{
+  const b=$('#pgsrc');
+  if(b.dataset.mode==='render'){ b.dataset.mode='source'; b.textContent='Rendered';
+    showSource(filePick); }
+  else { b.dataset.mode='render'; b.textContent='Source'; showRendered(filePick); }
+};
+$('#pgpop').onclick=()=>{
+  if(!filePick) return;
+  const html=/\.html?$/i.test(filePick)
+    ? '<iframe style="width:100%;height:100%;border:0;background:#0f1116" '+
+      'sandbox="allow-scripts allow-forms allow-popups" src="'+artifactUrl(filePick)+'"></iframe>'
+    : '<pre style="margin:0;padding:14px 16px;font-family:var(--mono);font-size:12px;'+
+      'line-height:1.6;color:#c9d2de;white-space:pre">'+esc($('#pgcode').textContent)+'</pre>';
+  openWindow({ id:'file:'+filePick, title:filePick.split('/').pop(), subtitle:filePick,
+               html:html, w:900, h:600 });
+};
+$('#termpop').onclick=popTerminal;
+$('#sidepop').onclick=popSide;
 $('#areload').onclick=loadPlayground;
 
 /* ---------- playground composer ----------
@@ -1396,51 +1519,502 @@ $('#pginput').addEventListener('input',e=>{
   e.target.style.height=Math.min(e.target.scrollHeight,150)+'px';
 });
 
-/* ---------- GRAPH page ---------- */
-async function drawGraph(){
-  const d=await api('/api/graph').catch(()=>({nodes:[],edges:[]}));
-  const cv=$('#gcv'), ctx=cv.getContext('2d');
-  const W=cv.clientWidth||900, H=cv.clientHeight||500;
-  cv.width=W*devicePixelRatio; cv.height=H*devicePixelRatio;
-  ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);
-  ctx.clearRect(0,0,W,H);
-  if(!d.nodes?.length){
-    ctx.fillStyle='#5b6474'; ctx.font='13px sans-serif';
-    ctx.fillText('Graph is empty — run `harness reduce`.',24,34);
-    $('#glegend').textContent=''; return;
+/* ---------- GRAPH page: zoom, pan, and a layout that runs ONCE ----------
+   The old version re-ran a 340-step O(n^2) force layout on every draw. At 17
+   entities that was invisible; at 1013 it is ~350 million operations per frame
+   and the page simply stops. So layout is computed once per dataset and cached,
+   and drawing is a pure render of cached positions through a view transform -
+   which is also what makes pan and zoom feel instant. */
+let gData=null, gNodes=null, gEdges=null, gIndex=null;
+let gView={x:0,y:0,k:1}, gLaidOut=false, gHover=null;
+
+const gColor=k=>({server:'#e0b341',tool:'#5b9dff',person:'#f2695c',machine:'#c07ef0',
+  project:'#3fb950',preference:'#48c9b0',assistant:'#5b9dff',file:'#7d8896',
+  symbol:'#4f9d69',module:'#b98cf0',component:'#e0b341',artifact:'#48c9b0',
+  topic:'#f2695c'}[k]||'#8994a5');
+
+/* Repulsion through a uniform grid: only nodes in neighbouring cells push on
+   each other. Every pair would be a million comparisons per step here; this is
+   linear in practice and the picture is indistinguishable. */
+function gLayout(N,E,W,H){
+  const R=Math.max(W,H)*0.45, CELL=90;
+  N.forEach((n,i)=>{
+    const ang=i*2.399963, rad=R*Math.sqrt(i/Math.max(1,N.length));
+    n.x=W/2+Math.cos(ang)*rad; n.y=H/2+Math.sin(ang)*rad; n.vx=0; n.vy=0;
+  });
+  const steps=N.length>400?90:220;
+  for(let s=0;s<steps;s++){
+    const grid=new Map();
+    for(const n of N){
+      const key=((n.x/CELL)|0)+':'+((n.y/CELL)|0);
+      let cell=grid.get(key);
+      if(!cell){ cell=[]; grid.set(key,cell); }
+      cell.push(n);
+    }
+    for(const n of N){
+      const cx=(n.x/CELL)|0, cy=(n.y/CELL)|0;
+      for(let dx=-1;dx<=1;dx++) for(let dy=-1;dy<=1;dy++){
+        const cell=grid.get((cx+dx)+':'+(cy+dy));
+        if(!cell) continue;
+        for(const m of cell){
+          if(m===n) continue;
+          const ax=n.x-m.x, ay=n.y-m.y, d2=ax*ax+ay*ay||0.01;
+          if(d2>CELL*CELL*4) continue;
+          const di=Math.sqrt(d2), f=1800/d2;
+          n.vx+=ax/di*f; n.vy+=ay/di*f;
+        }
+      }
+      n.vx+=(W/2-n.x)*0.0012; n.vy+=(H/2-n.y)*0.0012;
+    }
+    for(const e of E){
+      const a=N[gIndex[e.source]], b=N[gIndex[e.target]];
+      const dx=b.x-a.x, dy=b.y-a.y, di=Math.hypot(dx,dy)||1, f=(di-70)*0.02;
+      a.vx+=dx/di*f; a.vy+=dy/di*f; b.vx-=dx/di*f; b.vy-=dy/di*f;
+    }
+    for(const n of N){ n.x+=n.vx*0.4; n.y+=n.vy*0.4; n.vx*=0.80; n.vy*=0.80; }
   }
-  const N=d.nodes.map((n,i)=>({...n,
-    x:W/2+Math.cos(i/d.nodes.length*6.283)*Math.min(W,H)*0.32,
-    y:H/2+Math.sin(i/d.nodes.length*6.283)*Math.min(W,H)*0.32,vx:0,vy:0}));
-  const ix=Object.fromEntries(N.map((n,i)=>[n.name,i]));
-  const E=(d.edges||[]).filter(e=>ix[e.source]!=null&&ix[e.target]!=null);
-  for(let s=0;s<340;s++){
-    for(let i=0;i<N.length;i++){ const a=N[i];
-      for(let j=i+1;j<N.length;j++){ const b=N[j];
-        let dx=a.x-b.x,dy=a.y-b.y,d2=dx*dx+dy*dy||.01,di=Math.sqrt(d2),f=4200/d2;
-        a.vx+=dx/di*f;a.vy+=dy/di*f;b.vx-=dx/di*f;b.vy-=dy/di*f; }
-      a.vx+=(W/2-a.x)*.0025; a.vy+=(H/2-a.y)*.0025; }
-    for(const e of E){ const a=N[ix[e.source]],b=N[ix[e.target]];
-      const dx=b.x-a.x,dy=b.y-a.y,di=Math.hypot(dx,dy)||1,f=(di-130)*.012;
-      a.vx+=dx/di*f;a.vy+=dy/di*f;b.vx-=dx/di*f;b.vy-=dy/di*f; }
-    for(const n of N){ n.x+=n.vx*.5; n.y+=n.vy*.5; n.vx*=.82; n.vy*=.82; }
-  }
-  ctx.strokeStyle='#262d3a'; ctx.lineWidth=1;
-  for(const e of E){ const a=N[ix[e.source]],b=N[ix[e.target]];
-    ctx.beginPath(); ctx.moveTo(a.x,a.y); ctx.lineTo(b.x,b.y); ctx.stroke();
-    ctx.fillStyle='#4a5262'; ctx.font='10px ui-monospace,monospace';
-    ctx.fillText(e.type+(e.weight>1?` ×${e.weight}`:''),(a.x+b.x)/2+3,(a.y+b.y)/2-3); }
-  const col=k=>({server:'#e0b341',tool:'#5b9dff',person:'#f2695c',machine:'#c07ef0',
-                 project:'#3fb950',preference:'#48c9b0',assistant:'#5b9dff'}[k]||'#8994a5');
-  for(const n of N){
-    ctx.beginPath(); ctx.arc(n.x,n.y,6,0,6.29); ctx.fillStyle=col(n.kind); ctx.fill();
-    ctx.fillStyle='#c3ccd9'; ctx.font='11.5px system-ui';
-    ctx.fillText(n.name.length>26?n.name.slice(0,25)+'…':n.name,n.x+10,n.y+4); }
-  const kinds=[...new Set(N.map(n=>n.kind))];
-  $('#glegend').innerHTML=`${N.length} entities · ${E.length} relations &nbsp;&nbsp;`+
-    kinds.map(k=>`<span style="color:${col(k)}">&#9679;</span> ${esc(k)}`).join('&nbsp; ');
 }
-addEventListener('resize',()=>{ if($('#v-graph').classList.contains('on')) drawGraph(); });
+
+function gFit(W,H){
+  if(!gNodes||!gNodes.length) return;
+  let x0=Infinity,x1=-Infinity,y0=Infinity,y1=-Infinity;
+  for(const n of gNodes){
+    if(n.x<x0)x0=n.x; if(n.x>x1)x1=n.x;
+    if(n.y<y0)y0=n.y; if(n.y>y1)y1=n.y;
+  }
+  gView.k=Math.min(W/(x1-x0+140), H/(y1-y0+140), 1.6);
+  gView.x=W/2-((x0+x1)/2)*gView.k;
+  gView.y=H/2-((y0+y1)/2)*gView.k;
+}
+
+function gRender(){
+  const cv=$('#gcv'); if(!cv) return;
+  const ctx=cv.getContext('2d');
+  const W=cv.clientWidth||900, H=cv.clientHeight||500;
+  if(cv.width!==Math.round(W*devicePixelRatio)||cv.height!==Math.round(H*devicePixelRatio)){
+    cv.width=Math.round(W*devicePixelRatio); cv.height=Math.round(H*devicePixelRatio);
+  }
+  ctx.setTransform(devicePixelRatio,0,0,devicePixelRatio,0,0);
+  ctx.fillStyle='#0d0f14';
+  ctx.fillRect(0,0,W,H);
+  if(!gNodes||!gNodes.length){
+    ctx.fillStyle='#5b6474'; ctx.font='13px system-ui';
+    ctx.fillText('Graph is empty - run reduce first.',24,34); return;
+  }
+  const ox=gView.x, oy=gView.y, k=gView.k;
+
+  ctx.lineWidth=Math.max(0.4,0.9*k);
+  ctx.strokeStyle='#252c38';
+  ctx.beginPath();
+  for(const e of gEdges){
+    const a=gNodes[gIndex[e.source]], b=gNodes[gIndex[e.target]];
+    const ax=a.x*k+ox, ay=a.y*k+oy, bx=b.x*k+ox, by=b.y*k+oy;
+    if((ax<-60&&bx<-60)||(ax>W+60&&bx>W+60)||(ay<-60&&by<-60)||(ay>H+60&&by>H+60)) continue;
+    ctx.moveTo(ax,ay); ctx.lineTo(bx,by);
+  }
+  ctx.stroke();
+
+  /* Edge labels only once zoomed in. At 1179 relations they are a grey smear
+     otherwise, and the point of zooming is to make detail appear. */
+  if(k>1.5){
+    ctx.fillStyle='#4a5262'; ctx.font='10px ui-monospace,monospace';
+    for(const e of gEdges){
+      const a=gNodes[gIndex[e.source]], b=gNodes[gIndex[e.target]];
+      const mx=(a.x+b.x)/2*k+ox, my=(a.y+b.y)/2*k+oy;
+      if(mx<0||mx>W||my<0||my>H) continue;
+      ctx.fillText(e.type+(e.weight>1?' x'+e.weight:''),mx+3,my-3);
+    }
+  }
+
+  const r=Math.max(2, 5*Math.min(k,1.6));
+  for(const n of gNodes){
+    const x=n.x*k+ox, y=n.y*k+oy;
+    if(x<-30||x>W+30||y<-30||y>H+30) continue;
+    ctx.beginPath(); ctx.arc(x,y,n===gHover?r+2.5:r,0,6.29);
+    ctx.fillStyle=gColor(n.kind); ctx.fill();
+  }
+  if(k>0.85){
+    ctx.font='11.5px system-ui'; ctx.fillStyle='#c3ccd9';
+    for(const n of gNodes){
+      const x=n.x*k+ox, y=n.y*k+oy;
+      if(x<-30||x>W+30||y<-30||y>H+30) continue;
+      const t=n.name.length>28?n.name.slice(0,27)+'…':n.name;
+      ctx.fillText(t,x+r+4,y+4);
+    }
+  }
+  if(gHover){
+    const x=gHover.x*k+ox, y=gHover.y*k+oy;
+    const label=gHover.name+'  ('+gHover.kind+')';
+    ctx.font='12px system-ui';
+    const w=ctx.measureText(label).width+16;
+    ctx.fillStyle='#141821'; ctx.strokeStyle='#2b3342'; ctx.lineWidth=1;
+    ctx.beginPath();
+    if(ctx.roundRect) ctx.roundRect(x+10,y-32,w,23,6); else ctx.rect(x+10,y-32,w,23);
+    ctx.fill(); ctx.stroke();
+    ctx.fillStyle='#e6ebf2'; ctx.fillText(label,x+18,y-16);
+  }
+}
+
+async function drawGraph(force){
+  const cv=$('#gcv'); if(!cv) return;
+  const W=cv.clientWidth||900, H=cv.clientHeight||500;
+  if(!gData||force){
+    $('#glegend').textContent='loading graph…';
+    gData=await api('/api/graph').catch(()=>({nodes:[],edges:[]}));
+    gLaidOut=false;
+  }
+  if(!gLaidOut){
+    gNodes=(gData.nodes||[]).map(n=>({...n}));
+    gIndex=Object.fromEntries(gNodes.map((n,i)=>[n.name,i]));
+    gEdges=(gData.edges||[]).filter(e=>gIndex[e.source]!=null&&gIndex[e.target]!=null);
+    if(gNodes.length){ gLayout(gNodes,gEdges,W,H); gFit(W,H); }
+    gLaidOut=true;
+    const kinds=[...new Set(gNodes.map(n=>n.kind))].sort();
+    $('#glegend').innerHTML=
+      '<b>'+gNodes.length+'</b> entities &middot; <b>'+gEdges.length+'</b> relations '+
+      '<span class="ghint">scroll to zoom &middot; drag to move &middot; double-click to fit</span><br>'+
+      kinds.map(x=>'<span style="color:'+gColor(x)+'">&#9679;</span> '+esc(x)).join('&nbsp; ');
+  }
+  gRender();
+}
+
+/* Pan and zoom. Zoom is anchored at the cursor, so whatever you are pointing at
+   stays under the pointer instead of sliding away. */
+(function graphControls(){
+  const cv=$('#gcv'); if(!cv) return;
+  let drag=null;
+  cv.addEventListener('wheel',e=>{
+    e.preventDefault();
+    const r=cv.getBoundingClientRect(), mx=e.clientX-r.left, my=e.clientY-r.top;
+    const k=Math.min(8,Math.max(0.05,gView.k*Math.exp(-e.deltaY*0.0016)));
+    gView.x=mx-(mx-gView.x)*(k/gView.k);
+    gView.y=my-(my-gView.y)*(k/gView.k);
+    gView.k=k; gRender();
+  },{passive:false});
+  cv.addEventListener('mousedown',e=>{
+    drag={x:e.clientX,y:e.clientY,ox:gView.x,oy:gView.y};
+    cv.style.cursor='grabbing';
+  });
+  addEventListener('mouseup',()=>{ if(drag){ drag=null; cv.style.cursor='grab'; } });
+  cv.addEventListener('mousemove',e=>{
+    if(drag){
+      gView.x=drag.ox+(e.clientX-drag.x);
+      gView.y=drag.oy+(e.clientY-drag.y);
+      gRender(); return;
+    }
+    if(!gNodes) return;
+    const r=cv.getBoundingClientRect(), mx=e.clientX-r.left, my=e.clientY-r.top;
+    let best=null, bd=196;
+    for(const n of gNodes){
+      const dx=(n.x*gView.k+gView.x)-mx, dy=(n.y*gView.k+gView.y)-my, d=dx*dx+dy*dy;
+      if(d<bd){ bd=d; best=n; }
+    }
+    if(best!==gHover){ gHover=best; cv.style.cursor=best?'pointer':'grab'; gRender(); }
+  });
+  cv.addEventListener('dblclick',()=>{ gFit(cv.clientWidth,cv.clientHeight); gRender(); });
+  cv.style.cursor='grab';
+})();
+
+addEventListener('resize',()=>{ if($('#v-graph').classList.contains('on')) gRender(); });
+
+/* ---------- floating windows ----------
+   One reusable window. `openWindow` moves an EXISTING element into it rather
+   than cloning markup, so the terminal keeps its live xterm instance and its
+   websocket - re-creating either would drop the shell session, which is the
+   one thing the shared terminal must never do. Closing puts it back. */
+const winOpen = {};
+
+function openWindow(opts){
+  const id = opts.id;
+  if (winOpen[id]) { winOpen[id].el.style.zIndex = ++winZ; return winOpen[id]; }
+
+  const host = document.createElement('div');
+  host.className = 'win';
+  host.style.zIndex = ++winZ;
+  const w = opts.w || 760, h = opts.h || 460;
+  host.style.width = w + 'px';
+  host.style.height = h + 'px';
+  host.style.left = Math.max(12, (innerWidth - w) / 2 + (Object.keys(winOpen).length * 26)) + 'px';
+  host.style.top  = Math.max(12, (innerHeight - h) / 2 - 30 + (Object.keys(winOpen).length * 26)) + 'px';
+
+  host.innerHTML =
+    '<div class="win-head">' +
+      '<span class="win-title"></span>' +
+      '<span class="win-sub"></span>' +
+      '<span class="sp"></span>' +
+      '<button class="win-btn max" title="Maximise">&#9974;</button>' +
+      '<button class="win-btn close" title="Close">&#10005;</button>' +
+    '</div>' +
+    '<div class="win-body"></div>' +
+    '<div class="win-grip e"></div><div class="win-grip s"></div><div class="win-grip se"></div>';
+
+  host.querySelector('.win-title').textContent = opts.title || '';
+  host.querySelector('.win-sub').textContent = opts.subtitle || '';
+  const body = host.querySelector('.win-body');
+  if (opts.pad) body.classList.add('pad');
+
+  // Move the live node in; remember where it came from so it can go back.
+  let moved = null, placeholder = null;
+  if (opts.adopt) {
+    moved = opts.adopt;
+    placeholder = document.createComment('win:' + id);
+    moved.parentNode.insertBefore(placeholder, moved);
+    body.appendChild(moved);
+  } else if (opts.html) {
+    body.innerHTML = opts.html;
+  }
+
+  document.body.appendChild(host);
+
+  const rec = { el: host, body, close };
+  winOpen[id] = rec;
+
+  function close(){
+    if (moved && placeholder) {
+      placeholder.parentNode.insertBefore(moved, placeholder);
+      placeholder.remove();
+    }
+    host.remove();
+    delete winOpen[id];
+    if (opts.onClose) opts.onClose();
+  }
+
+  host.querySelector('.close').onclick = close;
+  host.querySelector('.max').onclick = () => {
+    host.classList.toggle('max');
+    if (opts.onResize) setTimeout(opts.onResize, 60);
+  };
+  host.addEventListener('mousedown', () => { host.style.zIndex = ++winZ; }, true);
+
+  // Drag by the header.
+  const head = host.querySelector('.win-head');
+  head.addEventListener('mousedown', e => {
+    if (e.target.closest('.win-btn')) return;
+    if (host.classList.contains('max')) return;
+    const r = host.getBoundingClientRect();
+    const ox = e.clientX - r.left, oy = e.clientY - r.top;
+    head.classList.add('drag');
+    const move = ev => {
+      host.style.left = Math.min(innerWidth - 80, Math.max(-r.width + 90, ev.clientX - ox)) + 'px';
+      host.style.top  = Math.min(innerHeight - 40, Math.max(0, ev.clientY - oy)) + 'px';
+    };
+    const up = () => {
+      head.classList.remove('drag');
+      removeEventListener('mousemove', move); removeEventListener('mouseup', up);
+      if (opts.onResize) opts.onResize();
+    };
+    addEventListener('mousemove', move); addEventListener('mouseup', up);
+  });
+
+  // Resize from the edges.
+  host.querySelectorAll('.win-grip').forEach(g => {
+    g.addEventListener('mousedown', e => {
+      e.preventDefault(); e.stopPropagation();
+      const r = host.getBoundingClientRect();
+      const sx = e.clientX, sy = e.clientY, sw = r.width, sh = r.height;
+      const ew = g.classList.contains('e') || g.classList.contains('se');
+      const es = g.classList.contains('s') || g.classList.contains('se');
+      const move = ev => {
+        if (ew) host.style.width  = Math.max(340, sw + ev.clientX - sx) + 'px';
+        if (es) host.style.height = Math.max(200, sh + ev.clientY - sy) + 'px';
+        if (opts.onResize) opts.onResize();
+      };
+      const up = () => {
+        removeEventListener('mousemove', move); removeEventListener('mouseup', up);
+        if (opts.onResize) opts.onResize();
+      };
+      addEventListener('mousemove', move); addEventListener('mouseup', up);
+    });
+  });
+
+  if (opts.onOpen) setTimeout(opts.onOpen, 40);
+  return rec;
+}
+let winZ = 60;
+
+addEventListener('keydown', e => {
+  if (e.key === 'Escape') {
+    const ids = Object.keys(winOpen);
+    if (ids.length) winOpen[ids[ids.length - 1]].close();
+  }
+});
+
+/* Pop the terminal out of the bottom strip into a real window. The xterm
+   instance moves with it, so the shell session is untouched. */
+function popTerminal(){
+  const strip = $('#term');
+  if (winOpen.term) { winOpen.term.close(); return; }
+  app.classList.add('no-term');
+  app.style.setProperty('--term', '0px');
+  openWindow({
+    id: 'term', title: 'Terminal', subtitle: shellValue(),
+    adopt: strip, w: 860, h: 480,
+    onOpen: () => { openTerm(); try { fit.fit(); } catch (_) {} },
+    onResize: () => { try { fit.fit(); } catch (_) {} },
+    onClose: () => { strip.style.display = ''; }
+  });
+}
+
+/* Same for the log / tasks panel. */
+function popSide(){
+  const panel = $('#side');
+  if (winOpen.side) { winOpen.side.close(); return; }
+  app.classList.add('no-side');
+  app.style.setProperty('--side', '0px');
+  const which = $('#sidetabs button.on');
+  openWindow({
+    id: 'side', title: which ? which.textContent : 'Log',
+    subtitle: 'current session', adopt: panel, w: 720, h: 520,
+    onOpen: () => { loadLog(); loadTasks(); }
+  });
+}
+
+/* ---------- playground: the folder, as a folder ----------
+   Artifacts were always plain files on disk (data/artifacts/<id>/…). This just
+   stops hiding that: a real tree of what has been built, a preview for text,
+   the live page for HTML, and delete. Scoped to the playground folder on the
+   server side - nothing else on the machine is reachable through it. */
+let fileTree = [], filePick = null, fileOpen = {};
+
+function fmtSize(n){
+  if (!n) return '';
+  if (n < 1024) return n + ' B';
+  if (n < 1024 * 1024) return (n / 1024).toFixed(n < 10240 ? 1 : 0) + ' KB';
+  return (n / 1048576).toFixed(1) + ' MB';
+}
+
+function fileIcon(name, dir){
+  if (dir) return '&#9656;';
+  if (/\.html?$/i.test(name)) return '&#9671;';
+  if (/\.(json|toml|ya?ml)$/i.test(name)) return '&#9670;';
+  if (/\.(png|jpe?g|gif|svg|webp)$/i.test(name)) return '&#9673;';
+  return '&#9642;';
+}
+
+async function loadFiles(){
+  const d = await api('/api/files').catch(() => ({ files: [] }));
+  fileTree = d.files || [];
+  renderTree();
+}
+
+function renderTree(){
+  const q = ($('#pgfilter').value || '').toLowerCase();
+
+  const match = n => {
+    if (!q) return true;
+    if (n.name.toLowerCase().includes(q)) return true;
+    return (n.children || []).some(match);
+  };
+
+  const row = (n, depth) => {
+    if (!match(n)) return '';
+    const open = fileOpen[n.path] !== false;      // folders start expanded
+    const sel = filePick === n.path ? ' on' : '';
+    let html =
+      '<div class="fnode' + sel + '" data-p="' + esc(n.path) + '" data-d="' + (n.dir ? 1 : 0) + '">' +
+        '<span class="ic">' + (n.dir ? (open ? '&#9662;' : '&#9656;') : fileIcon(n.name, false)) + '</span>' +
+        '<span class="nm">' + esc(n.name) + '</span>' +
+        (n.dir ? '' : '<span class="sz">' + fmtSize(n.size) + '</span>') +
+        '<span class="del" title="Delete">&#10005;</span>' +
+      '</div>';
+    if (n.dir && open && n.children.length)
+      html += '<div class="fkids">' + n.children.map(c => row(c, depth + 1)).join('') + '</div>';
+    return html;
+  };
+
+  const el = $('#pgtree');
+  if (!fileTree.length) {
+    el.innerHTML = '<div class="sidenote">Nothing built yet. Ask bluee to make something ' +
+                   'and the files appear here.</div>';
+    return;
+  }
+  el.innerHTML = fileTree.map(n => row(n, 0)).join('');
+
+  el.querySelectorAll('.fnode').forEach(node => {
+    const path = node.dataset.p, isDir = node.dataset.d === '1';
+    node.querySelector('.del').onclick = ev => { ev.stopPropagation(); deleteFile(path, node, isDir); };
+    node.onclick = () => {
+      if (isDir) { fileOpen[path] = fileOpen[path] === false; renderTree(); }
+      else openFile(path);
+    };
+  });
+}
+
+async function openFile(path){
+  filePick = path;
+  renderTree();
+  $('#aview').classList.remove('on');
+  $('#playbody').style.display = 'none';
+  $('#pgview').classList.add('on');
+  $('#pgname').textContent = path;
+
+  // An HTML file is more useful rendered than read, so show it running - with
+  // a Source toggle for when you want the code instead.
+  const isHtml = /\.html?$/i.test(path);
+  $('#pgsrc').style.display = isHtml ? '' : 'none';
+  $('#pgsrc').textContent = 'Source';
+  $('#pgsrc').dataset.mode = 'render';
+
+  if (isHtml) return showRendered(path);
+  return showSource(path);
+}
+
+function artifactUrl(path){
+  // data/artifacts/<id>/<rest> is served at /artifacts/<id>/<rest>.
+  return '/artifacts/' + path.split('/').map(encodeURIComponent).join('/');
+}
+
+function showRendered(path){
+  $('#pgcode').style.display = 'none';
+  $('#pgframe').style.display = '';
+  $('#pgframe').src = artifactUrl(path);
+  $('#pgmeta').textContent = 'rendered';
+}
+
+async function showSource(path){
+  const d = await api('/api/file?path=' + encodeURIComponent(path)).catch(e => ({ error: String(e) }));
+  $('#pgframe').style.display = 'none';
+  $('#pgcode').style.display = '';
+  if (d.error) { $('#pgcode').textContent = d.error; $('#pgmeta').textContent = ''; return; }
+  if (d.binary) {
+    $('#pgcode').textContent = d.note || 'Binary file.';
+    $('#pgmeta').textContent = fmtSize(d.size);
+    return;
+  }
+  $('#pgcode').textContent = d.text;
+  $('#pgmeta').textContent = fmtSize(d.size) + ' · ' + d.text.split('\n').length + ' lines';
+}
+
+async function deleteFile(path, node, isDir){
+  const btn = node.querySelector('.del');
+  // Two clicks, like session delete: this removes real files from disk.
+  if (btn.dataset.armed !== '1') {
+    btn.dataset.armed = '1';
+    btn.style.opacity = '1';
+    btn.style.color = 'var(--bad)';
+    btn.textContent = isDir ? 'delete folder?' : 'delete?';
+    btn.style.fontSize = '10px';
+    setTimeout(() => {
+      if (btn.dataset.armed === '1') {
+        btn.dataset.armed = '0'; btn.textContent = '✕';
+        btn.style.color = ''; btn.style.opacity = ''; btn.style.fontSize = '';
+      }
+    }, 3500);
+    return;
+  }
+  const r = await api('/api/file/delete', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path })
+  }).catch(e => ({ error: String(e) }));
+  if (r.ok) {
+    if (filePick === path || (filePick || '').startsWith(path + '/')) {
+      filePick = null; $('#pgview').classList.remove('on'); $('#playbody').style.display = '';
+    }
+    loadFiles(); loadPlayground();
+  } else {
+    btn.textContent = 'failed'; btn.style.color = 'var(--bad)';
+  }
+}
 
 /* ---------- terminal ---------- */
 let term,fit,ws;

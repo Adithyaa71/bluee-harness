@@ -76,6 +76,8 @@ impl NativeTools {
                 | "delete_artifact"
                 | "delete_skill"
                 | "read_source"
+                | "list_files"
+                | "delete_file"
         )
     }
 
@@ -212,6 +214,24 @@ impl NativeTools {
                         "name": { "type": "string", "description": "Skill name or slug from list_skills." }
                     },
                     "required": ["name"]
+                }),
+            },
+            ToolDef {
+                name: "list_files".into(),
+                description: "List the files and folders in the playground folder - everything                     you have built, as it sits on disk."
+                    .into(),
+                parameters: serde_json::json!({ "type": "object", "properties": {} }),
+            },
+            ToolDef {
+                name: "delete_file".into(),
+                description: "Delete a file or folder in the playground folder, by the path                     list_files gave you. Deleting a folder removes what is inside it. Bounded to                     the playground folder - nothing else on the machine is reachable. Say what                     you are removing before you do it."
+                    .into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Path relative to the playground folder." }
+                    },
+                    "required": ["path"]
                 }),
             },
             ToolDef {
@@ -443,6 +463,24 @@ impl NativeTools {
                     "name": name,
                     "note": if existed { "Skill file removed." } else { "No skill by that name." },
                 }))
+            }
+
+            "list_files" => {
+                let root = self.artifacts.root().to_path_buf();
+                let nodes = crate::artifacts::tree(&root)?;
+                Ok(serde_json::json!({ "files": nodes }))
+            }
+
+            "delete_file" => {
+                let path = args.get("path").and_then(|v| v.as_str())
+                    .context("delete_file requires `path`")?;
+                let root = self.artifacts.root().to_path_buf();
+                match crate::artifacts::delete_path(&root, path) {
+                    Ok((folder, n)) => Ok(serde_json::json!({
+                        "deleted": path, "folder": folder, "files_removed": n,
+                    })),
+                    Err(e) => Ok(serde_json::json!({ "path": path, "error": e.to_string() })),
+                }
             }
 
             "read_source" => {

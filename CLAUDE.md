@@ -527,6 +527,47 @@ prerequisite for the self-editing the owner wants later; enabling writes is a
 separate decision with its own guardrails, and it should be made on purpose
 rather than arrive as a side effect of this.
 
+**15. Graph zoom/pan, floating windows, playground files — BUILT.**
+
+*The graph was not "huge", it was quadratic.* `drawGraph` re-ran a 340-step
+O(n squared) force layout **on every draw**. At 17 entities that was invisible;
+at 1,013 it is roughly 350 million operations per frame, so the page stopped.
+Zoom and pan on top of that would have changed nothing.
+
+- **Layout runs once per dataset and is cached**; drawing is now a pure render
+  of cached positions through a view transform, which is also what makes pan and
+  zoom feel instant.
+- Repulsion goes through a **uniform grid** so only neighbouring cells interact.
+  Every pair would be a million comparisons per step; this is linear in practice
+  and the picture is indistinguishable.
+- Initial placement is **phyllotaxis** rather than a ring, so 1,000 nodes start
+  spread out instead of stacked on one circle.
+- **Scroll zooms anchored at the cursor** (the thing under the pointer stays
+  under it), **drag pans**, **double-click fits**, hover names a node.
+- **Detail appears with zoom**: node labels above 0.85x, edge labels above 1.5x.
+  1,179 edge labels drawn at once is a grey smear, and revealing detail as you
+  go in is the whole point of zooming.
+
+*Floating windows.* One reusable window with drag, resize, maximise and Escape
+to close. The terminal and the Log/Tasks panel each pop out of the layout into
+one. **The window adopts the existing DOM node rather than cloning markup** —
+the terminal keeps its live xterm instance and its websocket, so popping it out
+does not drop the shell session, which is the one thing the shared terminal must
+never do. Closing puts the node back where it was.
+
+*Playground files.* Artifacts were always plain files
+(`data/artifacts/<id>/index.html`); this stops hiding that. A filterable tree,
+click to open, HTML rendered live with a Source toggle, text shown as source,
+pop-out into a window, and delete. Delete is **two-click armed** like session
+delete, because it removes real files.
+
+*Bounded by resolution, not by pattern.* `artifacts::resolve` canonicalises and
+checks containment, so `..`, absolute paths and symlink escapes are all refused
+the same way — and deleting the playground root itself is refused outright.
+Verified live: `../providers.json` and `..` both rejected. Two model-facing
+tools, `list_files` and `delete_file`, share exactly that path; verified end to
+end by having the model list the folder and delete a throwaway directory.
+
 ### 4g. Desktop app, not a web page
 
 Requested, and correct: the dashboard should be a real local desktop

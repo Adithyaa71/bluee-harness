@@ -233,3 +233,128 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 }
+
+// --- the playground folder as a browsable filesystem (§4f-c) -----------------
+
+#[derive(Debug, serde::Serialize)]
+pub struct FileNode {
+    pub name: String,
+    /// Path relative to the artifacts root, forward slashes.
+    pub path: String,
+    pub dir: bool,
+    pub size: u64,
+    pub children: Vec<FileNode>,
+}
+
+/// Resolve a path inside the artifacts root, refusing anything that escapes it.
+///
+/// Same rule as `codemap::read_source`: containment is checked by resolving,
+/// not by pattern-matching the string, because `..` is not the only way out.
+pub fn resolve(root: &Path, rel: &str) -> Result<PathBuf> {
+    let cleaned = rel.replace('\\', "/");
+    let cleaned = cleaned.trim_start_matches('/');
+    if cleaned.split('/').any(|p| p == "..") {
+        anyhow::bail!("path must stay inside the playground folder: {rel}");
+    }
+    let full = if cleaned.is_empty() {
+        root.to_path_buf()
+    } else {
+        root.join(cleaned)
+    };
+    let canon_root = root.canonicalize()?;
+    match full.canonicalize() {
+        Ok(f) if f.starts_with(&canon_root) => Ok(full),
+        Ok(_) => anyhow::bail!("that path resolves outside the playground folder: {rel}"),
+        Err(_) => anyhow::bail!("no such file: {rel}"),
+    }
+}
+
+/// The whole playground folder as a tree, directories first then files, each
+/// group sorted by name so the panel does not reshuffle between reads.
+pub fn tree(root: &Path) -> Result<Vec<FileNode>> {
+    fn walk(base: &Path, dir: &Path, depth: usize) -> Vec<FileNode> {
+        if depth > 6 {
+            return Vec::new(); // a symlink loop should not hang the panel
+        }
+        let mut dirs = Vec::new();
+        let mut files = Vec::new();
+        let Ok(entries) = std::fs::read_dir(dir) else {
+            return Vec::new();
+        };
+        for e in entries.flatten() {
+            let p = e.path();
+            let name = e.file_name().to_string_lossy().to_string();
+            let rel = p
+                .strip_prefix(base)
+                .map(|r| r.to_string_lossy().replace('\\', "/"))
+                .unwrap_or_default();
+            let is_dir = p.is_dir();
+            let node = FileNode {
+                name,
+                path: rel,
+                dir: is_dir,
+                size: if is_dir { 0 } else { e.metadata().map(|m| m.len()).unwrap_or(0) },
+                children: if is_dir { walk(base, &p, depth + 1) } else { Vec::new() },
+            };
+            if is_dir {
+                dirs.push(node)
+            } else {
+                files.push(node)
+            }
+        }
+        dirs.sort_by(|a, b| a.name.cmp(&b.name));
+        files.sort_by(|a, b| a.name.cmp(&b.name));
+        dirs.extend(files);
+        dirs
+    }
+    Ok(walk(root, root, 0))
+}
+
+/// Delete a file, or a directory and everything under it.
+///
+/// Bounded to the playground folder on purpose. These are files the model
+/// wrote and the owner can also delete by hand - unlike the event log, which
+/// no tool is allowed to touch.
+pub fn delete_path(root: &Path, rel: &str) -> Result<(bool, u64)> {
+    let full = resolve(root, rel)?;
+    if full == root.canonicalize()? || rel.trim().is_empty() {
+        anyhow::bail!("refusing to delete the playground folder itself");
+    }
+    if full.is_dir() {
+        let n = tree(&full).map(|t| count(&t)).unwrap_or(0);
+        std::fs::remove_dir_all(&full)?;
+        Ok((true, n))
+    } else {
+        std::fs::remove_file(&full)?;
+        Ok((false, 1))
+    }
+}
+
+fn count(nodes: &[FileNode]) -> u64 {
+    nodes
+        .iter()
+        .map(|n| if n.dir { count(&n.children) } else { 1 })
+        .sum()
+}
+
+#[cfg(test)]
+mod file_tests {
+    use super::*;
+
+    #[test]
+    fn refuses_to_escape_the_playground_folder() {
+        let dir = std::env::temp_dir().join(format!("pg-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(dir.join("a")).unwrap();
+        std::fs::write(dir.join("a/one.txt"), "hi").unwrap();
+
+        assert!(resolve(&dir, "a/one.txt").is_ok());
+        assert!(resolve(&dir, "../escape.txt").is_err());
+        assert!(resolve(&dir, "a/../../escape.txt").is_err());
+        assert!(delete_path(&dir, "").is_err(), "must not delete the root");
+
+        let (was_dir, n) = delete_path(&dir, "a").unwrap();
+        assert!(was_dir && n == 1);
+        assert!(!dir.join("a").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+}

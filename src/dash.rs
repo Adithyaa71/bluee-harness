@@ -104,6 +104,9 @@ pub async fn serve_on(cfg: Config, std_listener: std::net::TcpListener) -> Resul
         .route("/api/session/title", post(set_session_title))
         .route("/api/models", get(models))
         .route("/api/artifacts", get(list_artifacts))
+        .route("/api/files", get(list_files))
+        .route("/api/file", get(read_file))
+        .route("/api/file/delete", post(delete_file))
         .route("/artifacts/{id}/", get(artifact_root))
         .route("/artifacts/{id}/{*path}", get(artifact_file))
         .route("/api/chat", post(chat))
@@ -1046,6 +1049,57 @@ async fn current_session(State(s): State<Shared>) -> impl IntoResponse {
         // estimate, so it warns rather than enforces.
         "context_budget": guard.as_ref().map(|a| a.context_window()),
     }))
+}
+
+// ------------------------------------------- playground folder (§4f-c)
+
+#[derive(Deserialize)]
+struct FileRef {
+    #[serde(default)]
+    path: String,
+}
+
+fn playground_root(s: &Shared) -> Result<std::path::PathBuf, (StatusCode, Json<Value>)> {
+    Ok(ArtifactStore::open(&s.cfg.data_dir)
+        .map_err(fail)?
+        .root()
+        .to_path_buf())
+}
+
+async fn list_files(State(s): State<Shared>) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let root = playground_root(&s)?;
+    let nodes = crate::artifacts::tree(&root).map_err(fail)?;
+    Ok(Json(json!({ "root": root.display().to_string(), "files": nodes })))
+}
+
+/// Read one file for the preview pane. Binary files are reported as such
+/// rather than dumped as mojibake.
+async fn read_file(
+    State(s): State<Shared>,
+    Query(q): Query<FileRef>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let root = playground_root(&s)?;
+    let full = crate::artifacts::resolve(&root, &q.path).map_err(fail)?;
+    let bytes = std::fs::read(&full).map_err(fail)?;
+    let size = bytes.len();
+    match String::from_utf8(bytes) {
+        Ok(text) => Ok(Json(json!({
+            "path": q.path, "size": size, "text": text, "binary": false,
+        }))),
+        Err(_) => Ok(Json(json!({
+            "path": q.path, "size": size, "binary": true,
+            "note": "Not text - preview it in the browser instead.",
+        }))),
+    }
+}
+
+async fn delete_file(
+    State(s): State<Shared>,
+    Json(b): Json<FileRef>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let root = playground_root(&s)?;
+    let (was_dir, n) = crate::artifacts::delete_path(&root, &b.path).map_err(fail)?;
+    Ok(Json(json!({ "ok": true, "path": b.path, "folder": was_dir, "files_removed": n })))
 }
 
 #[derive(Deserialize)]
