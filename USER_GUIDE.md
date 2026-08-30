@@ -194,6 +194,26 @@ conversations - 119 files, every function and struct it declares. So you can ask
 and tell you. It can read any file in the project except secrets (`.env`),
 `data/`, and build output.
 
+**For a big codebase, there's a second layer: Neovim's language servers.**
+`codemap` tells you *where something lives*; an LSP tells you *what calls it*.
+Grep finds the word `run` in forty files — a language server finds the seven
+that call **this** `run`. Ask "what breaks if I change this function" and bluee
+uses `find_references`.
+
+Neovim is installed. Each language needs its own server, and bluee checks by
+actually running them rather than just looking on PATH:
+
+```
+rustup component add rust-analyzer
+```
+
+Right now that one is a rustup *stub* — present but broken — and `lsp_status`
+says so instead of pretending. Run that command when your network is back.
+
+These calls are slow (a language server has to start and index), so bluee
+reaches for memory and `read_source` first and uses the LSP when it genuinely
+needs resolution.
+
 **It cannot edit itself.** Reading is on; writing is not. That's the
 prerequisite for the self-editing you want later, not the thing itself - turning
 on writes is its own decision with its own guardrails.

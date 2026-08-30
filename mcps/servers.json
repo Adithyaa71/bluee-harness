@@ -48,16 +48,18 @@
         "mcps/nvim-lsp/server.py"
       ],
       "env": {},
-      "enabled": false,
+      "enabled": true,
       "$comment": [
-        "Code intelligence through a headless Neovim and its language servers.",
-        "DISABLED until its two prerequisites exist, because a server that cannot",
-        "answer anything is 4 more tool schemas on every prompt for nothing:",
-        "  1. winget install Neovim.Neovim",
-        "  2. .venv/Scripts/pip install pynvim",
-        "Then set enabled to true and restart. codemap.rs answers 'where does X",
-        "live'; this answers 'what calls X', which needs real resolution rather",
-        "than text matching."
+        "Code intelligence through Neovim's language servers (Neovim 0.12.5,",
+        "installed via winget). No Python dependencies: it shells out to",
+        "`nvim --headless -l` and parses JSON, the same stdlib-only trade the",
+        "SnareVec proxy makes.",
+        "codemap.rs answers 'where does X live'; this answers 'what calls X',",
+        "which needs real resolution rather than text matching.",
+        "It needs a language server per language, and registers only the ones",
+        "actually on PATH. rust-analyzer is a rustup SHIM here with no component",
+        "behind it - run `rustup component add rust-analyzer` once the network is",
+        "up. lsp_status lists what is present and how to add the rest."
       ]
     }
   },
