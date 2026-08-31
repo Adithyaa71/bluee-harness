@@ -14,6 +14,10 @@
 -- through a shell, into Vimscript, into Lua, is three escaping layers and every
 -- one of them is a bug waiting to happen; two temp files are not.
 local here = debug.getinfo(1, 'S').source:sub(2):gsub('[^/\\]+$', '')
+-- His config brings the plugins; this brings the language servers, because
+-- on this machine his mason/lspconfig setup attached none - the buffer came
+-- back with zero clients and every LSP-backed tool returned an empty list.
+dofile(here .. 'servers.lua')
 local run = dofile(here .. 'query.lua')
 
 function _G.bluee_query_file(inpath, outpath)

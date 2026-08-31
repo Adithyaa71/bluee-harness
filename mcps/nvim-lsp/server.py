@@ -128,13 +128,20 @@ def _ensure(exe: str) -> str | None:
     cfg = _config_dir()
     env = dict(os.environ)
 
-    # Prefer Adithya's own config when it is installed: his nyx-nvim brings the
-    # plugins (treesitter, telescope) that his tool layer needs, and without
-    # them those tools return empty. The harness then adds only its query hook
-    # on top. Falls back to the minimal config beside this file, which needs no
-    # plugins at all.
+    # The minimal config by default, and this is a measured choice rather than
+    # a preference.
+    #
+    # Running Adithya's full nyx-nvim config here does give his tool layer its
+    # plugins - but his lspconfig registration wins over the harness's, so the
+    # `experimental/serverStatus` handler never attaches and nothing can tell
+    # when rust-analyzer has finished indexing. Measured: with his config
+    # loaded, `find_references` on a symbol with six known call sites returned
+    # zero. Losing a working answer to gain a few plugin-dependent tools is a
+    # bad trade, so his config is opt-in.
+    #
+    # Set NVIM_LSP_USE_NYX=1 to use it anyway.
     nyx = Path(env.get("LOCALAPPDATA", "")) / "nyx"
-    if (nyx / "init.lua").exists():
+    if env.get("NVIM_LSP_USE_NYX") == "1" and (nyx / "init.lua").exists():
         env["NVIM_APPNAME"] = "nyx"
         argv = [exe, "--headless", "--listen", PIPE,
                 "-c", "luafile " + (cfg / "attach.lua").as_posix()]
