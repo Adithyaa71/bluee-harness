@@ -125,9 +125,25 @@ def _ensure(exe: str) -> str | None:
     if _alive(exe):
         return None
     SCRATCH.mkdir(parents=True, exist_ok=True)
-    init = (_config_dir() / "init.lua").as_posix()
+    cfg = _config_dir()
+    env = dict(os.environ)
+
+    # Prefer Adithya's own config when it is installed: his nyx-nvim brings the
+    # plugins (treesitter, telescope) that his tool layer needs, and without
+    # them those tools return empty. The harness then adds only its query hook
+    # on top. Falls back to the minimal config beside this file, which needs no
+    # plugins at all.
+    nyx = Path(env.get("LOCALAPPDATA", "")) / "nyx"
+    if (nyx / "init.lua").exists():
+        env["NVIM_APPNAME"] = "nyx"
+        argv = [exe, "--headless", "--listen", PIPE,
+                "-c", "luafile " + (cfg / "attach.lua").as_posix()]
+    else:
+        argv = [exe, "--headless", "-u", (cfg / "init.lua").as_posix(), "--listen", PIPE]
+
     subprocess.Popen(
-        [exe, "--headless", "-u", init, "--listen", PIPE],
+        argv,
+        env=env,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,

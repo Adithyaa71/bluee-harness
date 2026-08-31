@@ -1326,6 +1326,32 @@ what it costs.
 - **`.env` and `data/` are gitignored and must stay so** - they hold the API
   key and `providers.json`.
 
+### 12h-b. nyx-nvim — corrected finding
+
+An earlier note said Adithya's `nyx-nvim` has no MCP server. That is right, and
+worth stating precisely because he believed it had 19 tools: at HEAD (one
+commit, `2667cf0`) there is **no tool registration in any language** - no
+`list_tools`, `call_tool`, `@server`, `mcp.server` or `setRequestHandler`. Its
+`tools/TOOLS.md` is OpenClaw's tool reference (read / write / exec / browser /
+tavily / sessions_spawn), not a Neovim tool list, and INSTALL.md delegates the
+protocol to the npm `mcp-neovim-server`. What the repo *does* have is a real
+25-function tool layer over pynvim.
+
+`mcps/nyx-tools/server.py` is the entrypoint it lacks - 20 of his functions
+exposed over MCP, sharing the Neovim `nvim-lsp` keeps warm. Two collisions had
+to be handled at import rather than by patching a clone he will pull: his
+`get_socket()` guards `NVIM_SOCKET_PATH` with `os.path.exists()`, false for a
+Windows named pipe; and his package is called `mcp`, same as the SDK, so the
+name is swapped during import and restored after.
+
+**Registered disabled.** Roughly a third of his tools hit Neovim API changes,
+and every schema is prompt tokens on every turn. `mcps/patches/nyx-nvim-windows.md`
+has the detail; the short version is that `_treesitter.py` needs
+`nvim-treesitter.ts_utils` (removed in v1.0) and `_lsp.py` calls
+`make_position_params()` with no arguments (deprecated in Neovim 0.11), so those
+requests fail inside his `pcall` and return `{}` - silently, which is why they
+look like "no results" rather than an error. Both are fixes to his repo.
+
 ### 12h. Open requests, in the order they were raised
 
 1. **Artifact panels that can be moved and resized inside the artifact.** The
