@@ -224,8 +224,24 @@ log('\n=== GRANTED FOLDERS ===');
 log('picker      :', await evaluate(
   "return [...document.querySelectorAll('#pgroot option')].map(o=>o.value).join(', ')"));
 
-const grantPath = process.env.GRANT_PATH || (process.cwd() + '\\persona');
-log('granting    :', grantPath);
+// A disposable folder, created here and revoked at the end.
+//
+// This used to default to `<cwd>\persona` - a real project folder holding
+// SOUL.md, which §5c calls the highest-value target in the system - and it
+// never revoked it. So every run of this check permanently granted the model
+// read/write/delete access to the persona files, as a side effect of testing
+// the file tree. A check should not change what the assistant is allowed to
+// touch. GRANT_PATH still overrides, for pointing it at a real project.
+const grantPath = process.env.GRANT_PATH || (() => {
+  const d = path.join(os.tmpdir(), 'bluee-uicheck-grant');
+  fs.mkdirSync(path.join(d, 'nested'), { recursive: true });
+  fs.writeFileSync(path.join(d, 'README.md'), '# sample\n\nA throwaway file for the UI check.\n');
+  fs.writeFileSync(path.join(d, 'sample.json'), '{ "hello": "world" }\n');
+  fs.writeFileSync(path.join(d, 'nested', 'inner.txt'), 'nested file\n');
+  return d;
+})();
+const grantIsTemp = !process.env.GRANT_PATH;
+log('granting    :', grantPath + (grantIsTemp ? '  (temp, revoked at the end)' : ''));
 log('grant       :', await evaluate(`
   document.querySelector('#pgroadd').click();
   const inp = document.querySelector('#pgrootpath');
@@ -677,6 +693,24 @@ log('use all     :', await evaluate(`
   return 'back to ' + JSON.stringify(pg.servers) + ' | ' +
     (document.querySelector('#addmenu .cost') || {}).textContent;
 `));
+
+// Safety net. The granted-folders section above already revokes through the UI;
+// this catches the case where that step fails or is skipped, because leaving the
+// grant behind would mean the check quietly widens what bluee may touch every
+// time it runs. "already gone" here is the expected result, not a problem.
+if (grantIsTemp) {
+  log('revoke grant:', await evaluate(`
+    const before = await fetch('/api/roots').then(r => r.json());
+    const mine = before.roots.find(r => r.path && r.path.includes('bluee-uicheck-grant'));
+    if (!mine) return 'already gone (revoked by the UI flow above)';
+    const res = await fetch('/api/roots/remove', { method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body: JSON.stringify({ id: mine.id }) }).then(r=>r.json()).catch(e=>({error:String(e)}));
+    const after = await fetch('/api/roots').then(r => r.json());
+    return (res.error || 'revoked ' + mine.id) +
+      ' | roots now: ' + after.roots.map(x=>x.id).join(', ');
+  `));
+}
 
 log('\nconsole errors :', consoleErrors.length ? consoleErrors.join(' | ') : 'none');
 

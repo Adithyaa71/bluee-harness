@@ -11,8 +11,12 @@ rem  persona/, skills/ and data/ relative to the project root.
 rem ---------------------------------------------------------------------------
 cd /d "%~dp0"
 
+rem  Checks the short build path from .cargo\config.toml first, then cargo's
+rem  own default - so this works whether or not you set target-dir.
 set "EXE=D:\tgt\harness\release\harness.exe"
 if not exist "%EXE%" set "EXE=D:\tgt\harness\debug\harness.exe"
+if not exist "%EXE%" set "EXE=%~dp0target\release\harness.exe"
+if not exist "%EXE%" set "EXE=%~dp0target\debug\harness.exe"
 
 if not exist "%EXE%" (
   echo.
@@ -20,7 +24,7 @@ if not exist "%EXE%" (
   echo.
   echo       cargo build --release
   echo.
-  echo   ^(build output goes to D:\tgt\harness - see .cargo\config.toml^)
+  echo   ^(if you set target-dir in .cargo\config.toml, output goes there^)
   echo.
   pause
   exit /b 1

@@ -46,6 +46,11 @@ struct AppState {
     /// Where we are actually listening, so a pop-out window can be pointed
     /// back at this same server.
     port: u16,
+    /// A browser the harness starts and drives itself (§ src/browser.rs).
+    /// Replaces the SnareVec MCP path, which depended on a daemon that idles
+    /// out and on a config flag only Adithya may set - so in practice the
+    /// panel never worked.
+    browser: crate::browser::Browser,
 }
 
 type Shared = Arc<AppState>;
@@ -93,6 +98,7 @@ pub async fn serve_on(cfg: Config, std_listener: std::net::TcpListener) -> Resul
         vision: Arc::new(VisionState::load(&cfg_vision_dir)),
         workspace: Mutex::new("playground".into()),
         port,
+        browser: crate::browser::Browser::new(&cfg_vision_dir),
     });
 
     let app = Router::new()
@@ -1252,35 +1258,27 @@ async fn rename_root(
 
 // ------------------------------------------------- the real browser (§4f-c)
 
-/// Status plus the open tabs, in one call.
+/// What the browser panel needs to know before it draws anything.
 ///
-/// A thin proxy over SnareVec's CDP tools rather than a second browser: this
-/// drives the browser Adithya is actually using, with his session and his
-/// cookies, which is the whole point - a headless one would be logged out of
-/// everything and show him nothing he recognises.
+/// This used to proxy SnareVec's `browser_*` MCP tools. That drove the browser
+/// Adithya was already using - genuinely nicer, because it carried his session
+/// and cookies - but it needed the SnareVec daemon up AND `"browser":
+/// {"enabled": true}` set by hand in `~/.snarevec/config.json`, a gate §12e
+/// records as deliberately human-only. Three ways to be broken, and the panel
+/// was broken all of them in practice.
+///
+/// The harness now owns the whole path: it finds Chrome or Edge, starts it,
+/// and speaks CDP. Nothing to enable, nothing to keep running.
+///
+/// The cost, stated plainly: this is a SEPARATE profile, so it is logged out of
+/// everything. Its cookies persist in `data/browser` between runs, so signing
+/// in once sticks, but it is not the browser you have open right now.
 async fn browser_state(State(s): State<Shared>) -> impl IntoResponse {
-    let status = s
-        .registry
-        .call("snarevec", "browser_status", json!({}))
-        .await
-        .unwrap_or_else(|e| json!({ "error": e.to_string() }));
-
-    let reachable = !status.get("error").is_some()
-        && status.to_string().to_lowercase().contains("running");
-
-    let tabs = if reachable {
-        s.registry
-            .call("snarevec", "browser_list_tabs", json!({}))
-            .await
-            .unwrap_or_else(|e| json!({ "error": e.to_string() }))
-    } else {
-        json!(null)
-    };
-
     Json(json!({
-        "status": status,
-        "tabs": tabs,
-        "note": "SnareVec drives your own browser. If this says not running, start the                  SnareVec workbench - the daemon idles out, which is normal, not a fault."
+        "status": s.browser.status().await,
+        "available": s.browser.available().map(|p| p.display().to_string()),
+        "running": s.browser.running(),
+        "note": "bluee drives this browser itself. It has its own profile, so it is                  signed out of everything until you sign it in - those logins are                  kept in data/browser."
     }))
 }
 
@@ -1288,39 +1286,49 @@ async fn browser_state(State(s): State<Shared>) -> impl IntoResponse {
 struct BrowserAct {
     action: String,
     #[serde(default)]
-    tab: Option<String>,
-    #[serde(default)]
     url: Option<String>,
+    #[serde(default)]
+    x: Option<f64>,
+    #[serde(default)]
+    y: Option<f64>,
+    #[serde(default)]
+    dy: Option<f64>,
+    #[serde(default)]
+    text: Option<String>,
+    #[serde(default)]
+    key: Option<String>,
 }
 
 async fn browser_act(
     State(s): State<Shared>,
     Json(b): Json<BrowserAct>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let (tool, args) = match b.action.as_str() {
-        "screenshot" => (
-            "browser_screenshot",
-            match &b.tab {
-                Some(t) => json!({ "tab_id": t }),
-                None => json!({}),
-            },
-        ),
-        "navigate" => (
-            "browser_navigate",
-            json!({ "url": b.url.clone().unwrap_or_default() }),
-        ),
-        "tabs" => ("browser_list_tabs", json!({})),
-        "info" => (
-            "browser_get_page_info",
-            match &b.tab {
-                Some(t) => json!({ "tab_id": t }),
-                None => json!({}),
-            },
-        ),
+    let b_ = &s.browser;
+    let out = match b.action.as_str() {
+        "start" => {
+            // `shot` starts the browser as a side effect of needing a page.
+            b_.shot().await.map(|_| json!({ "ok": true }))
+        }
+        "stop" => {
+            b_.stop();
+            Ok(json!({ "ok": true }))
+        }
+        "screenshot" => b_.shot().await,
+        "navigate" => b_.navigate(b.url.as_deref().unwrap_or("about:blank")).await,
+        "click" => b_.click(b.x.unwrap_or(0.0), b.y.unwrap_or(0.0)).await,
+        "scroll" => {
+            b_.scroll(b.x.unwrap_or(0.0), b.y.unwrap_or(0.0), b.dy.unwrap_or(0.0))
+                .await
+        }
+        "type" => b_.type_text(b.text.as_deref().unwrap_or("")).await,
+        "key" => b_.key(b.key.as_deref().unwrap_or("Enter")).await,
+        "back" => b_.history(-1).await,
+        "forward" => b_.history(1).await,
+        "reload" => b_.reload().await,
+        "text" => b_.text().await,
         other => return Err(fail(anyhow::anyhow!("unknown browser action: {other}"))),
     };
-    let out = s.registry.call("snarevec", tool, args).await.map_err(fail)?;
-    Ok(Json(out))
+    Ok(Json(out.map_err(fail)?))
 }
 
 async fn list_roots(State(s): State<Shared>) -> impl IntoResponse {

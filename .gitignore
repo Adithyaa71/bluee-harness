@@ -32,3 +32,12 @@ dev/shots/
 
 # Cloned tool repos keep their own git history; not ours to vendor.
 tools/nyx-nvim/
+
+# Machine-specific config. Both are seeded from a committed .example file:
+# servers.json by the harness itself on first run, config.toml by hand if you
+# need it at all. They hold absolute paths that are true on one machine only.
+/mcps/servers.json
+/.cargo/config.toml
+
+# Stray screenshots from running dev/uicheck.mjs with the wrong cwd.
+dev/dev/

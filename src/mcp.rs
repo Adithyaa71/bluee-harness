@@ -81,6 +81,22 @@ pub fn save_server_specs(
 
 pub fn load_server_specs(path: impl AsRef<Path>) -> Result<BTreeMap<String, ServerSpec>> {
     let path = path.as_ref();
+    // servers.json is local machine config - it holds absolute paths to clones
+    // that live wherever you put them - so it is gitignored. On a fresh clone
+    // it is absent; seed it from the committed example rather than failing.
+    // Copied, not read in place, so the Settings -> MCP page has a file to write.
+    if !path.exists() {
+        let example = path.with_file_name("servers.example.json");
+        if example.exists() {
+            std::fs::copy(&example, path).with_context(|| {
+                format!("seeding {} from {}", path.display(), example.display())
+            })?;
+            eprintln!(
+                "note: created {} from servers.example.json - edit it to point at your own clones",
+                path.display()
+            );
+        }
+    }
     let text = std::fs::read_to_string(path)
         .with_context(|| format!("reading MCP server config {}", path.display()))?;
     let parsed: ServersFile = serde_json::from_str(&text)

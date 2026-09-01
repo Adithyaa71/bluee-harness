@@ -1,5 +1,6 @@
 mod agent;
 mod artifacts;
+mod browser;
 mod app;
 mod codemap;
 mod config;

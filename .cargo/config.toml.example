@@ -1,0 +1,13 @@
+# OPTIONAL, and machine-specific - which is why the real config.toml is
+# gitignored. Copy this file to .cargo/config.toml only if you need it.
+#
+# You need it when your checkout sits at a long path, or one containing spaces
+# or a tilde. cmake-based native dependencies blew past Windows' 260-char
+# MAX_PATH during this project's dependency testing on exactly such a path.
+# Keeping build artifacts at a short, space-free path avoids that entirely.
+#
+# Point target-dir anywhere short that exists on YOUR machine. If you have no
+# path problem, do not create this file at all - cargo's default ./target is
+# fine, and bluee.cmd already falls back to it.
+[build]
+target-dir = "C:/tgt/harness"

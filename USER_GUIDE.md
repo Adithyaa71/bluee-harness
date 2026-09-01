@@ -10,6 +10,10 @@ right and this is stale; tell me and I'll fix it.
 
 ## Starting it
 
+*Paths below are from the machine this was written on. If you cloned it,
+substitute your own checkout directory - see README.md for setup.*
+
+
 **Double-click `bluee` on your desktop.** That's it.
 
 If the shortcut ever goes missing, `bluee-app.vbs` in the project folder does
@@ -308,7 +312,21 @@ and it pulls up what it built last time plus what you discussed. Not a blank
 page — where you left off.
 
 **FILES / browser** — two buttons top right of the Playground. `files` shows
-the folder tree, `browser` looks at your real browser.
+the folder tree, `browser` opens a real web browser inside the panel.
+
+**The browser is bluee's own now.** It used to go through SnareVec, which meant
+it only worked if that daemon was running and you had switched browser actions
+on in its config — so in practice it never worked. bluee now starts Chrome (or
+Edge) itself. There is nothing to enable and nothing to keep running.
+
+Type a URL and press Enter, or type a phrase and it searches. Back, forward and
+reload are on the bar; the page icon reads the page as text, the picture icon
+goes back to the view. Click straight on the picture and the click lands on the
+real page. Drag the right edge to make the panel wider.
+
+One thing to know: **it is a separate browser profile, so it is signed out of
+everything.** Sign in once and it stays signed in — those cookies live in
+`data/browser`. It is not the browser you already have open.
 
 **"Filter files…" is just a search box for the tree.** Type `chart` and only
 rows matching `chart` stay visible — it hides the rest of the tree, nothing

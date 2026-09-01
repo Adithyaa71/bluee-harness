@@ -1,0 +1,111 @@
+{
+  "$comment": [
+    "MCP servers the harness launches as child processes and speaks stdio to.",
+    "This is the seam that makes the harness language-agnostic: these are all",
+    "Python, the harness is Rust, and neither cares.",
+    "",
+    "COPY OF RECORD. The harness copies this to mcps/servers.json on first run",
+    "if that file is absent, then never touches it again - servers.json is",
+    "gitignored because it holds absolute paths to clones that live wherever",
+    "you put them. Edit servers.json, not this file.",
+    "",
+    "Only the two servers that live inside this repo are enabled by default.",
+    "The other three need repos you have to clone yourself; each is left here,",
+    "disabled, with what it needs. A server that fails to start is reported and",
+    "skipped, so a wrong path costs you that server, never the assistant.",
+    "Paths are relative to the repo root unless absolute."
+  ],
+  "servers": {
+    "kuzu_graph": {
+      "command": ".venv/Scripts/python.exe",
+      "args": [
+        "mcps/kuzu-graph/server.py"
+      ],
+      "env": {},
+      "enabled": true,
+      "$comment": [
+        "Graph memory. Ships in this repo; owns its own kuzu database and needs",
+        "no external daemon. Needs the .venv described in the README (kuzu +",
+        "mcp v2). On Linux/macOS the command is .venv/bin/python."
+      ]
+    },
+    "nvim_lsp": {
+      "command": ".venv/Scripts/python.exe",
+      "args": [
+        "mcps/nvim-lsp/server.py"
+      ],
+      "env": {},
+      "enabled": true,
+      "$comment": [
+        "Code intelligence through Neovim's language servers. Ships in this repo.",
+        "No Python dependencies: it shells out to `nvim --headless -l` and parses",
+        "JSON. Needs Neovim 0.11+ on PATH (0.11 has a built-in LSP client, so no",
+        "lazy.nvim and no mason), plus a language server per language - it",
+        "registers only the ones actually present. `lsp_status` lists what it",
+        "found and how to add the rest.",
+        "codemap.rs answers 'where does X live'; this answers 'what calls X',",
+        "which needs real resolution rather than text matching.",
+        "Without Neovim installed this server simply fails to start and is",
+        "skipped. Nothing else breaks."
+      ]
+    },
+    "uacc": {
+      "command": "mcps/UACC/.venv/Scripts/python.exe",
+      "args": [
+        "-m",
+        "uacc_mcp.server"
+      ],
+      "env": {},
+      "enabled": false,
+      "$comment": [
+        "Pixel-level GUI control - 70 tools. DISABLED: needs a clone.",
+        "  git clone https://github.com/chrisjaron03/UACC mcps/UACC",
+        "Then give it its OWN venv (mcps/UACC/.venv), not the harness venv:",
+        "UACC is written against mcp v1 (FastMCP) while the kuzu server needs",
+        "mcp v2 (MCPServer), and those cannot coexist in one interpreter.",
+        "Separate processes can have separate Pythons - which is exactly what",
+        "the MCP boundary buys us, and it matches what UACC's own uacc-mcp.bat",
+        "already expects (it looks for %~dp0.venv).",
+        "It also needs one upstream syntax patch to import at all - see",
+        "mcps/patches/README.md. Set enabled to true once both are done."
+      ]
+    },
+    "snarevec": {
+      "command": ".venv/Scripts/python.exe",
+      "args": [
+        "CHANGE-ME/pro/mcp/snarevec_mcp.py"
+      ],
+      "env": {},
+      "enabled": false,
+      "$comment": [
+        "Local capture, embed and search - 31 tools. DISABLED: it is a separate",
+        "project and the path above must point at your own clone of it.",
+        "It is a stateless stdio proxy in front of a daemon on 127.0.0.1:8756.",
+        "Stdlib-only, so it needs no venv packages and starts regardless.",
+        "IMPORTANT: the daemon idles out and is restarted from the SnareVec",
+        "workbench. When it is down this server still connects and still lists",
+        "tools, but tool CALLS fail. That is a runtime condition, not a config",
+        "error - see persona/TOOLS.md for how the assistant should handle it."
+      ]
+    },
+    "nyx_tools": {
+      "command": ".venv/Scripts/python.exe",
+      "args": [
+        "mcps/nyx-tools/server.py"
+      ],
+      "env": {},
+      "enabled": false,
+      "$comment": [
+        "A tool layer over Neovim via pynvim, exposed over MCP. DISABLED: the",
+        "entrypoint ships here but the tools it wraps live in a separate",
+        "nyx-nvim clone that is not vendored, and three of its modules need",
+        "version-tolerant patches on Neovim 0.11+ - see",
+        "mcps/patches/nyx-nvim-windows.md for exactly what and why.",
+        "It shares the Neovim that nvim_lsp keeps warm, and starts one itself",
+        "if needed.",
+        "NOTE: its refactor tools WRITE to files. Untick it per workspace in",
+        "+ menu -> Connectors for folders that should stay read-only."
+      ]
+    }
+  }
+}

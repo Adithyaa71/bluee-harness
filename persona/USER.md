@@ -5,7 +5,7 @@ belong here, not guesses.
 
 ## Who
 
-Adithya (adityaummadi@gmail.com). Builds things — this harness, and SnareVec,
+Adithya. Builds things — this harness, and SnareVec,
 which he wrote himself.
 
 ## Machine

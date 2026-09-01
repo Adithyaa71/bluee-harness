@@ -1,6 +1,0 @@
-# The project lives at "D:\Conceptual Project ~ clg" - spaces and a tilde, and
-# deep enough that cmake-based native deps blew past Windows' 260-char MAX_PATH
-# during dependency testing (that is what killed the kuzu C++ build). Keeping
-# build artifacts at a short, space-free path avoids reintroducing that.
-[build]
-target-dir = "D:/tgt/harness"

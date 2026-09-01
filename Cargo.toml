@@ -29,4 +29,10 @@ rmcp = { version = "3.1", features = ["client", "transport-child-process"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["full"] }
+# Both of these are ALREADY in the lock file, pulled in by axum's `ws` feature -
+# naming them here exposes them to our own code and compiles nothing new. They
+# are what lets src/browser.rs speak CDP to a real browser without a daemon,
+# an MCP hop, or SnareVec's human-only config gate (§12e).
+tokio-tungstenite = "0.29"
+base64 = "0.22"
 uuid = { version = "1", features = ["v4"] }

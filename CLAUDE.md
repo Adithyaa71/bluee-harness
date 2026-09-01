@@ -763,6 +763,181 @@ back empty: the row is marked *missing*, a red banner appears, and one click
 removes it. Verified live — the model itself reported the deleted folder as
 "doesn't actually exist on disk".
 
+**28. The browser panel is native — no SnareVec, no daemon, no gate.**
+`src/browser.rs`. Adithya's report was blunt: "browser ain't working — make it
+native n not thro mcp n other connections."
+
+*Why it never worked.* The panel drove SnareVec's `browser_*` MCP tools. That
+stacked three independent failure modes: the daemon idles out, the daemon has
+to be reachable, and `"browser": { "enabled": true }` has to be set by hand in
+`~/.snarevec/config.json`. §12e correctly called that last one a deliberate
+human gate in his own software — which is a fine thing for SnareVec to have and
+a bad thing for this panel to *depend on*. Naming which of the three was wrong
+(§26) made the failure legible without making it any less of a failure.
+
+*What replaced it.* The harness finds Chrome or Edge, starts it, and speaks CDP
+directly. `dev/uicheck.mjs` had been driving that same protocol on this machine
+since the UI checks were written, so the approach was already proven here —
+Chrome ships with Windows and CDP is plain WebSocket.
+
+**No new dependencies.** `tokio-tungstenite` and `base64` were already in
+`Cargo.lock`, pulled in by axum's `ws` feature; naming them in `Cargo.toml`
+exposes them and compiles nothing new.
+
+*Measured through the running harness:* cold start **0.75s**, warm screenshot
+**0.07s**. navigate / screenshot / page-text / click / scroll / type / key /
+back / forward / reload all round-trip. A phrase with no dot becomes a search;
+a bare host becomes `https://`.
+
+*Two failures worth recording, both invisible without a real browser:*
+- **Chrome silently refuses a relative `--user-data-dir` on Windows.**
+  `cfg.data_dir` defaults to the relative `"data"`, so Chrome started, wrote
+  nothing, and never opened its port — which presented as a hang, not an error,
+  because the probe loop then waited out its whole budget against a port
+  nothing would ever bind. The profile path is now absolutised.
+- **`taskkill /F` does not run destructors.** Every rebuild (§12a) therefore
+  orphaned a Chrome still holding the profile lock, and the next harness could
+  not start one. It now remembers the port in `data/browser/.bluee-port` and
+  **adopts** a surviving instance instead of fighting it. Only a browser we
+  started ourselves is killed on drop.
+
+*The honest cost, stated in the panel itself:* this is a **separate profile**,
+so it is signed out of everything. SnareVec's real advantage was driving the
+browser Adithya was already using, with his session. Logins here persist in
+`data/browser`, so signing in once sticks — but it is not his browser.
+
+**29. The playground pencil did nothing — and the reason was the bug.**
+Reported as "editing the workspace (pencil) aint working". The handler was
+bound and correct. On the playground root it refused, and wrote *why* into
+`#pgrootmsg` — an element nested inside `#pgrootadd`, which is `display:none`
+unless the grant-a-folder form is open. So it explained itself into a hidden
+div, every time, and read as dead.
+
+Feedback moved to `#pgnote`, which is always in the layout; and the button is
+now **disabled with its reason in the title** when the current root cannot be
+renamed, so the refusal is visible before the click rather than after it.
+
+Verified on a real granted folder through the running UI: `dev` → `dev RENAMED`
+→ restored. That test also surfaced a **second, pre-existing bug** — Enter
+committed, which blurred, which committed again, and the second pass threw
+`NotFoundError` replacing a node already gone. Guarded with a `settled` flag.
+
+---
+
+**30. "The graph is missing" - four chained bugs, and my own testing hid the
+first one.**
+
+*The report was accurate and the cause was order-dependent.* `#gcv` is one
+canvas moved between hosts (§22), and it had **no CSS height** - so it laid out
+at its `height` *attribute*, which `gRender` sets from whichever host last
+measured it. Open the Graph page first and that attribute is stamped at ~585px;
+switch to Memory and `#mgholder` is 280px with `overflow:hidden`, so more than
+half the graph was cut off. Go straight to Memory instead and it sizes correctly
+and looks fine. **Every earlier Memory check went straight to Memory**, which is
+exactly why this survived them. `#mgholder>#gcv` now fills its host explicitly.
+
+*Fixing it exposed the next one.* `graphInto` refits after moving the canvas;
+**`graphHome` did not**. Returning to the Graph page kept the zoom fitted for a
+280px pane, so the whole graph came back as a small cluster in the corner of a
+585px canvas - and below the label threshold, so nameless too.
+
+*And that exposed the third.* Fitting 53 nodes into a 280px pane lands at
+**0.48x**, under the old `k>0.55` label gate, so the Memory pane drew **zero
+labels** - an anonymous dot cloud, which is a fair description of "missing".
+That gate dates from when labels were placed on a coarse grid and smeared; §Graph
+loop 3 replaced that with real rectangle collision and four candidate positions,
+so crowding now drops individual labels instead of hiding all of them. Threshold
+lowered to 0.3. Measured after: **44 of 53** labels on the Graph page, **21 of
+53** in the Memory pane, zero collisions.
+
+*The fourth was mine, from this same session.* `resize` only re-rendered when
+`#v-graph` was the visible page, so resizing the window while on Memory left the
+canvas at a stale backing size. It now asks whether the canvas is on screen, not
+which page is.
+
+`dev/uigraphbug.mjs` drives **both visit orders** and asserts the canvas fits its
+host, plus the label count. A check that only ever exercises one order is not a
+check.
+
+**31. Two more of mine, and a display that was lying.**
+- **Stale graph rings.** `doSearch`'s no-hits branch returned before
+  `gLinkResults`, so a failed search left the previous search's gold rings and
+  its "N named in these results" caption on screen, describing results that were
+  no longer there.
+- **The send button ignored attachments.** `renderAtt` never re-evaluated it, so
+  attaching a file to an empty composer left send disabled and removing the last
+  one left it enabled.
+- **The relevance bar was relative to the top hit, so it always drew one full
+  bar.** Cosine top-k *always* returns k rows, which also makes the "No matches"
+  state I wrote nearly unreachable. Measured on this index: a real query tops out
+  at **0.526**, pure gibberish at **0.302** - and gibberish was rendering a 100%
+  bar. The bar is now absolute against a 0.6 ceiling, and a best score under 0.35
+  gets an amber "nothing matched strongly" banner that says what that number
+  means. Verified: gibberish now draws 17px of 34.
+
+---
+
+**32. "Entities aint loading" - the data was fine, the path to it was not.**
+
+Reported off a uicheck run: legend empty, 53 of 1062 entities drawn, and a
+"show all" control that looked truncated. Three separate things, and only one
+of them was what it looked like.
+
+*The legend was empty because nothing had drawn.* My own §30 fix caused it.
+`graphHome()` early-returns when the canvas is already in `#v-graph` - which is
+exactly where it starts on a cold load - and I had replaced the rail handler's
+unconditional `drawGraph()` with a call to it, under a comment claiming it
+"refits and redraws". It only redraws when it actually *moves* the canvas. So
+opening the Graph page first drew nothing at all: no data, blank canvas, empty
+legend. Moving is now conditional; drawing is not.
+Measured after: legend has text and 13 chips at **437ms**, from never within 6s.
+
+*The legend is also now rebuilt on every draw*, not only when the layout is
+recomputed. It is a pure function of the current data and filters, and tying it
+to layout left it stale on any path that drew without re-laying out.
+
+*Nothing is hidden by default any more.* §16c hid `symbol` and `file` because
+together they are 94% of the graph and bury everything else. That is a fair
+thing to want and the wrong thing to impose - it put 89% of the data behind a
+control most people would never find. Measured before changing it:
+**1062 nodes / 1239 edges, layout and first draw 277ms, repaint 6.0ms median
+and 11.7ms worst** - the old default was never about speed. The legend header
+now carries the inverse instead: **hide code index**, one click, and it flips
+back to `1,009 hidden - show all` when something is hidden.
+
+*The control was never truncated.* `show allscrol` is `textContent` running
+into the next span and sliced at 60 characters by the probe. Measured:
+`scrollWidth 158, clientWidth 158, overflow visible`. It is now `flex:none` and
+`white-space:nowrap` anyway, because it is the only route to whatever is hidden.
+
+**Honest cost of the new default:** 1062 nodes is a hairball, and at the fitted
+0.54x only the outer ring gets labels. That was the real point behind §16c. The
+difference is that it is now a choice you make rather than one made for you.
+
+**33. `dev/uicheck.mjs` was granting the persona folder to itself.**
+`GRANT_PATH` defaulted to `<cwd>\persona` - the directory holding SOUL.md,
+which §5c calls the highest-value target in the system - and the check tested
+the file tree against it. It now creates a throwaway folder in `%TEMP%` with
+three sample files, and a safety net at the end revokes anything left behind.
+`GRANT_PATH` still overrides for pointing it at a real project.
+
+**34. Copy, edit and retry on messages.** Hover a message: **copy** on
+everything, plus **edit** and **retry** on your own.
+
+**Neither edit nor retry rewrites history, and that is not a shortcut.** The
+event log is append-only (§4a) and every derived store is rebuilt from it, so an
+edit that mutated a past turn would either be erased by the next `reduce` or
+survive as a fact with no evidence behind it. Both send a *new* turn - which is
+also what actually happens, since the model is being asked again. The editor
+says so on the row: *"Sends a new message - the original stays in the log."*
+
+Verified against a replayed 35-message session: prompts offer `copy, edit,
+retry`, replies offer `copy` only, the row is `opacity:0` until hover and
+absolutely positioned so revealing it moves nothing, and the clipboard content
+matches the source text exactly rather than the rendered markup.
+
+---
+
 ### 4h. Requested next, sized honestly (not yet built)
 
 Recorded so none of it is lost, with the reason each is a separate pass.
@@ -785,8 +960,9 @@ them, which is where this stops being trivial.
 granted folder; the pty already outlived its socket, so "resume" was only ever
 remembering which sessions belong to which workspace.
 
-**e. A browser panel in the playground — BUILT.** Blocked on a human gate in
-SnareVec itself, not on code: see §12e.
+**e. A browser panel in the playground — BUILT, then REBUILT native (§28).**
+The first version went through SnareVec and was blocked on a human gate in
+Adithya's own software. It no longer goes through SnareVec at all.
 
 **f. The `+` composer menu — DONE (§4f-d.24).**
 
@@ -1273,12 +1449,11 @@ node dev/uicheck.mjs 7788                     (proves it still runs)
 - Screen vision, three modes, gated so the tool does not exist unless ACTIVE
 
 **Needs something from Adithya, not from code:**
-- **Browser panel.** The SnareVec daemon must be running *and*
-  `"browser": { "enabled": true }` set in `~/.snarevec/config.json`. That gate
-  is in his own software and deliberately human-only - do not flip it. The
-  panel now names which of the three problems it is.
 - **Other language servers.** `lsp_status` lists what works and how to add
   each; it runs each binary rather than trusting PATH.
+
+(The browser panel used to be listed here. It is no longer blocked on anything -
+see §28.)
 
 **Not built, deliberately:**
 - Voice (Phase 5). Nothing depends on it.
