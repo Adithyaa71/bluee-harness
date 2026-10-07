@@ -83,6 +83,11 @@ pub struct ToolDef {
 pub struct Completion {
     pub content: Option<String>,
     pub tool_calls: Vec<ToolCall>,
+    /// Why the model stopped: `stop`, `tool_calls`, `length`. `length` with no
+    /// content means a reasoning model used the whole reply budget thinking.
+    pub finish_reason: Option<String>,
+    /// Characters of hidden reasoning received. Measured, never shown.
+    pub reasoning_chars: usize,
 }
 
 #[async_trait::async_trait]
@@ -92,6 +97,7 @@ pub trait Provider: Send + Sync {
     fn model(&self) -> &str;
 }
 
+#[derive(Clone)]
 pub struct OpenAiCompatible {
     client: reqwest::Client,
     base_url: String,
@@ -110,6 +116,16 @@ pub struct OpenAiCompatible {
     /// makes long turns possible at all.
     stream: bool,
     retries: u32,
+    /// Is there another provider after this one in the chain? Decides
+    /// whether a rate limit is worth waiting out here or is better spent
+    /// moving on. Set by `ProviderChain::build`, which is the only thing
+    /// that knows the chain's shape.
+    has_fallback: bool,
+    /// Cap on hidden thinking. Without it, measured on qwen3.8-27b, a long
+    /// question used all 3000 reply tokens reasoning and returned an empty
+    /// answer as a "success". Capped at 1200, the same prompt answered in
+    /// 2106 characters at the same cost (§59).
+    reasoning_budget: Option<u32>,
 }
 
 impl OpenAiCompatible {
@@ -129,6 +145,8 @@ impl OpenAiCompatible {
             top_p: None,
             stream: true,
             retries: 2,
+            has_fallback: false,
+            reasoning_budget: None,
         }
     }
 
@@ -152,6 +170,23 @@ impl OpenAiCompatible {
     pub fn transport(mut self, stream: bool, retries: u32) -> Self {
         self.stream = stream;
         self.retries = retries;
+        self
+    }
+
+    /// Which endpoint this client talks to. The Providers page shows it, so an
+    /// "not offered" answer says WHICH catalogue it looked in.
+    pub fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
+    /// Told by the chain, not guessed: whether anything follows this provider.
+    pub fn reasoning(mut self, budget: Option<u32>) -> Self {
+        self.reasoning_budget = budget.filter(|n| *n > 0);
+        self
+    }
+
+    pub fn with_fallback(mut self, yes: bool) -> Self {
+        self.has_fallback = yes;
         self
     }
 
@@ -194,6 +229,10 @@ struct ChatRequest<'a> {
     top_p: Option<f32>,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
+    /// OpenRouter's thinking cap, `{"max_tokens": n}`. Omitted unless set, so
+    /// a strict OpenAI-compatible server never sees a field it does not know.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -211,6 +250,8 @@ struct ChatResponse {
 #[derive(Deserialize)]
 struct Choice {
     message: Message,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -246,7 +287,25 @@ impl Provider for OpenAiCompatible {
                 Err(e) => {
                     let secs = started.elapsed().as_secs_f32();
                     let last = attempt > self.retries;
-                    if last || !is_transient(&e) {
+                    /* A 429 is not a hiccup, it is a verdict about right now -
+                       and when another provider is waiting behind this one,
+                       retrying in place is strictly the wrong order. Measured
+                       on the real report: six attempts against OpenRouter's
+                       rate-limited free pool, ~11s of backoff, before the
+                       chain was allowed to try anything else. Worse than
+                       wasted - hammering a saturated shared pool is what the
+                       limit is there to stop. So: fall through immediately if
+                       there is somewhere to fall through TO, and keep the
+                       in-place retry only for the last provider in the chain,
+                       where it is the only option left. */
+                    /* A spent daily allowance is never worth retrying, with or
+                       without a fallback - it resets on a calendar, and every
+                       attempt counts against the allowance that is already
+                       gone. §50's rule covered the momentary kind; this is the
+                       other kind, and it burned five attempts before anyone
+                       noticed. */
+                    let hopeless = is_quota_limit(&e) || (is_rate_limit(&e) && self.has_fallback);
+                    if last || hopeless || !is_transient(&e) {
                         bail!("{e:#} (after {secs:.1}s, attempt {attempt})");
                     }
                     eprintln!(
@@ -291,12 +350,19 @@ struct StreamChunk {
 struct StreamChoice {
     #[serde(default)]
     delta: Delta,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
 struct Delta {
     #[serde(default)]
     content: Option<String>,
+    /// Hidden thinking: `reasoning` on OpenRouter, `reasoning_content` elsewhere.
+    #[serde(default)]
+    reasoning: Option<String>,
+    #[serde(default)]
+    reasoning_content: Option<String>,
     #[serde(default)]
     tool_calls: Option<Vec<DeltaToolCall>>,
 }
@@ -327,7 +393,19 @@ struct DeltaFn {
 /// captured frames rather than only against a live endpoint. Ignoring frames
 /// it cannot parse is deliberate: providers sprinkle keepalives and vendor
 /// extensions through these streams, and one unknown line must not lose a turn.
+#[cfg(test)]
 fn absorb(line: &str, content: &mut String, calls: &mut Vec<(String, String, String)>) {
+    absorb_full(line, content, calls, &mut None, &mut 0);
+}
+
+/// `absorb`, also keeping why the stream ended and how much it reasoned.
+fn absorb_full(
+    line: &str,
+    content: &mut String,
+    calls: &mut Vec<(String, String, String)>,
+    finish: &mut Option<String>,
+    reasoning: &mut usize,
+) {
     let Some(data) = line.trim().strip_prefix("data:") else {
         return;
     };
@@ -341,6 +419,12 @@ fn absorb(line: &str, content: &mut String, calls: &mut Vec<(String, String, Str
     let Some(choice) = parsed.choices.into_iter().next() else {
         return;
     };
+    if let Some(f) = choice.finish_reason {
+        *finish = Some(f);
+    }
+    for r in [&choice.delta.reasoning, &choice.delta.reasoning_content].into_iter().flatten() {
+        *reasoning += r.len();
+    }
     if let Some(text) = choice.delta.content {
         content.push_str(&text);
     }
@@ -377,6 +461,8 @@ async fn read_stream(res: reqwest::Response) -> Result<Completion> {
     let mut content = String::new();
     // Indexed by the `index` the provider assigns, not by arrival order.
     let mut calls: Vec<(String, String, String)> = Vec::new();
+    let mut finish: Option<String> = None;
+    let mut reasoning = 0usize;
 
     let mut body = res.bytes_stream();
     let mut buf = String::new();
@@ -389,7 +475,7 @@ async fn read_stream(res: reqwest::Response) -> Result<Completion> {
         while let Some(nl) = buf.find('\n') {
             let line = buf[..nl].trim().to_string();
             buf.drain(..=nl);
-            absorb(&line, &mut content, &mut calls);
+            absorb_full(&line, &mut content, &mut calls, &mut finish, &mut reasoning);
         }
     }
 
@@ -410,10 +496,81 @@ async fn read_stream(res: reqwest::Response) -> Result<Completion> {
             Some(content)
         },
         tool_calls,
+        finish_reason: finish,
+        reasoning_chars: reasoning,
     })
 }
 
 /// Worth trying again: the request was fine, the far end was not.
+/// Turn a provider's error body into one readable line.
+///
+/// Gateways nest the thing you need to read. OpenRouter's 429 arrives as
+/// `{"error":{"message":"Provider returned error","metadata":{"raw":"<the
+/// actual sentence>", ...}}}` - and the outer `message` is the useless half.
+/// Dumped verbatim that is nine lines of JSON in the chat window with the one
+/// sentence that matters buried in the middle of it.
+///
+/// Falls back to the raw text whenever the shape is not recognised: a message
+/// we cannot parse is still better than one we have thrown away.
+fn explain(body: &str) -> String {
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(body) else {
+        return body.chars().take(400).collect();
+    };
+    let err = v.get("error").unwrap_or(&v);
+    // `metadata.raw` first: when both exist it is the specific one.
+    let raw = err.pointer("/metadata/raw").and_then(|x| x.as_str());
+    let msg = err.get("message").and_then(|x| x.as_str());
+    let mut out = match (raw, msg) {
+        (Some(r), _) => r.to_string(),
+        (None, Some(m)) => m.to_string(),
+        (None, None) => body.chars().take(400).collect(),
+    };
+    // Which upstream, when the gateway says. "rate-limited" means little
+    // without knowing whose limit was hit.
+    if let Some(p) = err.pointer("/metadata/provider_name").and_then(|x| x.as_str()) {
+        if !out.contains(p) {
+            out = format!("{out} (upstream: {p})");
+        }
+    }
+    out.split_whitespace().collect::<Vec<_>>().join(" ").chars().take(400).collect()
+}
+
+/// A rate limit specifically - "not now", as opposed to "something broke".
+fn is_rate_limit(e: &anyhow::Error) -> bool {
+    let s = e.to_string().to_lowercase();
+    s.contains(" 429") || s.contains("too many requests") || s.contains("rate-limited")
+}
+
+/// A rate limit measured in DAYS, not seconds - a spent allowance rather than a
+/// busy moment.
+///
+/// The difference decides whether waiting is worth anything at all. A saturated
+/// upstream pool can clear while you back off; `free-models-per-day` cannot -
+/// it resets on a calendar, and no amount of retrying moves it. Observed
+/// burning five attempts on exactly that:
+///
+/// ```text
+/// 429 Rate limit exceeded: free-models-per-day. Add 5 credits to unlock
+/// 1000 free model requests per day (after 0.0s, attempt 5)
+/// ```
+///
+/// Five requests spent against a wall that resets at midnight, not in seconds.
+///
+/// (Measured afterwards: a rejected 429 does NOT appear to count against the
+/// daily allowance - five failed attempts left `used` at 2, which was the two
+/// calls that actually succeeded. So the waste is time, not allowance. Worth
+/// stating precisely rather than assuming the worse version.)
+fn is_quota_limit(e: &anyhow::Error) -> bool {
+    let s = e.to_string().to_lowercase();
+    is_rate_limit(e)
+        && (s.contains("per-day")
+            || s.contains("per day")
+            || s.contains("daily")
+            || s.contains("quota")
+            || s.contains("add credits")
+            || s.contains("add 5 credits"))
+}
+
 fn is_transient(e: &anyhow::Error) -> bool {
     let s = e.to_string().to_lowercase();
     s.contains("timed out")
@@ -451,6 +608,7 @@ impl OpenAiCompatible {
             temperature: self.temperature,
             top_p: self.top_p,
             stream: if self.stream { Some(true) } else { None },
+            reasoning: self.reasoning_budget.map(|n| serde_json::json!({ "max_tokens": n })),
         };
 
         let res = self
@@ -468,7 +626,7 @@ impl OpenAiCompatible {
             // custom endpoint this is the difference between a usable message
             // and an opaque status code.
             let text = res.text().await.unwrap_or_default();
-            bail!("provider returned {status}: {}", text.trim());
+            bail!("provider returned {status}: {}", explain(text.trim()));
         }
 
         if self.stream {
@@ -479,16 +637,18 @@ impl OpenAiCompatible {
         let parsed: ChatResponse = serde_json::from_str(&text)
             .with_context(|| format!("parsing chat response: {text}"))?;
 
-        let msg = parsed
+        let choice = parsed
             .choices
             .into_iter()
             .next()
-            .map(|c| c.message)
             .context("provider returned no choices")?;
+        let msg = choice.message;
 
         Ok(Completion {
             content: msg.content,
             tool_calls: msg.tool_calls.unwrap_or_default(),
+            finish_reason: choice.finish_reason,
+            reasoning_chars: 0,
         })
     }
 
@@ -596,6 +756,25 @@ mod tests {
     }
 
     #[test]
+    fn thinking_until_the_budget_runs_out_is_recognised() {
+        // The shape of the blank replies in session 20260829-101419-58c030b6:
+        // reasoning frames only, then `length`, and no content at all.
+        let (mut content, mut calls) = (String::new(), Vec::new());
+        let (mut finish, mut reasoning) = (None, 0usize);
+        for line in [
+            r#"data: {"choices":[{"delta":{"reasoning":"Let me think about GPUs"},"finish_reason":null}]}"#,
+            r#"data: {"choices":[{"delta":{"reasoning_content":" and VRAM"},"finish_reason":null}]}"#,
+            r#"data: {"choices":[{"delta":{},"finish_reason":"length"}]}"#,
+            "data: [DONE]",
+        ] {
+            absorb_full(line, &mut content, &mut calls, &mut finish, &mut reasoning);
+        }
+        assert!(content.is_empty());
+        assert_eq!(finish.as_deref(), Some("length"));
+        assert_eq!(reasoning, "Let me think about GPUs and VRAM".len());
+    }
+
+    #[test]
     fn plain_text_frames_accumulate() {
         let mut content = String::new();
         let mut calls = Vec::new();
@@ -608,6 +787,73 @@ mod tests {
         }
         assert_eq!(content, "Hello, world");
         assert!(calls.is_empty());
+    }
+
+    /// A 429 is "not now", which is different from "something broke" - and the
+    /// difference decides whether to wait here or move to the next provider.
+    #[test]
+    fn tells_a_rate_limit_from_a_fault() {
+        assert!(is_rate_limit(&anyhow::anyhow!(
+            "provider returned 429 Too Many Requests"
+        )));
+        assert!(is_rate_limit(&anyhow::anyhow!(
+            "qwen/qwen3.8-27b:free is temporarily rate-limited upstream"
+        )));
+        assert!(!is_rate_limit(&anyhow::anyhow!(
+            "provider returned 500 Internal Server Error"
+        )));
+        assert!(!is_rate_limit(&anyhow::anyhow!(
+            "provider returned 402 Payment Required"
+        )));
+    }
+
+    /// A daily allowance and a busy upstream are both 429s and must not be
+    /// treated the same: one resets on a calendar, the other in seconds.
+    #[test]
+    fn tells_a_spent_allowance_from_a_busy_moment() {
+        // Verbatim from the report.
+        let daily = anyhow::anyhow!(
+            "provider returned 429 Too Many Requests: Rate limit exceeded: \
+             free-models-per-day. Add 5 credits to unlock 1000 free model requests per day"
+        );
+        assert!(is_rate_limit(&daily));
+        assert!(is_quota_limit(&daily), "a daily cap must never be retried in place");
+
+        // The §50 kind: momentary, and worth falling through for.
+        let momentary = anyhow::anyhow!(
+            "provider returned 429 Too Many Requests: qwen/qwen3.8-27b:free is \
+             temporarily rate-limited upstream. Please retry shortly"
+        );
+        assert!(is_rate_limit(&momentary));
+        assert!(!is_quota_limit(&momentary));
+
+        // Not a rate limit at all.
+        assert!(!is_quota_limit(&anyhow::anyhow!(
+            "provider returned 500 Internal Server Error"
+        )));
+    }
+
+    /// The reported error was nine lines of nested JSON with the one useful
+    /// sentence buried in it. Verbatim from OpenRouter.
+    #[test]
+    fn unwraps_the_sentence_that_matters() {
+        let body = r#"{"error":{"message":"Provider returned error","code":429,
+          "metadata":{"raw":"qwen/qwen3.8-27b:free is temporarily rate-limited upstream. Please retry shortly.",
+          "provider_name":"ModelRun","is_byok":false}},"user_id":"user_3Bch"}"#;
+        let out = explain(body);
+        assert!(out.starts_with("qwen/qwen3.8-27b:free is temporarily rate-limited"));
+        assert!(out.contains("upstream: ModelRun"));
+        // The outer, useless half must not survive.
+        assert!(!out.contains("Provider returned error"));
+        assert!(!out.contains("user_id"));
+
+        // Plain `message` when there is no metadata.
+        assert_eq!(
+            explain(r#"{"error":{"message":"Insufficient Balance"}}"#),
+            "Insufficient Balance"
+        );
+        // Unparseable bodies are passed through, never swallowed.
+        assert_eq!(explain("upstream exploded"), "upstream exploded");
     }
 
     /// The 30s gateway cut-off must be retried; a bad key must not be.

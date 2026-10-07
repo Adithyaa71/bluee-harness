@@ -119,8 +119,29 @@ every turn. `/compact` is still worth running on a genuinely long session.
 Type and press Enter. Shift+Enter for a new line.
 
 It can see your screen, control your mouse and keyboard, drive your browser,
-search your files, and remember everything — because it has 106 tools across
-three servers. You don't invoke tools; you just ask, and it picks.
+search your files, and remember everything. You don't invoke tools; you just
+ask, and it picks.
+
+**It can also drive your other applications.** Ask it to open something, put two
+windows side by side, or click a button by name:
+
+```
+open notepad and put it on the left half of the screen
+what's open right now?
+in File Explorer, switch to Large Icons
+```
+
+It works through the accessibility tree — the same labels a screen reader uses —
+not by guessing pixel positions, so it clicks *"Details"* because that is what
+the control is called. If it can't find a label it tells you which ones it can
+see, instead of clicking somewhere and hoping.
+
+Two things worth knowing. If a window is **already open**, it says so rather than
+pretending it opened one — and warns you if the title starts with `*`, which
+usually means unsaved work it should not type into. And **moving your mouse
+cancels whatever it's doing**: that's UACC's safety catch, and you always win.
+It will quietly clear the block once and retry; move the mouse again and it
+stops for good.
 
 ```
 what's on my screen right now?
@@ -131,8 +152,14 @@ what did we decide about the graph database?
 **📎 Attach** takes text files — code, logs, markdown, CSV, JSON. Images need
 vision, which isn't built yet.
 
-**🎙 Mic** is deliberately disabled. Voice isn't built (that's Phase 5). It's
-greyed out rather than pretending to work.
+**🎙 Mic** works now. Press it once to start listening, press again to stop —
+it's push-to-talk, not hold-to-talk, so you can think mid-sentence. What it
+heard goes **into the composer, not straight out as a message**: Whisper
+mishears sometimes, and you should see it before it's sent.
+
+It's greyed out until you switch voice on at **Settings → Voice**. Everything
+there runs on your own machine — there's no key to set because nothing is being
+sent anywhere. `voice/README.md` has the setup, including how to use a GPU.
 
 ---
 
@@ -227,10 +254,58 @@ on writes is its own decision with its own guardrails.
 **It cannot delete sessions.** Those are the source of truth, so deleting one
 stays a deliberate two-click action you take on the Sessions page.
 
-**One thing you do need to know:** memory search only covers what's been
-*indexed*, and indexing happens when you run `/reduce` (or `cargo run --
-reduce`). Recent conversations aren't searchable until then. `/compact` indexes
-the current session immediately, which is a second reason to use it.
+**Memory is current.** Every turn is indexed the moment it finishes, so
+something you said two minutes ago - in this chat or another one - is already
+searchable. `/reduce` is still worth running now and then: it rebuilds the
+graph and re-indexes the code, and it is the only thing that picks up screen
+context. It is no longer needed just to make recent conversations findable.
+
+**Three kinds of memory, and bluee uses all of them:**
+
+| | what it is | how bluee reaches it |
+|---|---|---|
+| **Short-term** | this conversation | it's in front of it; after `/compact`, `search_memory` with scope *session* |
+| **Recent** | the last 7 days | `search_memory` scope *recent* |
+| **Long-term** | every conversation + remembered facts | `search_memory` (default), `recall`, the graph |
+
+Memory tools and the graph are **always loaded**: in every chat, workspace,
+loop and sub-agent, whatever the Connectors tick-boxes say. (The graph's
+switch shows *memory · always on*.)
+
+**It remembers facts, not just conversations.** Tell it something that will
+still matter ("Ravi works at Acme and is helping with jev, due 15 Oct") and it
+quietly stores each piece with `remember`. Next week, in a different chat,
+"when is Ravi's deadline?" just works: facts about anyone your message names
+are attached to it automatically, before bluee even starts thinking.
+
+**Facts change without losing the old ones.** "Ravi moved to Globex" closes
+the Acme fact as *history* rather than deleting it, so "where did he work
+before?" still has an answer. Jobs, roles, managers, where someone lives,
+titles and similar one-at-a-time facts replace automatically.
+
+**Every fact has a source.** It comes from a logged `remember` call, so it
+points back at the exact conversation and message. Deleting that
+conversation deletes the facts it produced. `/reduce` rebuilds all of them from
+the logs.
+
+To see them: ask "what do you know about Ravi?", or on the Graph page, search
+the name.
+
+**The Memory page shows all of it.** Five chips across the top:
+**This session · Last 7 days · All conversations · Facts · Code**, each with
+its count. Pick one and everything in it is listed, newest first ("load more"
+at the bottom). Type in the box to search *inside* that tier. **Facts** lists
+every remembered fact; tick *show history* to see the ones that stopped being
+true, struck through with the date they ended.
+
+The graph under it is **this conversation's** graph, and it fills in as you
+talk: tools used, what followed what, facts remembered. You don't need
+`/reduce` for it. The **Graph** page (left rail) is everything, all
+conversations and the code index together.
+
+**Search matches meaning *and* exact words.** "That daemon problem" finds the
+right conversation by meaning; "402", `read_stream` or a file name find it by
+the literal text. Both run on every search and the results are merged.
 
 To ask memory something directly, use the **Memory** page. To see the shape of
 what it knows, use the **Graph** page.
@@ -420,6 +495,110 @@ Four folders under `skills/`:
   you move it into `skills/`. This is the safety catch for automatic skill
   discovery later.
 
+**Skills load themselves.** You never have to say "run the skill". A skill is
+attached to your message, with its tools already loaded, when the message
+mentions:
+
+- **a server it uses**: "do it with uacc", "use snare vec", "check neovim".
+  Naming a server brings up **every** skill that uses it.
+- **one of its tools**: "try crawl site on the docs".
+- **one of its trigger words**: "add the headphones to my Flipkart cart" loads
+  the shopping skill without anyone naming a tool.
+- **its name**.
+
+At most three per message (each is a page of instructions). The Log panel
+shows which: `auto-recall: … skill(s): shop-add-to-cart`. bluee can also load
+any skill itself with `list_skills` / `run_skill`, and when it loads a server's
+tools with `find_tools`, the skills for that server are listed with them.
+
+Trigger words are one optional line in the skill's header, hand-written:
+
+```
+- tools: snarevec__browser_click, uacc__smart_click
+- triggers: amazon, flipkart, add to cart
+```
+
+Saving from the Settings page or with "remember that as a skill" keeps them.
+
+**The skills that ship:**
+
+| Skill | For |
+|---|---|
+| `web-and-desktop-hybrid` | Which tool to use: SnareVec to read and drive websites, bluee's GUI tools and UACC for apps and hard UIs |
+| `shop-add-to-cart` | Amazon / Flipkart in your real Chrome, **stops at the cart, never pays** |
+| `snarevec-crawl-and-search` | Read a site without a browser: crawl, embed, search |
+| `uacc-desktop-control` | Open and operate desktop apps, verified step by step |
+| `graph-memory` | Remembering facts, recalling, querying the graph |
+| `code-navigation` | Neovim LSP + nyx: find references, safe edits |
+
+---
+
+## Demo checklist — before showing it to anyone
+
+The setup decides whether a live demo works, not the model.
+
+1. **Open Chrome with the SnareVec extension and its workbench.** This starts
+   the daemon and connects the browser. Check: ask bluee "is the snarevec
+   browser connected?" The answer must say connected, not "no extension is
+   polling".
+2. **Use the Chrome profile you are signed into Amazon/Flipkart with.** The
+   extension is installed in your Default, Profile 6 and Profile 8.
+3. **Empty the cart first** so the panel sees the item arrive.
+4. **SnareVec idles out after 30 minutes**. Open the workbench again shortly
+   before you present.
+5. **Don't touch the mouse during a desktop step.** UACC treats any movement as
+   you taking over, and stops.
+6. **Keep the Tasks panel open** so every tool call is visible while it works.
+7. **Start a new chat for the demo** so earlier test turns aren't in the way.
+
+---
+
+## Loops — things it does without being asked
+
+A skill is something you invoke. A **loop** is something that runs on a
+schedule. One loop is one Markdown file in `loops/`:
+
+```markdown
+---
+name: daily-review
+at: 22:00
+servers: []
+---
+
+Read back the day and write down what is worth keeping.
+```
+
+Save the file and it is live within 30 seconds. No restart.
+
+```
+harness loops                   list them, and when each last ran
+harness loop project-kickoff    run one now, ignoring its schedule
+```
+
+**Scheduling.** Use one of `every: 6h` / `at: 22:00` / `on: startup`.
+
+**A loop with no schedule never runs on its own** — it waits for
+`harness loop <name>`. That is deliberate: dropping a half-finished file into
+`loops/` must not be able to start spending money while you sleep.
+
+**`servers:` is about cost, not preference.** Tool descriptions are paid on
+every turn before bluee says anything — all servers is about 22,300 tokens a
+turn, `[]` is none. `[]` still leaves the built-in tools (memory search, source
+reading, artifacts), which is all a review loop needs. Most loops want `[]` or
+one server. `max_runs:` caps a loop per day; the default is 24. `min_gap:`
+sets the shortest time between runs. Startup loops default to 4 hours, so
+relaunching the app doesn't repeat (and pay for) a catch-up you just had.
+
+**Whatever a loop notices becomes memory.** It runs in a real session, so its
+output goes into the event log like anything else, and `reduce` makes it
+searchable. A review that noticed something last week is findable this week.
+
+Four are shipped: `catch-up` (on startup), `daily-review` (22:00), and two with
+no schedule — `project-kickoff` and `deep-research`, which are checklists to run
+at the start of something rather than background work.
+
+`loops/README.md` has the full list of keys.
+
 ---
 
 ## Screen vision
@@ -469,18 +648,96 @@ screenshot — not the AI.
 Click **>_**. It's a real shell, and **you and bluee share it** — you both see
 the same session.
 
-Pick your shell from the dropdown: powershell, cmd, bash, or **custom** — type
-anything, including:
+### Connections
+
+Press **+** on the tab strip, or **connect…** in the bar. You get a list:
+powershell, cmd, bash, and anything you have saved.
+
+To add a machine, type a name and a command in the box at the bottom of that
+list and press **add**:
 
 ```
-ssh pi@raspberrypi.local
+name: pi      command: ssh pi@raspberrypi.local
+name: box     command: ssh adithya@your-cloud-host
 ```
 
-That's how the Pi 5 connects.
+It is saved, so next time it is one click. Anything starting with `ssh` is
+marked with a globe on its tab so you can see at a glance which terminals are
+on another machine. That's how the Pi 5 connects, and any cloud box the same
+way — a remote is just a command the terminal runs, so there is nothing else to
+set up.
 
-**Sessions survive.** Close the panel, close the window, come back later — the
-shell kept running and you get the scrollback. Each shell keeps its own
-session, so switching between powershell and cmd doesn't lose either.
+### Tabs
+
+Each tab is its own shell with its own scrollback. Switching is instant and
+tabs do not bleed into each other — what powershell printed stays in the
+powershell tab.
+
+Tabs belong to the **folder you are working in**. Open a different granted
+folder and you get that folder's terminals back, not this one's.
+
+**Sessions survive.** Close a tab, close the panel, close the window, come back
+days later — the shell kept running and you get the scrollback. Closing a tab
+puts the window away; it does not kill the shell. The bar says **reattached**
+when it has picked one back up.
+
+---
+
+## Tools load on demand
+
+bluee has ~150 tools. Sending every one of their instructions with every
+message used to cost ~27,000 tokens a round before anything was said.
+
+Now it carries its own tools and the graph, plus a **catalogue** of the rest by
+name. When a job needs, say, the GUI tools, it calls `find_tools` to load them,
+and they stay loaded for the rest of the conversation. You'll see this in
+TASKS as a `find_tools` call.
+
+Measured on the same question: **27,483 → 7,010 prompt tokens a round**, 157 →
+32 tools in the prompt.
+
+You don't need to do anything. If a model handles it badly, set
+`HARNESS_TOOL_SEARCH=off` in `.env` to go back to sending everything.
+`HARNESS_CORE_SERVERS` (default `kuzu_graph`) lists servers that are always
+loaded.
+
+The Connectors tick-boxes still matter: a server you untick is not even in the
+catalogue.
+
+---
+
+## Hooks — your guards, run outside the model
+
+A hook is a command **you** write that runs around every tool call. The model
+can't see it, argue with it, or switch it off. This is the general version of
+the lesson from `format C:` (the model once approved its own confirmation
+flag).
+
+Copy `hooks.example.json` to `hooks.json` at the repo root:
+
+```json
+{
+  "pre_tool":  [{ "match": "harness__run_command", "command": "python hooks/examples/guard_commands.py" }],
+  "post_tool": [{ "match": "harness__create_artifact", "command": "python hooks/examples/check_artifact.py" }]
+}
+```
+
+- **`match`** is the tool's full name: `server__tool`, and bluee's own tools
+  are `harness__<name>`. `*` is a wildcard, `|` means "or":
+  `"uacc__*|harness__run_command"`.
+- The tool call arrives on the hook's **stdin** as JSON: `server`, `tool`,
+  `args`, `session` (plus `ok` and `result` after the call).
+- **pre_tool — exit 0 lets it run, any other exit code blocks it.** What the
+  hook prints is shown to bluee as the reason, so write it as an instruction
+  ("refused: name the files instead of deleting recursively"). A hook that
+  crashes or times out also blocks.
+- **post_tool never blocks.** What it prints is attached to the result bluee
+  sees. Point one at `cargo check` after a code write and compiler errors come
+  straight back to it in the same turn.
+- The file is read on every call. Edit it and the next tool call uses it; no
+  restart.
+
+Blocked calls show in TASKS as failed, with your hook's message.
 
 ---
 
@@ -507,6 +764,15 @@ many tools it gave you. Edit the command, arguments, environment, or switch one
 off. Add new ones here.
 
 **Changes need a restart** — servers are launched once when bluee opens.
+
+**Reconnect** starts them all again without restarting bluee — and without
+losing the conversation you're in. Use it when a server shows *enabled, not
+connected*, or after starting something bluee depends on (the SnareVec daemon,
+for example). It takes about 25 seconds, and the tools come back in the chat you
+already have open.
+
+A server that didn't start now says **why**, right on its row. If nothing is
+connected you'll get a banner at the top of the page saying so.
 
 ### Tools & Skills
 
@@ -559,6 +825,19 @@ To find valid model ids: `cargo run -- models`.
 
 ## When something goes wrong
 
+**The Graph page is blank, or bluee can't answer things it normally can**
+Check the top bar: it says how many **tools** and **servers** are live. If it
+reads `0 tools · 0 servers`, the tool servers didn't start — bluee still has its
+own built-in tools, which is why it may go hunting through files instead of just
+asking the graph.
+
+Go to **Settings → MCP**. Each server shows why it failed. Press **Reconnect**.
+
+An empty Graph page tells you which kind of empty it is: *nothing in the store
+yet* (run `/reduce`), *this conversation isn't folded in yet* (also `/reduce`),
+or *the graph server isn't connected* (Reconnect). They need different things,
+so it no longer gives the same advice for all three.
+
 **"Search isn't working" / SnareVec errors**
 The SnareVec daemon idles out and shuts down. That's normal, not a fault. Open
 the SnareVec workbench to start it again. bluee will tell you when this is the
@@ -589,7 +868,32 @@ Open the **TASKS** panel. It shows what ran, what it returned, and why bluee
 called it. Failures are red and expandable.
 
 **It doesn't remember something recent**
-Run `/reduce`. Memory search only covers indexed conversations.
+It should - every turn is indexed as it finishes. If it still can't find it,
+ask with a word that was actually used ("the 402", a file name): exact words
+are matched too. `/reduce` rebuilds everything from scratch if memory looks
+wrong.
+
+**Graph page says "no MCP server is connected" / every server failed**
+Open **Settings → MCP**: each failed server now shows what it printed as it
+died. If it says **`No Python at '...AppData\Roaming\uv\python...'`**: the
+Python the tool servers run on was installed from *inside* the Claude desktop
+app, which is a packaged app, so Windows quietly stored it in Claude's private
+folder. bluee started from Claude could see it; bluee started from your
+desktop shortcut could not. Fixed on 2026-09-25 by moving it to
+`D:\tgt\python\cpython-3.12.14-windows-x86_64-none` and pointing both
+`pyvenv.cfg` files there. If you ever recreate a venv, make sure its Python
+lives outside `AppData` (the old configs are kept as `pyvenv.cfg.bak-appdata`).
+Then press **Reconnect** on the MCP page; no restart needed.
+
+**A turn stopped with "did not answer within 120s"**
+A tool hung and was abandoned, so the turn could carry on. The usual culprit is
+UACC's OCR (`include_ocr`) without `pytesseract` installed. Set
+`HARNESS_TOOL_TIMEOUT` (seconds) in `.env` to change the limit.
+
+**"hooks are misconfigured, so no tool may run"**
+Your `hooks.json` doesn't parse. This is deliberate: a broken guard file stops
+tools rather than silently switching every guard off. Fix the JSON or delete
+the file.
 
 ---
 
@@ -620,7 +924,8 @@ else is derived from it.
 
 Being straight with you so you don't go looking:
 
-- **Voice** — no wake word, no speech in or out (Phase 5)
+- **Wake word** — no "hey bluee" yet. Speech in and out both work; you just
+  have to press the mic.
 - **Image attachments** — needs vision support
 - **Automatic skill discovery** — it saves skills when asked, but doesn't
   propose them itself yet

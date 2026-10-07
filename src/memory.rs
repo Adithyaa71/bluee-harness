@@ -29,13 +29,25 @@ pub struct Chunk {
 pub struct Hit {
     pub score: f32,
     pub chunk: Chunk,
-    /// "global" (rebuilt by the reducer) or "session" (written by /compact).
+    /// "global" (rebuilt by the reducer), "session" (live-indexed as the
+    /// conversation happens, and by /compact) or "code" (the repo index).
     pub scope: String,
+    /// Row id, which is what joins a dense hit to its keyword rank.
+    pub id: i64,
 }
 
 pub struct VectorStore {
     conn: Connection,
+    /// Whether the FTS5 keyword index exists. False means dense-only search.
+    fts: bool,
 }
+
+/// Reciprocal-rank-fusion constant. 60 is the value from the original paper;
+/// it damps the gap between rank 1 and rank 3 so neither retriever can
+/// dominate on one lucky hit.
+const RRF_K: f32 = 60.0;
+/// How deep each retriever looks before fusion.
+const CANDIDATES: usize = 50;
 
 impl VectorStore {
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {
@@ -72,7 +84,211 @@ impl VectorStore {
         conn.execute_batch("CREATE INDEX IF NOT EXISTS chunks_scope ON chunks(scope);")
             .context("indexing scope")?;
 
-        Ok(Self { conn })
+        // Keyword index beside the vectors. Dense retrieval is weak on exact
+        // tokens - names, error codes, paths, ids - and those are exactly what
+        // gets asked about ("the 402", "read_stream"). FTS5 ships inside the
+        // bundled SQLite, so this is a virtual table, not a dependency.
+        //
+        // External-content, kept in step by triggers, so every existing
+        // delete path (clear, forget_session, clear_scope...) maintains it
+        // without knowing it exists. If FTS5 is somehow unavailable the store
+        // still works, dense-only - recall degrades, nothing breaks.
+        let fts = conn
+            .execute_batch(
+                "CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts
+                     USING fts5(text, content='chunks', content_rowid='id');
+                 CREATE TRIGGER IF NOT EXISTS chunks_ai AFTER INSERT ON chunks BEGIN
+                     INSERT INTO chunks_fts(rowid, text) VALUES (new.id, new.text);
+                 END;
+                 CREATE TRIGGER IF NOT EXISTS chunks_ad AFTER DELETE ON chunks BEGIN
+                     INSERT INTO chunks_fts(chunks_fts, rowid, text)
+                         VALUES ('delete', old.id, old.text);
+                 END;",
+            )
+            .is_ok();
+        if fts {
+            // Backfill a store that predates the index. `rebuild` re-reads the
+            // content table, so it is exact rather than incremental.
+            let indexed: i64 = conn
+                .query_row("SELECT count(*) FROM chunks_fts_docsize", [], |r| r.get(0))
+                .unwrap_or(-1);
+            let rows: i64 = conn
+                .query_row("SELECT count(*) FROM chunks", [], |r| r.get(0))
+                .unwrap_or(0);
+            if indexed != rows {
+                let _ = conn.execute("INSERT INTO chunks_fts(chunks_fts) VALUES ('rebuild')", []);
+            }
+        }
+
+        Ok(Self { conn, fts })
+    }
+
+    /// Where each of this session's live-indexed chunks starts, so a turn
+    /// only embeds what is new rather than the whole conversation again.
+    pub fn session_seq_starts(&self, session_id: &str) -> Result<std::collections::HashSet<u64>> {
+        let mut stmt = self.conn.prepare(
+            "SELECT seq_start FROM chunks WHERE scope = 'session' AND session_id = ?1",
+        )?;
+        let set = stmt
+            .query_map(params![session_id], |r| r.get::<_, i64>(0))?
+            .filter_map(|r| r.ok())
+            .map(|n| n as u64)
+            .collect();
+        Ok(set)
+    }
+
+    /// SQL condition for one memory tier, matching `tools::scope_keep` so the
+    /// Memory page's browse and its search agree on what "recent" means.
+    fn tier_sql(scope: &str) -> &'static str {
+        match scope {
+            "code" => "scope = 'code'",
+            "session" => "scope <> 'code' AND session_id = ?1",
+            "recent" => "scope <> 'code' AND session_id >= ?2",
+            _ => "scope <> 'code'",
+        }
+    }
+
+    /// Browse one tier, newest first (code: by file). A turn indexed twice -
+    /// live `session` copy plus the reducer's `global` one - is listed once.
+    /// Returns the total for the tier and one page of it.
+    pub fn browse(
+        &self,
+        scope: &str,
+        session: &str,
+        offset: usize,
+        limit: usize,
+    ) -> Result<(usize, Vec<(Chunk, String)>)> {
+        let week_ago = (chrono::Local::now() - chrono::Duration::days(7))
+            .format("%Y%m%d")
+            .to_string();
+        let cond = Self::tier_sql(scope);
+        let order = if scope == "code" {
+            "session_id ASC, seq_start ASC"
+        } else {
+            "session_id DESC, seq_start DESC"
+        };
+        let total: i64 = self.conn.query_row(
+            &format!(
+                "SELECT count(*) FROM (SELECT 1 FROM chunks WHERE {cond} \
+                 AND (?1 IS NOT NULL) AND (?2 IS NOT NULL) GROUP BY session_id, seq_start)"
+            ),
+            params![session, week_ago],
+            |r| r.get(0),
+        )?;
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT session_id, seq_start, max(seq_end), max(text), min(scope) FROM chunks \
+             WHERE {cond} AND (?1 IS NOT NULL) AND (?2 IS NOT NULL) \
+             GROUP BY session_id, seq_start ORDER BY {order} LIMIT ?3 OFFSET ?4"
+        ))?;
+        let rows = stmt
+            .query_map(params![session, week_ago, limit as i64, offset as i64], |r| {
+                Ok((
+                    Chunk {
+                        session_id: r.get(0)?,
+                        seq_start: r.get::<_, i64>(1)? as u64,
+                        seq_end: r.get::<_, i64>(2)? as u64,
+                        text: r.get(3)?,
+                    },
+                    r.get::<_, String>(4)?,
+                ))
+            })?
+            .filter_map(|r| r.ok())
+            .collect();
+        Ok((total as usize, rows))
+    }
+
+    /// How many distinct turns each tier holds, for the Memory page's chips.
+    pub fn tier_counts(&self, session: &str) -> Result<serde_json::Value> {
+        let mut out = serde_json::Map::new();
+        for tier in ["session", "recent", "all", "code"] {
+            let (n, _) = self.browse(tier, session, 0, 0)?;
+            out.insert(tier.into(), serde_json::json!(n));
+        }
+        Ok(serde_json::Value::Object(out))
+    }
+
+    /// Hybrid recall: dense cosine and BM25 keyword ranks, fused by RRF.
+    ///
+    /// Why both: MiniLM scores two clearly related short phrases at ~0.22 and
+    /// gibberish at ~0.30 (§31), so on exact tokens - an error code, a file
+    /// name, a symbol - dense ranking is close to noise. BM25 is the opposite:
+    /// exact, and blind to paraphrase. Fusing ranks rather than scores means
+    /// neither scale has to be calibrated against the other.
+    ///
+    /// `score` on each hit stays the cosine, because the UI's relevance bar
+    /// and the "nothing matched strongly" banner are calibrated against it.
+    /// Order is the fused order. Duplicates of one turn (the live `session`
+    /// copy and the reducer's `global` copy) collapse to one.
+    pub fn search_hybrid(&self, text: &str, query: &[f32], k: usize) -> Result<Vec<Hit>> {
+        self.search_where(text, query, k, |_| true)
+    }
+
+    /// Hybrid search restricted to hits `keep` accepts - this conversation
+    /// only, the last week, conversations but not code. Filtering happens
+    /// BEFORE ranking, so a narrow scope still gets its full k results rather
+    /// than whatever survived of a global top-k.
+    pub fn search_where(
+        &self,
+        text: &str,
+        query: &[f32],
+        k: usize,
+        keep: impl Fn(&Hit) -> bool,
+    ) -> Result<Vec<Hit>> {
+        use std::collections::HashMap;
+        let mut dense = self.search(query, usize::MAX)?;
+        dense.retain(|h| keep(h));
+        let keyword = self.keyword_ids(text, CANDIDATES);
+
+        let by_id: HashMap<i64, usize> =
+            dense.iter().enumerate().map(|(i, h)| (h.id, i)).collect();
+        // Keyed by turn, not row, so two copies of one turn fuse into one.
+        let mut fused: HashMap<(String, u64), (f32, usize)> = HashMap::new();
+        let mut add = |i: usize, rank: usize| {
+            let h = &dense[i];
+            let e = fused
+                .entry((h.chunk.session_id.clone(), h.chunk.seq_start))
+                .or_insert((0.0, i));
+            e.0 += 1.0 / (RRF_K + rank as f32 + 1.0);
+        };
+        for rank in 0..dense.len().min(CANDIDATES) {
+            add(rank, rank);
+        }
+        for (rank, id) in keyword.iter().enumerate() {
+            if let Some(&i) = by_id.get(id) {
+                add(i, rank);
+            }
+        }
+
+        let mut ranked: Vec<(f32, usize)> = fused.into_values().collect();
+        ranked.sort_by(|a, b| b.0.total_cmp(&a.0));
+        Ok(ranked.into_iter().take(k).map(|(_, i)| dense[i].clone()).collect())
+    }
+
+    /// Row ids by BM25 rank. Each word is quoted, so punctuation in a query
+    /// (a path, `a-b`, `foo()`) is matched as text rather than parsed as FTS
+    /// syntax and rejected.
+    fn keyword_ids(&self, text: &str, n: usize) -> Vec<i64> {
+        if !self.fts {
+            return Vec::new();
+        }
+        let terms: Vec<String> = text
+            .split_whitespace()
+            .map(|w| w.replace('"', ""))
+            .filter(|w| w.chars().any(|c| c.is_alphanumeric()))
+            .map(|w| format!("\"{w}\""))
+            .collect();
+        if terms.is_empty() {
+            return Vec::new();
+        }
+        let q = terms.join(" OR ");
+        let Ok(mut stmt) = self.conn.prepare(
+            "SELECT rowid FROM chunks_fts WHERE chunks_fts MATCH ?1 ORDER BY rank LIMIT ?2",
+        ) else {
+            return Vec::new();
+        };
+        stmt.query_map(params![q, n as i64], |r| r.get::<_, i64>(0))
+            .map(|rows| rows.filter_map(|r| r.ok()).collect())
+            .unwrap_or_default()
     }
 
     /// Drop general memory before a rebuild, so the derived state stays a pure
@@ -175,7 +391,7 @@ impl VectorStore {
 
         let mut stmt = self
             .conn
-            .prepare("SELECT session_id, seq_start, seq_end, text, embedding, scope FROM chunks")
+            .prepare("SELECT session_id, seq_start, seq_end, text, embedding, scope, id FROM chunks")
             .context("preparing search")?;
 
         let mut hits: Vec<Hit> = stmt
@@ -190,15 +406,17 @@ impl VectorStore {
                     },
                     from_blob(&blob),
                     row.get::<_, String>(5).unwrap_or_else(|_| "global".into()),
+                    row.get::<_, i64>(6)?,
                 ))
             })
             .context("scanning chunks")?
             .filter_map(|r| r.ok())
-            .filter(|(_, v, _)| v.len() == q.len())
-            .map(|(chunk, v, scope)| Hit {
+            .filter(|(_, v, _, _)| v.len() == q.len())
+            .map(|(chunk, v, scope, id)| Hit {
                 score: dot(&q, &v),
                 chunk,
                 scope,
+                id,
             })
             .collect();
 
@@ -261,8 +479,37 @@ mod tests {
         assert_eq!(hits[0].chunk.text, "about cats");
         assert!(hits[0].score > hits[1].score);
 
+        // Hybrid: an exact token the vectors know nothing about still wins.
+        let c = Chunk {
+            session_id: "s".into(),
+            seq_start: 5,
+            seq_end: 6,
+            text: "provider returned 402 Payment Required".into(),
+        };
+        store.insert(&c, &[0.0, 0.0, 1.0]).unwrap();
+        let hits = store.search_hybrid("the 402 error", &[0.9, 0.1, 0.0], 3).unwrap();
+        assert_eq!(hits[0].chunk.text, c.text, "keyword match should fuse to the top");
+
+        // The same turn indexed twice (live session copy + reducer's global
+        // copy) must come back once.
+        store.insert_scoped(&c, &[0.0, 0.0, 1.0], "session").unwrap();
+        let hits = store.search_hybrid("402", &[0.0, 0.0, 1.0], 5).unwrap();
+        assert_eq!(hits.iter().filter(|h| h.chunk.seq_start == 5).count(), 1);
+
+        // Browse lists that turn once although it is stored twice.
+        let (n, rows) = store.browse("all", "s", 0, 10).unwrap();
+        assert_eq!(n, 3, "cats, ships, and the 402 turn once");
+        assert_eq!(rows.iter().filter(|(c, _)| c.seq_start == 5).count(), 1);
+        let (n, _) = store.browse("session", "s", 0, 10).unwrap();
+        assert_eq!(n, 3);
+        let (n, _) = store.browse("session", "other", 0, 10).unwrap();
+        assert_eq!(n, 0);
+
+        // clear() drops only global. The session copy stays, and so does its
+        // keyword entry - the delete trigger removed only the deleted rows.
         store.clear().unwrap();
-        assert_eq!(store.count().unwrap(), 0);
+        assert_eq!(store.count().unwrap(), 1);
+        assert_eq!(store.keyword_ids("402", 5).len(), 1);
 
         std::fs::remove_dir_all(&dir).ok();
     }

@@ -54,8 +54,25 @@ pub struct ProviderConfig {
     /// next one. A gateway timeout is a hiccup, not a verdict.
     #[serde(default = "default_retries")]
     pub retries: u32,
+    /// Cap on hidden reasoning, in tokens. Unset: 40% of `max_tokens` on
+    /// OpenRouter (so a thinking model always has room left to answer), not
+    /// sent anywhere else. `0` turns the cap off.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reasoning_budget: Option<u32>,
     #[serde(default = "default_true")]
     pub enabled: bool,
+}
+
+impl ProviderConfig {
+    /// The thinking cap actually sent with each request.
+    pub fn effective_reasoning_budget(&self) -> Option<u32> {
+        match self.reasoning_budget {
+            Some(0) => None,
+            Some(n) => Some(n),
+            None if self.base_url.contains("openrouter.ai") => Some(self.max_tokens * 2 / 5),
+            None => None,
+        }
+    }
 }
 
 fn default_max_tokens() -> u32 {
@@ -108,6 +125,7 @@ pub fn load(cfg: &Config) -> ProvidersFile {
             timeout_secs: default_timeout(),
             stream: true,
             retries: default_retries(),
+            reasoning_budget: None,
             enabled: true,
         }],
     }
@@ -144,14 +162,24 @@ pub struct ProviderChain {
 impl ProviderChain {
     pub fn build(cfg: &Config) -> Result<Self> {
         let file = load(cfg);
-        let entries: Vec<_> = file
+        let usable: Vec<_> = file
             .providers
             .into_iter()
             .filter(|p| p.enabled && !p.api_key.is_empty() && !p.model.is_empty())
-            .map(|p| {
+            .collect();
+        let n = usable.len();
+        let entries: Vec<_> = usable
+            .into_iter()
+            .enumerate()
+            .map(|(i, p)| {
                 let client = OpenAiCompatible::new(&p.base_url, &p.api_key, &p.model, p.max_tokens)
                     .tuned(p.temperature, p.top_p, p.timeout_secs)
-                    .transport(p.stream, p.retries);
+                    .transport(p.stream, p.retries)
+                    .reasoning(p.effective_reasoning_budget())
+                    // Everything except the last has somewhere to fall through
+                    // to, which is what decides whether a rate limit is worth
+                    // waiting out here (see `Provider::complete`).
+                    .with_fallback(i + 1 < n);
                 (p, client)
             })
             .collect();

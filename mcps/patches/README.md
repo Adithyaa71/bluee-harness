@@ -12,6 +12,26 @@ cd mcps/UACC && git apply ../patches/uacc-artistic-painter-syntax.patch
 
 ---
 
+## `uacc-tesseract-path.patch`
+
+**Problem:** OCR (`get_screen_info {include_ocr: true}`) either hung or
+returned nothing. Two missing pieces and one path:
+
+1. `pytesseract` was not installed in UACC's venv, so UACC fell back to
+   EasyOCR - which never returned, and took a whole turn with it for 10+
+   minutes (CLAUDE.md §56e). The venv is uv-made and has no pip:
+   `python -m uv pip install --python mcps/UACC/.venv/Scripts/python.exe pytesseract`
+2. The Tesseract program itself: `winget install -e --id UB-Mannheim.TesseractOCR`
+   (installs 5.4 to `C:\Program Files\Tesseract-OCR`).
+3. **That installer does not add Tesseract to PATH**, and pytesseract only
+   looks on PATH - so even with both installed, every OCR call failed.
+
+The patch points pytesseract at the standard install location when
+`tesseract` is not on PATH (`TESSERACT_CMD` overrides). Verified: reads a
+rendered test string back at ~200ms instead of hanging.
+
+---
+
 ## `uacc-artistic-painter-syntax.patch`
 
 **Problem:** `uacc/actions/artistic_painter.py` does not parse.
@@ -73,3 +93,32 @@ uv pip install --python mcps/UACC/.venv/Scripts/python.exe -e mcps/UACC "mcp<2"
 
 Separate processes can have separate Pythons — one of the concrete payoffs of
 talking to tool servers over MCP rather than importing them.
+
+
+---
+
+## `uacc-missing-invalidate-tree-cache.patch`
+
+**Problem:** every UACC tool that *acts* on the UI threw `NameError`.
+
+```
+Click failed at (936,1060) - Error: NameError: name 'invalidate_tree_cache' is not defined
+```
+
+`invalidate_tree_cache` is defined in `uacc/core/accessibility.py` and imported
+**inside one function** at `server.py:3680`, but it is *called* at six
+module-level sites - 544, 608, 655, 715, 790 and 1454. Those are `click`,
+`type_text`, `hotkey`, `scroll` and `drag`: the whole input path. Reading the
+screen worked, so the server looked healthy; nothing that touched the UI did.
+
+The module-level import at line 57 pulls in `get_ui_tree` and stops there. The
+fix is one word.
+
+```bash
+cd mcps/UACC && git apply ../patches/uacc-missing-invalidate-tree-cache.patch
+```
+
+Verified after applying: `click_element` by name landed on a real control
+(`"clicked": "Large Icons", "how": "by name"`), and `hotkey` round-tripped.
+Worth reporting upstream - it is not Windows-specific or setup-specific, so it
+presumably breaks for everyone.

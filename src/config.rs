@@ -20,6 +20,7 @@ pub struct Config {
     pub persona_dir: PathBuf,
     pub mcp_config: PathBuf,
     pub skills_dir: PathBuf,
+    pub loops_dir: PathBuf,
     /// Model used for ACTIVE screen reads. Usually different from the chat
     /// model - most text models reject images outright.
     pub vision_model: String,
@@ -72,6 +73,12 @@ impl Config {
             // be read, edited and version-controlled, unlike derived state.
             skills_dir: PathBuf::from(
                 std::env::var("HARNESS_SKILLS_DIR").unwrap_or_else(|_| "skills".into()),
+            ),
+            // Loops live beside skills and for the same reason: they are meant
+            // to be read, edited by hand and version-controlled, unlike the
+            // derived state under data/.
+            loops_dir: PathBuf::from(
+                std::env::var("HARNESS_LOOPS_DIR").unwrap_or_else(|_| "loops".into()),
             ),
             vision_model: std::env::var("LLM_VISION_MODEL").unwrap_or_default(),
         })

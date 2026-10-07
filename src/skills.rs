@@ -34,6 +34,10 @@ pub struct Skill {
     /// Tools the procedure expects to use, for a quick "can I even run this".
     #[serde(default)]
     pub tools: Vec<String>,
+    /// Words that should bring this skill up even when no tool is named:
+    /// "amazon, flipkart, cart" for a shopping skill. Optional.
+    #[serde(default)]
+    pub triggers: Vec<String>,
     #[serde(default)]
     pub created: String,
     #[serde(default)]
@@ -80,12 +84,14 @@ impl SkillStore {
         }
 
         let now = chrono::Utc::now().to_rfc3339();
-        let created = self
-            .get(&slug)
-            .ok()
-            .flatten()
-            .map(|s| s.created)
+        let previous = self.get(&slug).ok().flatten();
+        let created = previous
+            .as_ref()
+            .map(|s| s.created.clone())
             .unwrap_or_else(|| now.clone());
+        // Neither the model's save_skill nor the Settings editor knows about
+        // triggers, so a re-save must carry them over rather than drop them.
+        let triggers = previous.map(|s| s.triggers).unwrap_or_default();
 
         let skill = Skill {
             name: name.to_string(),
@@ -93,6 +99,7 @@ impl SkillStore {
             category: category.to_string(),
             description: description.to_string(),
             tools: tools.to_vec(),
+            triggers,
             created,
             updated: now,
             body: body.to_string(),
@@ -172,7 +179,7 @@ fn render(s: &Skill) -> String {
         "# {}\n\n\
          > {}\n\n\
          - category: {}\n\
-         - tools: {}\n\
+         - tools: {}\n{}\
          - created: {}\n\
          - updated: {}\n\n\
          ---\n\n{}\n",
@@ -188,6 +195,11 @@ fn render(s: &Skill) -> String {
         } else {
             s.tools.join(", ")
         },
+        if s.triggers.is_empty() {
+            String::new()
+        } else {
+            format!("- triggers: {}\n", s.triggers.join(", "))
+        },
         s.created,
         s.updated,
         s.body.trim()
@@ -198,6 +210,7 @@ fn parse(text: &str, slug: &str, category: &str) -> Skill {
     let mut name = slug.replace('-', " ");
     let mut description = String::new();
     let (mut tools, mut created, mut updated) = (Vec::new(), String::new(), String::new());
+    let mut triggers: Vec<String> = Vec::new();
 
     let (head, body) = match text.split_once("\n---\n") {
         Some((h, b)) => (h, b.trim().to_string()),
@@ -218,6 +231,12 @@ fn parse(text: &str, slug: &str, category: &str) -> Skill {
             if t != "-" && !t.is_empty() {
                 tools = t.split(',').map(|x| x.trim().to_string()).collect();
             }
+        } else if let Some(rest) = l.strip_prefix("- triggers:") {
+            triggers = rest
+                .split(',')
+                .map(|x| x.trim().to_string())
+                .filter(|x| !x.is_empty() && x != "-")
+                .collect();
         } else if let Some(rest) = l.strip_prefix("- created:") {
             created = rest.trim().to_string();
         } else if let Some(rest) = l.strip_prefix("- updated:") {
@@ -231,9 +250,109 @@ fn parse(text: &str, slug: &str, category: &str) -> Skill {
         category: category.to_string(),
         description,
         tools,
+        triggers,
         created,
         updated,
         body,
+    }
+}
+
+/// Lower-case, every run of non-alphanumerics collapsed to one space, padded -
+/// so `crawl_site`, "crawl site" and "Crawl-Site" all compare equal, and a
+/// match is always whole words (" jev " is not inside " jevons ").
+fn norm(s: &str) -> String {
+    let mut out = String::from(" ");
+    for c in s.chars() {
+        if c.is_alphanumeric() {
+            out.extend(c.to_lowercase());
+        } else if !out.ends_with(' ') {
+            out.push(' ');
+        }
+    }
+    if !out.ends_with(' ') {
+        out.push(' ');
+    }
+    out
+}
+
+/// What people actually call each server, so "use snare vec" or "open it in
+/// neovim" finds the skills for `snarevec` and `nvim_lsp`.
+fn server_aliases(server: &str) -> Vec<&'static str> {
+    match server {
+        "kuzu_graph" => vec!["kuzu", "kuzu graph", "graph memory"],
+        "snarevec" => vec!["snarevec", "snare vec"],
+        "uacc" => vec!["uacc"],
+        "nvim_lsp" => vec!["nvim", "neovim", "nvim lsp", "lsp"],
+        "nyx_tools" => vec!["nyx", "nyx tools"],
+        _ => vec![],
+    }
+}
+
+impl SkillStore {
+    /// Skills the text refers to, most-referenced first.
+    ///
+    /// A skill is referred to when the text names one of its MCP servers (or
+    /// a common alias), one of its tools, one of its triggers, or the skill
+    /// itself. So "use uacc to ..." brings up EVERY skill that drives uacc -
+    /// which is what was asked for - and "add it to my flipkart cart" brings
+    /// up the shopping skill without anyone naming a tool. `proposed/` is
+    /// never offered: it is the holding pen for unreviewed skills (§4f-d.4).
+    pub fn matching(&self, text: &str) -> Vec<Skill> {
+        let t = norm(text);
+        let has = |needle: &str| {
+            let n = norm(needle);
+            n.trim().chars().count() >= 3 && t.contains(&n)
+        };
+        let mut scored: Vec<(usize, Skill)> = self
+            .list(None)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s| s.category != "proposed")
+            .filter_map(|s| {
+                let mut hits = 0;
+                if has(&s.name) || has(&s.slug) {
+                    hits += 3;
+                }
+                for trig in &s.triggers {
+                    if has(trig) {
+                        hits += 2;
+                    }
+                }
+                let mut servers: Vec<&str> = Vec::new();
+                for tool in &s.tools {
+                    let (server, short) = tool.split_once("__").unwrap_or(("", tool.as_str()));
+                    if short.chars().count() >= 6 && has(short) {
+                        hits += 2;
+                    }
+                    if !server.is_empty() && !servers.contains(&server) {
+                        servers.push(server);
+                    }
+                }
+                for server in servers {
+                    if has(server) || server_aliases(server).iter().any(|a| has(a)) {
+                        hits += 2;
+                    }
+                }
+                (hits > 0).then_some((hits, s))
+            })
+            .collect();
+        scored.sort_by(|a, b| b.0.cmp(&a.0));
+        scored.into_iter().map(|(_, s)| s).collect()
+    }
+
+    /// Skills that use any tool on one of these servers - offered when
+    /// `find_tools` loads that server's tools.
+    pub fn for_servers(&self, servers: &[String]) -> Vec<Skill> {
+        self.list(None)
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|s| s.category != "proposed")
+            .filter(|s| {
+                s.tools.iter().any(|t| {
+                    t.split_once("__").is_some_and(|(srv, _)| servers.iter().any(|x| x == srv))
+                })
+            })
+            .collect()
     }
 }
 
@@ -255,6 +374,34 @@ fn slug(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mentioning_a_server_tool_or_trigger_brings_the_skill_up() {
+        let dir = std::env::temp_dir().join(format!("sk-{}", uuid::Uuid::new_v4()));
+        let store = SkillStore::open(&dir).unwrap();
+        let tools = |v: &[&str]| v.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        store.put("Shop add to cart", "skills", "", &tools(&["snarevec__browser_click", "uacc__click"]), "x").unwrap();
+        store.put("Crawl a site", "skills", "", &tools(&["snarevec__crawl_site"]), "x").unwrap();
+        store.put("Draft idea", "proposed", "", &tools(&["uacc__click"]), "x").unwrap();
+        // Triggers are hand-written into the file; a later re-save must keep them.
+        let p = dir.join("skills").join("shop-add-to-cart.md");
+        let text = std::fs::read_to_string(&p).unwrap().replace("- created:", "- triggers: amazon, flipkart, cart\n- created:");
+        std::fs::write(&p, text).unwrap();
+        store.put("Shop add to cart", "skills", "edited in Settings", &tools(&["snarevec__browser_click", "uacc__click"]), "x").unwrap();
+        assert_eq!(store.get("shop-add-to-cart").unwrap().unwrap().triggers, vec!["amazon", "flipkart", "cart"]);
+
+        let names = |q: &str| store.matching(q).into_iter().map(|s| s.slug).collect::<Vec<_>>();
+        // Naming a server loads EVERY skill that uses it - but never a proposed one.
+        assert_eq!(names("use snare vec for this").len(), 2);
+        assert_eq!(names("do it with uacc"), vec!["shop-add-to-cart"]);
+        // A tool name, in any spelling.
+        assert_eq!(names("try crawl site on the docs"), vec!["crawl-a-site"]);
+        // A trigger, with no tool named at all.
+        assert_eq!(names("add the headphones to my Flipkart cart"), vec!["shop-add-to-cart"]);
+        assert!(names("what's the weather").is_empty());
+        assert!(store.for_servers(&["uacc".into()]).iter().all(|s| s.category != "proposed"));
+        std::fs::remove_dir_all(&dir).ok();
+    }
 
     #[test]
     fn round_trips_and_moves_category() {

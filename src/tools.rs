@@ -24,7 +24,40 @@ use crate::skills::SkillStore;
 ///
 /// Note `kuzu_graph__cypher` is safe to expose: the server itself rejects
 /// writes, so it is a read-only escape hatch by construction.
-pub const WITHHELD_FROM_MODEL: &[&str] = &["kuzu_graph__upsert_entity", "kuzu_graph__upsert_relation"];
+pub const WITHHELD_FROM_MODEL: &[&str] = &[
+    "kuzu_graph__upsert_entity",
+    "kuzu_graph__upsert_relation",
+    // Facts reach the graph only from a logged `remember` call (src/facts.rs),
+    // which is what keeps every fact backed by a line in the log.
+    "kuzu_graph__record_fact",
+    "kuzu_graph__close_facts",
+    // Deleting a session's graph is the Sessions page's job, never the model's.
+    "kuzu_graph__drop_session",
+];
+
+/// Which slice of memory a search looks at. The three tiers the model is
+/// told about: this conversation (short-term), the last week, and everything
+/// (long-term). Code is separate because 1,600 code chunks would otherwise
+/// crowd every conversational question out of the top results.
+pub fn scope_keep(scope: &str, session: &str) -> impl Fn(&crate::memory::Hit) -> bool {
+    let scope = scope.to_string();
+    let session = session.to_string();
+    let week_ago = (chrono::Local::now() - chrono::Duration::days(7))
+        .format("%Y%m%d")
+        .to_string();
+    move |h: &crate::memory::Hit| {
+        let is_code = h.scope == crate::codemap::SCOPE;
+        match scope.as_str() {
+            "code" => is_code,
+            "everything" => true,
+            "session" => !is_code && h.chunk.session_id == session,
+            // Session ids start with their date (20260923-212038-...), so
+            // recency needs no extra column.
+            "recent" => !is_code && h.chunk.session_id.get(..8).is_some_and(|d| d >= week_ago.as_str()),
+            _ => !is_code,
+        }
+    }
+}
 
 pub struct NativeTools {
     /// Needed for the granted-folder lookups: which roots exist is config, not
@@ -36,6 +69,8 @@ pub struct NativeTools {
     /// Loaded on first use. Most turns never search, and loading the model
     /// costs a noticeable pause - no reason to pay it at session start.
     embedder: Option<TextEmbedding>,
+    /// The conversation these tools serve, for `scope: "session"`.
+    session: String,
 }
 
 impl NativeTools {
@@ -46,7 +81,34 @@ impl NativeTools {
             skills: SkillStore::open(&cfg.skills_dir)?,
             cfg: cfg.clone(),
             embedder: None,
+            session: String::new(),
         })
+    }
+
+    /// For skill auto-loading, which happens in the agent, not in a tool call.
+    pub fn skills(&self) -> &SkillStore {
+        &self.skills
+    }
+
+    pub fn set_session(&mut self, id: &str) {
+        self.session = id.to_string();
+    }
+
+    /// Hybrid search over one scope, embedding the query with the shared
+    /// model. The one search path: the tool, `recall` and auto-recall all
+    /// come through here.
+    pub fn search_scoped(
+        &mut self,
+        query: &str,
+        scope: &str,
+        limit: usize,
+    ) -> Result<Vec<crate::memory::Hit>> {
+        if self.store.count()? == 0 {
+            return Ok(Vec::new());
+        }
+        let v = self.embed(vec![query])?;
+        let keep = scope_keep(scope, &self.session);
+        self.store.search_where(query, &v[0], limit, keep)
     }
 
     pub fn store(&self) -> &VectorStore {
@@ -94,10 +156,11 @@ impl NativeTools {
         vec![
             ToolDef {
                 name: "search_memory".into(),
-                description: "Search your own memory of past sessions by meaning, not keywords. \
-                    Returns past turns - what the user asked, which tools ran, and what came back. \
-                    Use this when the user refers to something from before, or when you need to \
-                    know what has already been tried."
+                description: "Search your memory of conversations - by meaning AND by exact \
+                    words (names, error codes, file names). Returns past turns: what the user \
+                    asked, which tools ran, what came back. Use it whenever the user refers to \
+                    something from before, or before re-trying something that may already have \
+                    been tried. For facts about a person or project, `recall` is faster."
                     .into(),
                 parameters: serde_json::json!({
                     "type": "object",
@@ -105,6 +168,14 @@ impl NativeTools {
                         "query": {
                             "type": "string",
                             "description": "What to look for, phrased naturally."
+                        },
+                        "scope": {
+                            "type": "string",
+                            "enum": ["all", "session", "recent", "code", "everything"],
+                            "description": "all = every past conversation (long-term, the default). \
+                                session = only THIS conversation, including parts no longer in \
+                                your context. recent = conversations from the last 7 days. \
+                                code = bluee's own source code. everything = all of these."
                         },
                         "limit": {
                             "type": "integer",
@@ -341,13 +412,12 @@ impl NativeTools {
         match name {
             "memory_stats" => {
                 let count = self.store.count()?;
+                let code = self.store.count_scope(crate::codemap::SCOPE)?;
                 Ok(serde_json::json!({
-                    "indexed_turns": count,
-                    "note": if count == 0 {
-                        "Memory is empty. It fills as sessions happen and `harness reduce` runs."
-                    } else {
-                        "Searchable via search_memory."
-                    }
+                    "conversation_chunks": count - code,
+                    "code_chunks": code,
+                    "note": "Every finished turn is indexed immediately. Searchable via \
+                             search_memory; facts about people and projects via recall."
                 }))
             }
 
@@ -361,29 +431,16 @@ impl NativeTools {
                     .and_then(|v| v.as_u64())
                     .unwrap_or(5)
                     .clamp(1, 20) as usize;
+                let scope = args.get("scope").and_then(|v| v.as_str()).unwrap_or("all").to_string();
 
-                if self.store.count()? == 0 {
+                let hits = self.search_scoped(query, &scope, limit)?;
+                if hits.is_empty() {
                     return Ok(serde_json::json!({
+                        "scope": scope,
                         "results": [],
-                        "note": "Memory is empty - nothing has been indexed yet."
+                        "note": "Nothing in this scope yet. Try scope \"everything\", or other words."
                     }));
                 }
-
-                let embedder = match &mut self.embedder {
-                    Some(e) => e,
-                    None => {
-                        let e = TextEmbedding::try_new(TextInitOptions::new(
-                            EmbeddingModel::AllMiniLML6V2,
-                        ))
-                        .context("loading embedding model")?;
-                        self.embedder.insert(e)
-                    }
-                };
-
-                let embedding = embedder
-                    .embed(vec![query], None)
-                    .context("embedding search query")?;
-                let hits = self.store.search(&embedding[0], limit)?;
 
                 let results: Vec<serde_json::Value> = hits
                     .iter()
@@ -391,13 +448,14 @@ impl NativeTools {
                         serde_json::json!({
                             "score": (h.score * 1000.0).round() / 1000.0,
                             "session": h.chunk.session_id,
+                            "this_session": h.chunk.session_id == self.session,
                             "events": format!("{}-{}", h.chunk.seq_start, h.chunk.seq_end),
                             "text": h.chunk.text,
                         })
                     })
                     .collect();
 
-                Ok(serde_json::json!({ "count": results.len(), "results": results }))
+                Ok(serde_json::json!({ "scope": scope, "count": results.len(), "results": results }))
             }
 
             "create_artifact" => {

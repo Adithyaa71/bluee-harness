@@ -129,6 +129,39 @@ if (PAGE === 'memory') {
       'px of results in a '+Math.round(document.querySelector('#memtop').getBoundingClientRect().height)+'px pane';
   `));
   log('shot        :', await shot('results'));
+
+  // The page is a browser of every tier now, not only a search box. Each
+  // tier must list something (or say plainly why not) with no query at all.
+  log('\n--- TIERS (no query) ---');
+  await evaluate(`document.querySelector('#msearch').value='';`);
+  for (const t of ['all', 'recent', 'session', 'code', 'facts']) {
+    await evaluate(`document.querySelector('#mtiers button[data-t="${t}"]').click()`);
+    await sleep(t === 'facts' ? 1500 : 1200);
+    log(`${t.padEnd(8)}    :`, await evaluate(`
+      const on=document.querySelector('#mtiers button.on');
+      const label=on?on.textContent.trim().replace(/\\s+/g,' '):'?';
+      const cards=document.querySelectorAll('#mhits .hit').length;
+      const facts=document.querySelectorAll('#mhits .fact').length;
+      const count=(document.querySelector('#mhits .mcount')||{}).textContent||'';
+      const none=(document.querySelector('#mhits .mnone b')||{}).textContent||'';
+      const more=document.querySelector('#mmorebtn');
+      return 'chip "'+label+'" | '+(facts?facts+' facts':cards+' cards')+
+        (count?' | '+count:'')+(none?' | EMPTY: '+none:'')+(more?' | '+more.textContent:'');
+    `));
+    if (t === 'all') log('shot        :', await shot('tier-all'));
+    if (t === 'all') {
+      await evaluate(`document.querySelector('#mmorebtn')?.click()`);
+      await sleep(1200);
+      log('load more   :', await evaluate("return document.querySelectorAll('#mhits .hit').length+' cards after one click'"));
+    }
+  }
+  await evaluate(`document.querySelector('#mhist').click()`);
+  await sleep(1200);
+  log('history     :', await evaluate(`
+    return document.querySelectorAll('#mhits .fact').length+' facts, '+
+      document.querySelectorAll('#mhits .fact.past').length+' marked past';
+  `));
+  log('shot        :', await shot('tier-facts'));
 }
 
 // -------------------------------------------------------------------- graph

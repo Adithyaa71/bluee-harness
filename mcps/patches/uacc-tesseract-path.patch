@@ -1,0 +1,24 @@
+diff --git a/uacc/core/ocr_engine.py b/uacc/core/ocr_engine.py
+index 8b72cc7..2f163c6 100644
+--- a/uacc/core/ocr_engine.py
++++ b/uacc/core/ocr_engine.py
+@@ -85,6 +85,19 @@ def _get_reader() -> object:
+     if not use_heavy:
+         try:
+             import pytesseract  # noqa: F401
++            import shutil
++            # The Windows installer (UB-Mannheim) does not put tesseract on
++            # PATH, and pytesseract only looks there - so without this, OCR
++            # fails on every call even though Tesseract is installed.
++            if not shutil.which("tesseract"):
++                for _cand in (
++                    os.environ.get("TESSERACT_CMD", ""),
++                    r"C:\Program Files\Tesseract-OCR\tesseract.exe",
++                    r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
++                ):
++                    if _cand and os.path.exists(_cand):
++                        pytesseract.pytesseract.tesseract_cmd = _cand
++                        break
+             _reader = "pytesseract"
+             logger.info("OCR ← pytesseract (fast mode)")
+             return _reader

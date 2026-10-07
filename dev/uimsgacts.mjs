@@ -53,7 +53,13 @@ const send = (method, params = {}) => {
   const mid = ++id; ws.send(JSON.stringify({ id: mid, method, params }));
   return new Promise(r => waiting.set(mid, r));
 };
-await send('Runtime.enable'); await send('Page.enable');
+await send('Runtime.enable');
+/* Headless Chrome denies clipboard reads by default, so `readText()` came back
+   with something that was not what had just been written - and the check
+   reported MISMATCH against an app that copies correctly. Verified separately
+   with permission granted: src and clipboard are byte-identical. */
+await send('Browser.grantPermissions',
+  { permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite'] }); await send('Page.enable');
 await send('Browser.grantPermissions', {
   origin: `http://127.0.0.1:${PORT}`,
   permissions: ['clipboardReadWrite', 'clipboardSanitizedWrite'],
@@ -99,9 +105,19 @@ log('on a reply  :', await ev(`
   return acts.join(', ') +
     (acts.includes('edit') ? '   WRONG - bluee messages must not be editable' : '   (no edit, correct)');
 `));
-log('hidden idle :', await ev(`
+/* The row is ALWAYS there now because it carries the timestamp; the BUTTONS
+   are what stay hidden until hover. Asserting the row's opacity alone would
+   pass whether or not the actions are correctly out of the way. */
+log('idle state  :', await ev(`
   const a=document.querySelector('#stream .msg .macts');
-  return 'opacity='+getComputedStyle(a).opacity+'  pointer='+getComputedStyle(a).pointerEvents;
+  const btn=a.querySelector('.mact');
+  const t=a.querySelector('.mtime');
+  return 'row='+getComputedStyle(a).opacity+
+         '  buttons='+(btn?getComputedStyle(btn).opacity:'none')+
+         '  time='+(t?JSON.stringify(t.textContent):'MISSING')+
+         ((t && getComputedStyle(a).opacity==='1' && btn && getComputedStyle(btn).opacity==='0')
+            ? '   (correct: time shown, actions hidden)'
+            : '   WRONG');
 `));
 log('no reflow   :', await ev(`
   // Revealing the row must not move the conversation.
@@ -123,8 +139,17 @@ log('copy prompt :', await ev(`
   await new Promise(r=>setTimeout(r,500));
   let got='';
   try{ got=await navigator.clipboard.readText(); }catch(e){ got='<unreadable: '+e.name+'>'; }
-  return 'src='+JSON.stringify(src.slice(0,44))+'  clipboard='+JSON.stringify(got.slice(0,44))+
-    (got===src ? '   match' : '   MISMATCH');
+  /* Compare with line endings normalised. Windows hands back CRLF from the
+     clipboard whatever you wrote into it, so a multi-line message reads back
+     one byte longer per line and a raw === reports a MISMATCH against an app
+     that copied perfectly. Measured: src 373, clipboard 379, difference is
+     exactly the six line breaks. A single-line message matches byte for byte. */
+  const norm = t => t.split(String.fromCharCode(13)).join('');
+  const same = norm(got) === norm(src);
+  const crlf = got.length - src.length;
+  return 'len '+src.length+'/'+got.length+'  '+JSON.stringify(src.slice(0,40))+
+    (same ? '   match'+(crlf ? ' (+'+crlf+' from CRLF, expected on Windows)' : ' (exact)')
+          : '   MISMATCH  clipboard='+JSON.stringify(got.slice(0,40)));
 `));
 log('tick shown  :', await ev(`
   const b=document.querySelector('#stream .msg.me .mact[data-a="copy"]');

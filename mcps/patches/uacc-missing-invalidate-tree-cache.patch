@@ -1,0 +1,13 @@
+diff --git a/uacc_mcp/server.py b/uacc_mcp/server.py
+index acf8ba8..a896776 100644
+--- a/uacc_mcp/server.py
++++ b/uacc_mcp/server.py
+@@ -54,7 +54,7 @@ from uacc.actions.schema import (
+     TypeAction,
+ )
+ from uacc.config import config
+-from uacc.core.accessibility import get_ui_tree
++from uacc.core.accessibility import get_ui_tree, invalidate_tree_cache
+ from uacc.core.cdp_bridge import CDPBridge
+ from uacc.core.clipboard import read_clipboard as _clipboard_read, write_clipboard as _clipboard_write
+ from uacc.core.grid_encoder import grid_cell_to_pixel, overlay_grid, overlay_markers, build_marker_legend

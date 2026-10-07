@@ -101,11 +101,31 @@ async function shot(name) {
 const out = [];
 const log = (...a) => { out.push(a.join(' ')); console.log(...a); };
 
-// Start from a known state: the panel width and collapsed flag persist in
-// localStorage, so without this a run inherits whatever the last run left and
-// the numbers stop being comparable.
-await evaluate("try{ localStorage.clear(); }catch(_){}; location.reload();");
-await sleep(3000);   // let boot fetches settle
+/* Wait for a condition rather than sleeping a fixed amount. A flat 3s here was
+   enough on a quiet machine and not enough on a busy one - a run that lost the
+   race reported an empty title and then died on the first click against a null.
+   A check whose result depends on how loaded the machine is proves nothing. */
+async function waitFor(expr, what, ms = 25000) {
+  const started = Date.now();
+  while (Date.now() - started < ms) {
+    try { if (await evaluate('return !!(' + expr + ')')) return Date.now() - started; }
+    catch (_) {}
+    await sleep(250);
+  }
+  throw new Error('timed out waiting for ' + what);
+}
+const READY = "typeof app!=='undefined' && document.querySelector('.rb[data-page=\"play\"]')";
+
+/* Start from a known state: the panel width and collapsed flag persist in
+   localStorage, so without this a run inherits whatever the last run left and
+   the numbers stop being comparable. The clear has to happen AFTER the first
+   load - CDP hands over the target while the document can still be about:blank,
+   so clearing immediately wipes the wrong origin and changes nothing. */
+await waitFor(READY, 'the first load');
+await evaluate("try{ localStorage.clear(); }catch(_){}");
+await evaluate("location.reload()");
+await sleep(600);
+await waitFor(READY, 'the reload');
 
 // ---------------------------------------------------------------- checks
 log('=== PAGE ===');
@@ -523,7 +543,14 @@ log('tabs        :', await evaluate(`
     ' | add button=' + (document.querySelector('#ttadd') !== null);
 `));
 log('add a tab   :', await evaluate(`
+  // + opens the connection menu now rather than adding a tab straight away,
+  // because a terminal is opened AGAINST something - a local shell or a saved
+  // remote. Pick the first entry to get the old behaviour.
   document.querySelector('#ttadd').click();
+  await new Promise(r => setTimeout(r, 400));
+  const row = document.querySelector('#connmenu .crow');
+  if (!row) return 'connection menu did not open';
+  row.click();
   await new Promise(r => setTimeout(r, 1200));
   const t = [...document.querySelectorAll('#termtabs .ttab')];
   return t.length + ' tabs, active=' +
@@ -592,22 +619,52 @@ log('after drag  :', await evaluate(`
 `));
 
 log('\n=== SOLO MODE ===');
-for (const view of ['terminal', 'graph', 'tasks']) {
+/* This used to measure only that the thing you asked for had a size, which is
+   why it passed for months while every pop-out ALSO rendered the chat page and
+   the terminal strip. A pop-out is defined by what it leaves out, so that is
+   what gets asserted: the chat surface, the shell, and the rail must be gone
+   unless they are the view you popped. */
+/* Each at the size its window really opens at (see popTerminal / popSide /
+   agpop). Running these at the full 1440px hid a bug for weeks: the log
+   pop-out opens at 760px, under `@media (max-width:900px)`, which hid the
+   whole panel and made the window a black rectangle. */
+const soloSize = { terminal: [900, 520], graph: [900, 620], tasks: [760, 620],
+                   browser: [1000, 700] };
+for (const view of ['terminal', 'graph', 'tasks', 'browser']) {
+  const [w, h] = soloSize[view];
+  await send('Emulation.setDeviceMetricsOverride',
+    { width: w, height: h, deviceScaleFactor: 1, mobile: false });
   await evaluate(`location.href = '/?only=' + ${JSON.stringify(view)};`);
-  await sleep(3000);
+  await sleep(3200);
   log('  ?only=' + view.padEnd(9), ':', await evaluate(`
+    const view = ${JSON.stringify(view)};
     const app = document.querySelector('#app');
-    const rail = document.querySelector('#rail');
-    const vis = el => el && el.offsetParent !== null && el.getBoundingClientRect().height > 5;
+    const vis = el => !!el && el.offsetParent !== null &&
+                      el.getBoundingClientRect().height > 5;
+    const q = s => document.querySelector(s);
     let main = 'none';
-    if (${JSON.stringify(view)} === 'terminal') main = 'term ' + Math.round(document.querySelector('#term').getBoundingClientRect().height) + 'px';
-    if (${JSON.stringify(view)} === 'graph') main = 'canvas ' + Math.round(document.querySelector('#gcv').getBoundingClientRect().height) + 'px';
-    if (${JSON.stringify(view)} === 'tasks') main = 'panel ' + Math.round(document.querySelector('#side').getBoundingClientRect().width) + 'px';
+    if (view === 'terminal') main = 'term ' + Math.round(q('#term').getBoundingClientRect().height) + 'px';
+    if (view === 'graph')    main = 'canvas ' + Math.round(q('#gcv').getBoundingClientRect().height) + 'px';
+    if (view === 'tasks')    main = 'panel ' + Math.round(q('#side').getBoundingClientRect().width) + 'px';
+    if (view === 'browser')  main = 'web ' + Math.round(q('#pgweb').getBoundingClientRect().height) + 'px';
+
+    // What must NOT be there.
+    const bleed = [];
+    if (vis(q('#rail'))) bleed.push('rail');
+    if (vis(q('#composer'))) bleed.push('composer');
+    // The chat empty-state: heading, tagline and suggestion chips. This is the
+    // thing that was showing up inside the terminal window.
+    if (view !== 'tasks' && view !== 'log' && vis(q('#welcome'))) bleed.push('chat-welcome');
+    if (view !== 'terminal' && vis(q('#term'))) bleed.push('terminal-strip');
+
     return 'solo=' + app.classList.contains('solo') +
-           ' rail hidden=' + !vis(rail) +
-           ' | ' + main + ' | title=' + JSON.stringify(document.title);
+           ' | ' + main +
+           ' | bleed=' + (bleed.length ? bleed.join(',') : 'none') +
+           ' | title=' + JSON.stringify(document.title);
   `));
 }
+// Back to the real viewport, or every later measurement is taken at 1000px.
+await send('Emulation.clearDeviceMetricsOverride');
 await evaluate("location.href = '/';");
 await sleep(2500);
 log('');

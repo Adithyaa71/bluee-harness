@@ -22,6 +22,10 @@ use crate::eventlog::{Event, EventKind, EventLog};
 use crate::mcp::McpRegistry;
 use crate::memory::{Chunk, VectorStore};
 
+/// How many texts to embed at once. See the note at the call site: this is a
+/// memory ceiling, not a throughput tuning knob.
+const EMBED_BATCH: usize = 32;
+
 #[derive(Debug, Default)]
 pub struct ReduceStats {
     pub sessions: usize,
@@ -33,6 +37,9 @@ pub struct ReduceStats {
     pub code_files: usize,
     pub code_chunks: usize,
     pub code_symbols: usize,
+    /// Remembered facts (§ src/facts.rs), and how many are now history.
+    pub facts: usize,
+    pub facts_closed: usize,
 }
 
 /// Facts we can extract from the log deterministically.
@@ -120,7 +127,17 @@ pub async fn run(cfg: &Config) -> Result<ReduceStats> {
 
         if !chunks.is_empty() {
             let texts: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
-            let embeddings = model.embed(texts, None).context("embedding chunks")?;
+            // Batch explicitly. `None` hands the whole corpus to the model in
+            // one go, and a transformer's attention is O(seq^2) PER ITEM - so
+            // ~1,400 code chunks at 512 tokens materialises tens of GB of
+            // attention before a single vector comes back. Measured: 9 GB
+            // resident climbing past 16 GB on a 32 GB machine, with no rows
+            // inserted, which reads as a hang rather than as memory pressure.
+            // 32 keeps it flat; the model is small, so the throughput cost of
+            // batching is not the bottleneck here.
+            let embeddings = model
+                .embed(texts, Some(EMBED_BATCH))
+                .context("embedding chunks")?;
             for (chunk, embedding) in chunks.iter().zip(embeddings) {
                 store.insert(chunk, &embedding)?;
             }
@@ -128,7 +145,9 @@ pub async fn run(cfg: &Config) -> Result<ReduceStats> {
 
         if !code.chunks.is_empty() {
             let texts: Vec<&str> = code.chunks.iter().map(|c| c.text.as_str()).collect();
-            let embeddings = model.embed(texts, None).context("embedding source")?;
+            let embeddings = model
+                .embed(texts, Some(EMBED_BATCH))
+                .context("embedding source")?;
             for (chunk, embedding) in code.chunks.iter().zip(embeddings) {
                 store.insert_scoped(chunk, &embedding, crate::codemap::SCOPE)?;
             }
@@ -223,6 +242,16 @@ pub async fn run(cfg: &Config) -> Result<ReduceStats> {
                 }),
             )
             .await?;
+    }
+
+    // Facts last, from the same log lines the live path wrote them from, with
+    // the same supersession rules - so a rebuild reproduces the live graph,
+    // and a fact whose session was deleted takes its "closed" marks with it.
+    let remembered = crate::facts::derive(&all);
+    stats.facts = remembered.len();
+    stats.facts_closed = remembered.iter().filter(|f| !f.valid_to.is_empty()).count();
+    for f in &remembered {
+        crate::facts::write(&registry, f).await?;
     }
 
     registry.shutdown().await;
@@ -352,6 +381,40 @@ fn truncate(s: &str, max: usize) -> String {
     }
     let head: String = s.chars().take(max).collect();
     format!("{head}…")
+}
+
+/// One session's graph, derived on the spot from its log, without writing
+/// anything. The stored graph only learns a conversation when `reduce` runs,
+/// so the Memory page's "graph of this session" was empty for exactly the
+/// session you were in. This runs the reducer's own extraction (and the
+/// facts rules) over that one log, so what it shows is what `reduce` will
+/// store - nothing is invented for display.
+///
+/// Returns (entities as (name, kind), relations as (source, target, type, weight)).
+pub fn live_session_graph(
+    events: &[Event],
+) -> (Vec<(String, String)>, Vec<(String, String, String, i64)>) {
+    let mut facts = GraphFacts::default();
+    extract_graph(events, &mut facts);
+    let mut nodes: Vec<(String, String)> =
+        facts.entities.iter().map(|(n, (k, _))| (n.clone(), k.clone())).collect();
+    let mut edges: Vec<(String, String, String, i64)> = facts
+        .relations
+        .iter()
+        .map(|((s, t, r, _), w)| (s.clone(), t.clone(), r.clone(), *w))
+        .collect();
+    for f in crate::facts::derive(&[events.to_vec()]) {
+        if !f.valid_to.is_empty() {
+            continue; // the session view shows what is true now
+        }
+        for (n, k) in [(&f.subject, &f.subject_kind), (&f.object, &f.object_kind)] {
+            if !nodes.iter().any(|(x, _)| x == n) {
+                nodes.push((n.clone(), if k.is_empty() { "unknown".into() } else { k.clone() }));
+            }
+        }
+        edges.push((f.subject.clone(), f.object.clone(), f.relation.clone(), 1));
+    }
+    (nodes, edges)
 }
 
 /// Turn one session's events into entities and relations.

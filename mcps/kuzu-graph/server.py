@@ -87,9 +87,18 @@ def _connect() -> kuzu.Connection:
     )
     # Existing databases predate these columns. Adding them is idempotent and
     # far kinder than asking anyone to delete their graph and rebuild.
+    # valid_from / valid_to / seq / note are the bi-temporal fact columns
+    # (RESEARCH.md 1b). Structural edges leave them empty; a *fact* edge sets
+    # valid_from, and gets valid_to when a later fact supersedes it - the old
+    # fact is closed, never deleted, so "what was true in March" stays
+    # answerable. `ts` doubles as when it was learned (ingested).
     for table, column, decl in (
         ("Entity", "origin", "STRING"),
         ("Rel", "session", "STRING"),
+        ("Rel", "valid_from", "STRING"),
+        ("Rel", "valid_to", "STRING"),
+        ("Rel", "seq", "INT64"),
+        ("Rel", "note", "STRING"),
     ):
         try:
             _conn.execute(f"ALTER TABLE {table} ADD IF NOT EXISTS {column} {decl}")
@@ -118,17 +127,33 @@ def _rows(result) -> list[dict[str, Any]]:
 @server.tool()
 def query_graph(
     entity: str,
-    relation: str | None = None,
+    # NOT `str | None`. That emits `anyOf: [string, null]` WITH `default: null`
+    # and no `required` entry - so the field can be left out or sent as `null`,
+    # two encodings of one meaning. Providers that compile the toolset into a
+    # constrained-decoding grammar reject exactly that, and the whole turn 400s
+    # on a tool the model never even called:
+    #   400 ... grammar rejected: tool "kuzu_graph__query_graph" parameter
+    #   schema: parameter "relation": more than one JSON reading of the same
+    #   emitted value
+    # An empty string is already falsy, so the filter below is unchanged, and
+    # this matches `upsert_relation`'s `session` in this same file.
+    relation: str = "",
     direction: str = "both",
     limit: int = 50,
+    include_history: bool = False,
 ) -> dict[str, Any]:
-    """Find what an entity is connected to.
+    """Find what an entity is connected to, including remembered facts.
+
+    Facts carry `valid_from` and, once superseded, `valid_to`. By default only
+    what is true NOW is returned; set include_history to also see facts that
+    stopped being true, which is how "who did he report to before" is answered.
 
     Args:
-        entity: Entity name to start from, e.g. "vscode".
-        relation: Optional relation filter, e.g. "used_with". Omit for all.
+        entity: Entity name to start from, e.g. "Ravi" or "vscode".
+        relation: Optional relation filter, e.g. "works_at". Empty for all.
         direction: "out", "in", or "both" (default).
         limit: Max edges to return.
+        include_history: Also return facts that are no longer true.
     """
     conn = _connect()
     params: dict[str, Any] = {"name": entity, "limit": limit}
@@ -137,6 +162,8 @@ def query_graph(
     if relation:
         rel_filter = "AND r.type = $relation"
         params["relation"] = relation
+    if not include_history:
+        rel_filter += " AND (r.valid_to IS NULL OR r.valid_to = '')"
 
     results: list[dict[str, Any]] = []
 
@@ -146,14 +173,15 @@ def query_graph(
             MATCH (a:Entity)-[r:Rel]->(b:Entity)
             WHERE a.name = $name {rel_filter}
             RETURN b.name AS other, b.kind AS other_kind,
-                   r.type AS relation, r.weight AS weight
+                   r.type AS relation, r.weight AS weight,
+                   r.valid_from AS valid_from, r.valid_to AS valid_to, r.note AS note
             ORDER BY r.weight DESC LIMIT $limit
             """,
             parameters=params,
         )
         for row in _rows(res):
             row["direction"] = "out"
-            results.append(row)
+            results.append(_tidy(row))
 
     if direction in ("in", "both"):
         res = conn.execute(
@@ -161,16 +189,126 @@ def query_graph(
             MATCH (a:Entity)<-[r:Rel]-(b:Entity)
             WHERE a.name = $name {rel_filter}
             RETURN b.name AS other, b.kind AS other_kind,
-                   r.type AS relation, r.weight AS weight
+                   r.type AS relation, r.weight AS weight,
+                   r.valid_from AS valid_from, r.valid_to AS valid_to, r.note AS note
             ORDER BY r.weight DESC LIMIT $limit
             """,
             parameters=params,
         )
         for row in _rows(res):
             row["direction"] = "in"
-            results.append(row)
+            results.append(_tidy(row))
 
     return {"entity": entity, "count": len(results), "edges": results}
+
+
+def _tidy(row: dict[str, Any]) -> dict[str, Any]:
+    """Drop the empty fact columns from structural edges - noise in a prompt."""
+    return {k: v for k, v in row.items() if v not in (None, "")}
+
+
+@server.tool()
+def record_fact(
+    source: str,
+    target: str,
+    relation: str,
+    source_kind: str = "unknown",
+    target_kind: str = "unknown",
+    valid_from: str = "",
+    valid_to: str = "",
+    session: str = "",
+    seq: int = 0,
+    note: str = "",
+) -> dict[str, Any]:
+    """Store one fact as its own edge (not merged by weight like structural
+    edges), with when it became true and, if already known, when it stopped.
+
+    Written only by the harness - from a logged `remember` call, live or during
+    a rebuild - never by the model directly. `session` + `seq` point at the
+    log line that is the evidence for it.
+    """
+    conn = _connect()
+    ts = _now()
+    for n, k in ((source, source_kind), (target, target_kind)):
+        conn.execute(
+            """
+            MERGE (e:Entity {name: $name})
+            ON CREATE SET e.kind = $kind, e.first_seen = $ts, e.origin = 'fact'
+            """,
+            parameters={"name": n, "kind": k or "unknown", "ts": ts},
+        )
+        # A fact can say what kind something is better than a structural edge
+        # guessed it: upgrade 'unknown' when a fact names the kind.
+        if k and k != "unknown":
+            conn.execute(
+                "MATCH (e:Entity {name: $name}) WHERE e.kind = 'unknown' SET e.kind = $kind",
+                parameters={"name": n, "kind": k},
+            )
+    conn.execute(
+        """
+        MATCH (a:Entity), (b:Entity)
+        WHERE a.name = $s AND b.name = $t
+        CREATE (a)-[:Rel {type: $rel, weight: 1, ts: $ts, session: $sess,
+                          valid_from: $vf, valid_to: $vt, seq: $seq, note: $note}]->(b)
+        """,
+        parameters={"s": source, "t": target, "rel": relation, "ts": ts, "sess": session,
+                    "vf": valid_from or ts, "vt": valid_to, "seq": seq, "note": note},
+    )
+    return {"ok": True, "source": source, "relation": relation, "target": target}
+
+
+@server.tool()
+def close_facts(
+    source: str,
+    relation: str,
+    valid_to: str,
+    keep_target: str = "",
+    only_target: str = "",
+) -> dict[str, Any]:
+    """Mark currently-true facts `source -relation-> *` as no longer true from
+    `valid_to` - all of them except `keep_target` (a new value replaced the
+    old), or just `only_target` (one fact ended). Closed, not deleted: the
+    history is the point.
+    """
+    conn = _connect()
+    which = "AND b.name = $only" if only_target else "AND b.name <> $keep"
+    rows = _rows(conn.execute(
+        f"""
+        MATCH (a:Entity)-[r:Rel]->(b:Entity)
+        WHERE a.name = $s AND r.type = $rel AND r.valid_from IS NOT NULL
+          AND r.valid_from <> '' AND (r.valid_to IS NULL OR r.valid_to = '')
+          {which}
+        SET r.valid_to = $vt
+        RETURN b.name AS target
+        """,
+        parameters={"s": source, "rel": relation, "vt": valid_to, "keep": keep_target,
+                    "only": only_target},
+    ))
+    return {"ok": True, "closed": [r["target"] for r in rows]}
+
+
+@server.tool()
+def facts(include_history: bool = False, limit: int = 500) -> dict[str, Any]:
+    """Every remembered fact (not the structural tool/code edges), newest first.
+
+    Args:
+        include_history: Also list facts that are no longer true.
+        limit: Max rows.
+    """
+    conn = _connect()
+    cur = "" if include_history else "AND (r.valid_to IS NULL OR r.valid_to = '')"
+    rows = _rows(conn.execute(
+        f"""
+        MATCH (a:Entity)-[r:Rel]->(b:Entity)
+        WHERE r.valid_from IS NOT NULL AND r.valid_from <> '' {cur}
+        RETURN a.name AS subject, a.kind AS subject_kind, r.type AS relation,
+               b.name AS object, b.kind AS object_kind, r.valid_from AS valid_from,
+               r.valid_to AS valid_to, r.note AS note, r.session AS session
+        ORDER BY r.valid_from DESC LIMIT $limit
+        """,
+        parameters={"limit": limit},
+    ))
+    return {"count": len(rows), "facts": [_tidy(r) for r in rows]}
 
 
 @server.tool()
@@ -291,7 +429,7 @@ def drop_session(session: str) -> dict[str, Any]:
         """
         MATCH (e:Entity)
         WHERE NOT EXISTS { MATCH (e)-[:Rel]-() }
-          AND (e.origin IS NULL OR e.origin = 'log')
+          AND (e.origin IS NULL OR e.origin = 'log' OR e.origin = 'fact')
         DELETE e
         """
     )

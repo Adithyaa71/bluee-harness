@@ -178,23 +178,23 @@ def nyx_status() -> dict[str, Any]:
 # ---------------------------------------------------------------- analysis
 
 @server.tool()
-def file_symbols(file: str | None = None) -> dict[str, Any]:
+def file_symbols(file: str = "") -> dict[str, Any]:
     """Symbols declared in a file, via its language server.
 
     Args:
         file: Absolute path. Omitted means the buffer currently open.
     """
-    return _call("analysis", "get_file_symbols", file=file)
+    return _call("analysis", "get_file_symbols", file=file or None)
 
 
 @server.tool()
-def file_diagnostics(file: str | None = None) -> dict[str, Any]:
+def file_diagnostics(file: str = "") -> dict[str, Any]:
     """Errors and warnings the language server reports for a file.
 
     Args:
         file: Absolute path. Omitted means the current buffer.
     """
-    return _call("analysis", "get_file_diagnostics", file=file)
+    return _call("analysis", "get_file_diagnostics", file=file or None)
 
 
 @server.tool()
@@ -208,7 +208,7 @@ def module_structure(file: str) -> dict[str, Any]:
 
 
 @server.tool()
-def diagnostics_summary(file: str | None = None) -> dict[str, Any]:
+def diagnostics_summary(file: str = "") -> dict[str, Any]:
     """Counts of errors and warnings plus the top messages.
 
     Cheaper than reading every diagnostic when you only need to know whether a
@@ -217,7 +217,7 @@ def diagnostics_summary(file: str | None = None) -> dict[str, Any]:
     Args:
         file: Absolute path. Omitted means the current buffer.
     """
-    return _call("analysis", "summarize_diagnostics", file=file)
+    return _call("analysis", "summarize_diagnostics", file=file or None)
 
 
 @server.tool()
@@ -229,25 +229,25 @@ def current_context() -> dict[str, Any]:
 # ---------------------------------------------------------------- search
 
 @server.tool()
-def search_project(pattern: str, path: str | None = None) -> dict[str, Any]:
+def search_project(pattern: str, path: str = "") -> dict[str, Any]:
     """Text search across the project, with file and line for each hit.
 
     Args:
         pattern: What to search for.
         path: Restrict to this directory. Omitted means the whole project.
     """
-    return _call("search", "search_project", pattern=pattern, path=path)
+    return _call("search", "search_project", pattern=pattern, path=path or None)
 
 
 @server.tool()
-def find_files_by_name(query: str, path: str | None = None) -> dict[str, Any]:
+def find_files_by_name(query: str, path: str = "") -> dict[str, Any]:
     """Find files whose name matches a query.
 
     Args:
         query: Part of a filename.
         path: Restrict to this directory.
     """
-    return _call("search", "find_files_by_name", query=query, path=path)
+    return _call("search", "find_files_by_name", query=query, path=path or None)
 
 
 @server.tool()
@@ -264,24 +264,24 @@ def find_symbol_in_workspace(query: str) -> dict[str, Any]:
 
 
 @server.tool()
-def search_in_file(pattern: str, file: str | None = None) -> dict[str, Any]:
+def search_in_file(pattern: str, file: str = "") -> dict[str, Any]:
     """Search within a single file.
 
     Args:
         pattern: What to search for.
         file: Absolute path. Omitted means the current buffer.
     """
-    return _call("search", "search_in_file", pattern=pattern, file=file)
+    return _call("search", "search_in_file", pattern=pattern, file=file or None)
 
 
 @server.tool()
-def find_todos(path: str | None = None) -> dict[str, Any]:
+def find_todos(path: str = "") -> dict[str, Any]:
     """Every TODO and FIXME left in the project.
 
     Args:
         path: Restrict to this directory.
     """
-    return _call("search", "find_todos", path=path)
+    return _call("search", "find_todos", path=path or None)
 
 
 # ---------------------------------------------------------------- navigation
@@ -297,14 +297,14 @@ def open_file(path: str) -> dict[str, Any]:
 
 
 @server.tool()
-def goto_line(line: int, file: str | None = None) -> dict[str, Any]:
+def goto_line(line: int, file: str = "") -> dict[str, Any]:
     """Move the cursor to a line, opening the file first if given.
 
     Args:
         line: 1-based line number.
         file: Absolute path.
     """
-    return _call("navigation", "goto_line", line=line, file=file)
+    return _call("navigation", "goto_line", line=line, file=file or None)
 
 
 @server.tool()
@@ -339,7 +339,7 @@ def safe_edit(file: str, start_line: int, end_line: int, new_content: str) -> di
 
 
 @server.tool()
-def replace_in_file(pattern: str, replacement: str, file: str | None = None) -> dict[str, Any]:
+def replace_in_file(pattern: str, replacement: str, file: str = "") -> dict[str, Any]:
     """Search and replace within a file. **This writes to disk.**
 
     Args:
@@ -348,11 +348,11 @@ def replace_in_file(pattern: str, replacement: str, file: str | None = None) -> 
         file: Absolute path. Omitted means the current buffer.
     """
     return _call("refactor", "replace_in_file", pattern=pattern,
-                 replacement=replacement, file=file)
+                 replacement=replacement, file=file or None)
 
 
 @server.tool()
-def insert_lines_after(line: int, new_content: str, file: str | None = None) -> dict[str, Any]:
+def insert_lines_after(line: int, new_content: str, file: str = "") -> dict[str, Any]:
     """Insert text after a line. **This writes to disk.**
 
     Args:
@@ -361,11 +361,11 @@ def insert_lines_after(line: int, new_content: str, file: str | None = None) -> 
         file: Absolute path. Omitted means the current buffer.
     """
     return _call("refactor", "insert_lines_after", line=line,
-                 new_content=new_content, file=file)
+                 new_content=new_content, file=file or None)
 
 
 @server.tool()
-def delete_lines(start_line: int, end_line: int, file: str | None = None) -> dict[str, Any]:
+def delete_lines(start_line: int, end_line: int, file: str = "") -> dict[str, Any]:
     """Delete a line range. **This writes to disk.**
 
     Args:
@@ -374,17 +374,17 @@ def delete_lines(start_line: int, end_line: int, file: str | None = None) -> dic
         file: Absolute path. Omitted means the current buffer.
     """
     return _call("refactor", "delete_lines", start_line=start_line,
-                 end_line=end_line, file=file)
+                 end_line=end_line, file=file or None)
 
 
 @server.tool()
-def format_file(file: str | None = None) -> dict[str, Any]:
+def format_file(file: str = "") -> dict[str, Any]:
     """Run the configured formatter over a file. **This writes to disk.**
 
     Args:
         file: Absolute path. Omitted means the current buffer.
     """
-    return _call("refactor", "format_file", file=file)
+    return _call("refactor", "format_file", file=file or None)
 
 
 if __name__ == "__main__":

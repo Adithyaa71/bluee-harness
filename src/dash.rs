@@ -51,6 +51,14 @@ struct AppState {
     /// out and on a config flag only Adithya may set - so in practice the
     /// panel never worked.
     browser: crate::browser::Browser,
+    /// Local speech in and out (§ src/voice.rs). Off until switched on, so the
+    /// models cost nothing - no process, no VRAM - until someone wants them.
+    voice: crate::voice::Voice,
+    /// Sub-agents the main conversation can start (§ src/subagents.rs).
+    /// Only the dashboard's agent gets these: the CLI and the loops do not,
+    /// because a scheduled job that can spawn agents unattended is a cost
+    /// hazard nobody asked for.
+    subagents: Arc<crate::subagents::SubAgents>,
 }
 
 type Shared = Arc<AppState>;
@@ -89,17 +97,54 @@ pub async fn serve_on(cfg: Config, std_listener: std::net::TcpListener) -> Resul
 
     let port = std_listener.local_addr()?.port();
     let cfg_vision_dir = cfg.data_dir.clone();
+    // Cloned before the struct literal moves the originals in.
+    let cfg_for_subs = cfg.clone();
+    let registry_for_subs = Arc::new(registry);
+    let vision_for_subs = Arc::new(VisionState::load(&cfg_vision_dir));
     let state: Shared = Arc::new(AppState {
         cfg,
-        registry: Arc::new(registry),
+        registry: registry_for_subs.clone(),
         embedder: Mutex::new(None),
         agent: Mutex::new(None),
         pty: PtyManager::default(),
-        vision: Arc::new(VisionState::load(&cfg_vision_dir)),
+        vision: vision_for_subs.clone(),
         workspace: Mutex::new("playground".into()),
         port,
         browser: crate::browser::Browser::new(&cfg_vision_dir),
+        voice: crate::voice::Voice::new(&cfg_vision_dir),
+        subagents: Arc::new(crate::subagents::SubAgents::new(
+            &cfg_for_subs, registry_for_subs, vision_for_subs)),
     });
+
+    // The loop scheduler (§ src/loops.rs) rides along with the server rather
+    // than being its own process: it needs the same MCP registry and the same
+    // config, and a second process would mean a second set of connections to
+    // the same tool servers. It spends money unattended, so everything that
+    // bounds it lives in the loop files themselves.
+    {
+        let cfg = state.cfg.clone();
+        let registry = state.registry.clone();
+        let vision = state.vision.clone();
+        tokio::spawn(async move {
+            crate::loops::run_scheduler(cfg, registry, vision).await;
+        });
+    }
+
+    /* Despawn sweeper. Only touches agents that set their own timer - the
+       default is never, so an agent you forgot about is still there when you
+       come back. One minute is fine granularity for a timeout measured in
+       minutes, and it costs a lock on an empty map otherwise. */
+    {
+        let subs = state.subagents.clone();
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+                for id in subs.sweep() {
+                    println!("sub-agent {id}: idle past its timer, despawned");
+                }
+            }
+        });
+    }
 
     let app = Router::new()
         .route("/", get(index))
@@ -110,14 +155,21 @@ pub async fn serve_on(cfg: Config, std_listener: std::net::TcpListener) -> Resul
         .route("/api/sessions", get(sessions))
         .route("/api/events", get(events))
         .route("/api/search", get(search))
+        .route("/api/memory", get(memory_browse))
+        .route("/api/facts", get(facts_list))
         .route("/api/graph", get(graph))
+        .route("/api/agents", get(agents_list).post(agents_spawn))
+        .route("/api/agents/ask", post(agents_ask))
+        .route("/api/agents/stop", post(agents_stop))
+        .route("/api/agents/despawn", post(agents_despawn))
+        .route("/api/agents/resume", post(agents_resume))
         .route("/api/tools", get(tools))
         .route("/api/session", get(current_session))
         .route("/api/tasks", get(tasks))
         .route("/api/session/open", post(open_session))
         .route("/api/session/delete", post(delete_session))
         .route("/api/session/title", post(set_session_title))
-        .route("/api/models", get(models))
+        .route("/api/models", post(models))
         .route("/api/artifacts", get(list_artifacts))
         .route("/api/files", get(list_files))
         .route("/api/file", get(read_file))
@@ -136,7 +188,15 @@ pub async fn serve_on(cfg: Config, std_listener: std::net::TcpListener) -> Resul
         .route("/api/persona", get(get_persona).post(save_persona))
         .route("/api/providers", get(get_providers).post(save_providers))
         .route("/api/mcp", get(get_mcp).post(save_mcp))
+        .route("/api/mcp/reconnect", post(reconnect_mcp))
         .route("/api/vision", get(get_vision).post(set_vision))
+        .route("/api/voice", get(get_voice).post(set_voice))
+        .route("/api/voice/health", get(voice_health))
+        .route("/api/voice/voices", get(voice_voices))
+        .route("/api/voice/unload", post(voice_unload))
+        .route("/api/stt", post(stt))
+        .route("/api/tts", post(tts))
+        .route("/api/upload", post(upload))
         .route("/api/skills", get(get_skills).post(save_skill))
         .route("/api/skills/delete", post(delete_skill))
         .route("/ws/terminal", get(terminal_ws))
@@ -261,7 +321,11 @@ async fn chat_stream(mut socket: WebSocket, s: Shared) {
             let mut guard = state.agent.lock().await;
             if guard.is_none() {
                 match Agent::new(&state.cfg, state.registry.clone(), state.vision.clone()).await {
-                    Ok(a) => *guard = Some(a),
+                    Ok(mut a) => {
+                        // Only this agent gets sub-agent tools.
+                        a.set_subagents(state.subagents.clone());
+                        *guard = Some(a);
+                    }
                     Err(e) => {
                         let _ = tx.send(crate::agent::TurnEvent::Error {
                             message: format!("{e:#}"),
@@ -397,9 +461,9 @@ async fn run_command(s: &Shared, line: &str) -> String {
         }
 
         "mcp" => {
-            let mut by: std::collections::BTreeMap<&str, usize> = Default::default();
+            let mut by: std::collections::BTreeMap<String, usize> = Default::default();
             for t in s.registry.tools() {
-                *by.entry(t.server.as_str()).or_insert(0) += 1;
+                *by.entry(t.server.clone()).or_insert(0) += 1;
             }
             if by.is_empty() {
                 return "No MCP servers connected.".into();
@@ -791,12 +855,24 @@ async fn set_vision(
 /// if it cannot tell you which.
 async fn get_mcp(State(s): State<Shared>) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let specs = crate::mcp::load_server_specs(&s.cfg.mcp_config).map_err(fail)?;
-    let live: std::collections::BTreeSet<&str> = s.registry.servers().into_iter().collect();
+    let live: std::collections::BTreeSet<String> = s.registry.servers().into_iter().collect();
 
-    let mut counts: std::collections::BTreeMap<&str, usize> = Default::default();
+    let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
     for t in s.registry.tools() {
-        *counts.entry(t.server.as_str()).or_insert(0) += 1;
+        *counts.entry(t.server.clone()).or_insert(0) += 1;
     }
+
+    /* Why each one is not connected. These used to be printed to stderr once
+       at startup and kept nowhere, which means `harness app` - a window with no
+       console - threw the reason away entirely. A run where every server failed
+       then looked exactly like an empty graph (§55). */
+    let failures = s.registry.failures();
+    let reason = |name: &str| -> Option<String> {
+        failures
+            .iter()
+            .find(|f| f.starts_with(&format!("{name}: ")))
+            .map(|f| f[name.len() + 2..].to_string())
+    };
 
     let servers: Vec<Value> = specs
         .iter()
@@ -807,8 +883,9 @@ async fn get_mcp(State(s): State<Shared>) -> Result<Json<Value>, (StatusCode, Js
                 "args": spec.args,
                 "env": spec.env,
                 "enabled": spec.enabled,
-                "connected": live.contains(name.as_str()),
-                "tools": counts.get(name.as_str()).copied().unwrap_or(0),
+                "connected": live.contains(name),
+                "tools": counts.get(name).copied().unwrap_or(0),
+                "error": reason(name),
                 "note": spec.extra.get("$comment"),
             })
         })
@@ -817,6 +894,8 @@ async fn get_mcp(State(s): State<Shared>) -> Result<Json<Value>, (StatusCode, Js
     Ok(Json(json!({
         "file": s.cfg.mcp_config.display().to_string(),
         "servers": servers,
+        "connected": live.len(),
+        "failures": failures,
         "note": "Changes are written to the file immediately but only take effect on restart - \
                  servers are launched once at startup."
     })))
@@ -836,6 +915,37 @@ async fn save_mcp(
     Ok(Json(json!({
         "ok": true, "servers": n,
         "note": "Saved. Restart bluee for it to connect (or stop connecting to) these."
+    })))
+}
+
+/// Start the tool servers again, without restarting bluee.
+///
+/// Worth having because the alternative was restarting the whole app, which
+/// ends the conversation you are in the middle of - and the one time this
+/// mattered, every server had failed at startup and the only visible symptom
+/// was an empty graph. The registry swaps its connections in place, so the
+/// live agent, every sub-agent and the loop scheduler pick the new servers up
+/// without being rebuilt; a turn already running keeps the set it started with.
+async fn reconnect_mcp(State(s): State<Shared>) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let specs = crate::mcp::load_server_specs(&s.cfg.mcp_config).map_err(fail)?;
+    let failures = s.registry.reconnect(&specs).await;
+    let servers = s.registry.servers();
+    let tools = s.registry.tools().len();
+
+    // The live agent caches its tool list, so it has to be told. This waits if
+    // a turn is in flight - the agent lock is held for a whole turn - which is
+    // the right way round: the running turn finishes with the toolset it began
+    // with, and the next one gets the new servers.
+    if let Some(agent) = s.agent.lock().await.as_mut() {
+        agent.refresh_tools();
+    }
+
+    Ok(Json(json!({
+        "ok": failures.is_empty(),
+        "connected": servers.len(),
+        "servers": servers,
+        "tools": tools,
+        "failures": failures,
     })))
 }
 
@@ -1331,6 +1441,141 @@ async fn browser_act(
     Ok(Json(out.map_err(fail)?))
 }
 
+/* ---------- voice: local STT and TTS (§ src/voice.rs) ----------
+   There is no API key here and no endpoint to point at, because none of this
+   leaves the machine. What the page needs to know instead is what is installed
+   and which device it will land on, and only the worker can answer that - so
+   `/api/voice/health` asks it rather than guessing from this side. */
+
+async fn get_voice(State(s): State<Shared>) -> impl IntoResponse {
+    let cfg = s.voice.config();
+    Json(json!({
+        "config": cfg,
+        "piper_voices": s.voice.local_piper_voices(),
+        "model_dir": s.cfg.data_dir.join("voice-models").display().to_string(),
+        "note": "All local. Nothing here is sent anywhere - there is no key to set                  because there is no service to call."
+    }))
+}
+
+#[derive(Deserialize)]
+struct VoiceSave {
+    config: crate::voice::VoiceConfig,
+}
+
+async fn set_voice(
+    State(s): State<Shared>,
+    Json(b): Json<VoiceSave>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    b.config.save(&s.cfg.data_dir).map_err(fail)?;
+    // The worker re-reads the file on mtime change, so most edits need nothing
+    // more. Switching voice off is the exception: stop the process so the
+    // models actually leave memory rather than idling with the weights loaded.
+    if !b.config.enabled {
+        s.voice.stop();
+    }
+    Ok(Json(json!({ "ok": true, "running": s.voice.running() })))
+}
+
+async fn voice_health(State(s): State<Shared>) -> impl IntoResponse {
+    Json(s.voice.health().await)
+}
+
+async fn voice_voices(State(s): State<Shared>) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    Ok(Json(s.voice.voices().await.map_err(fail)?))
+}
+
+async fn voice_unload(State(s): State<Shared>) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    s.voice.unload().await.map_err(fail)?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+/// Microphone audio in, text out. The body is the raw recording exactly as the
+/// browser produced it; `ext` says which container so the decoder is not left
+/// sniffing.
+async fn stt(
+    State(s): State<Shared>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let ext = headers
+        .get("x-audio-ext")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("webm")
+        .to_string();
+    let out = s
+        .voice
+        .transcribe(body.to_vec(), &ext)
+        .await
+        .map_err(fail)?;
+    Ok(Json(out))
+}
+
+#[derive(Deserialize)]
+struct SpeakReq {
+    text: String,
+    #[serde(flatten)]
+    over: Value,
+}
+
+/// Text in, WAV out. Returned as real audio rather than base64 in JSON: the
+/// page hands it straight to an <audio> element, and a minute of speech as a
+/// data: URI is megabytes of string for no reason.
+async fn tts(
+    State(s): State<Shared>,
+    Json(b): Json<SpeakReq>,
+) -> Result<axum::response::Response, (StatusCode, Json<Value>)> {
+    let wav = s.voice.speak(&b.text, b.over).await.map_err(fail)?;
+    Ok((
+        [
+            (axum::http::header::CONTENT_TYPE, "audio/wav"),
+            (axum::http::header::CACHE_CONTROL, "no-store"),
+        ],
+        wav,
+    )
+        .into_response())
+}
+
+#[derive(Deserialize)]
+struct UploadQuery {
+    name: Option<String>,
+}
+
+/// Composer attachments that aren't text (images, PDFs, anything binary) land
+/// here instead of being inlined into the prompt as a string. Text files never
+/// hit this route - the page reads those client-side and sends their content
+/// directly, same as before this existed.
+///
+/// Only the basename of `name` ever reaches disk, so a crafted query value
+/// can't escape `data/attachments/<id>/` - there is no directory component to
+/// escape with, since one is never taken from the input.
+async fn upload(
+    State(s): State<Shared>,
+    Query(q): Query<UploadQuery>,
+    body: axum::body::Bytes,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    const MAX: usize = 50 * 1024 * 1024;
+    if body.len() > MAX {
+        return Err(fail("file too large (50MB limit)"));
+    }
+    let raw = q.name.unwrap_or_else(|| "file".to_string());
+    let name = std::path::Path::new(&raw)
+        .file_name()
+        .and_then(|s| s.to_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or("file")
+        .to_string();
+    let id = uuid::Uuid::new_v4().to_string();
+    let dir = s.cfg.data_dir.join("attachments").join(&id);
+    tokio::fs::create_dir_all(&dir).await.map_err(fail)?;
+    let path = dir.join(&name);
+    tokio::fs::write(&path, &body).await.map_err(fail)?;
+    Ok(Json(json!({
+        "name": name,
+        "path": path.display().to_string(),
+        "bytes": body.len(),
+    })))
+}
+
 async fn list_roots(State(s): State<Shared>) -> impl IntoResponse {
     let roots: Vec<Value> = crate::roots::load(&s.cfg)
         .into_iter()
@@ -1454,14 +1699,59 @@ async fn set_session_title(
 /// What the endpoint says it offers, including each model's real context
 /// length where it publishes one - so the Providers page can fill that in
 /// rather than making you look it up.
-async fn models(State(s): State<Shared>) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let chain = crate::providers::ProviderChain::build(&s.cfg).map_err(fail)?;
-    let list = chain
-        .primary_client()
-        .list_models_detailed()
-        .await
-        .map_err(fail)?;
-    Ok(Json(json!({ "count": list.len(), "models": list })))
+/// Which endpoint `detect` should ask. Sent by the Providers page from the row
+/// the button was pressed on.
+#[derive(Deserialize, Default)]
+struct ModelsReq {
+    #[serde(default)]
+    base_url: String,
+    /// May arrive masked, exactly like on save - masked means "the key already
+    /// stored under this name", never "no key".
+    #[serde(default)]
+    api_key: String,
+    #[serde(default)]
+    name: String,
+}
+
+/// List the models an endpoint offers.
+///
+/// **This must ask the provider the button was pressed on, not the saved
+/// default.** It used to use `chain.primary_client()`, so pressing `detect` on
+/// a newly added OpenRouter row queried aicredits.in instead and reported that
+/// OpenRouter "does not offer" a model OpenRouter plainly does. The count in
+/// the error message was the giveaway: 412 is aicredits.in's catalogue,
+/// OpenRouter's is 447. A row that has not been saved yet has no entry in the
+/// chain at all, which is exactly the case you are in while adding one.
+async fn models(
+    State(s): State<Shared>,
+    body: Option<Json<ModelsReq>>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let req = body.map(|Json(b)| b).unwrap_or_default();
+
+    let client = if req.base_url.is_empty() {
+        // No row supplied (the GET form): fall back to the saved default.
+        let chain = crate::providers::ProviderChain::build(&s.cfg).map_err(fail)?;
+        chain.primary_client().clone()
+    } else {
+        let key = if req.api_key.is_empty() || req.api_key.contains('\u{2022}') {
+            crate::providers::load(&s.cfg)
+                .providers
+                .iter()
+                .find(|e| e.name == req.name)
+                .map(|e| e.api_key.clone())
+                .unwrap_or_default()
+        } else {
+            req.api_key.clone()
+        };
+        crate::llm::OpenAiCompatible::new(req.base_url.trim_end_matches('/'), key, "", 1)
+    };
+
+    let list = client.list_models_detailed().await.map_err(fail)?;
+    Ok(Json(json!({
+        "count": list.len(),
+        "models": list,
+        "endpoint": client.base_url(),
+    })))
 }
 
 // ------------------------------------------------------------- reads
@@ -1504,6 +1794,8 @@ async fn stats(State(s): State<Shared>) -> impl IntoResponse {
         "chunks": chunks,
         "tools": s.registry.tools().len(),
         "servers": s.registry.servers().len(),
+        "tool_search": crate::toolsearch::enabled(),
+        "core_servers": crate::toolsearch::core_servers(),
         "graph": graph,
     }))
 }
@@ -1575,6 +1867,81 @@ struct SearchQuery {
     q: String,
     #[serde(default)]
     limit: Option<usize>,
+    /// Memory tier: session | recent | all | code | everything (default).
+    #[serde(default)]
+    scope: Option<String>,
+    /// The conversation "session" means. The page knows it; the server's
+    /// live agent may not be the one the page is looking at.
+    #[serde(default)]
+    session: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct BrowseQuery {
+    #[serde(default)]
+    scope: Option<String>,
+    #[serde(default)]
+    session: Option<String>,
+    #[serde(default)]
+    offset: Option<usize>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+/// Browse memory without having to guess a search first.
+///
+/// The Memory page was search-only: to see anything you had to already know
+/// what to ask for, and an empty box showed three example chips. "Whole RAG
+/// must be visible" - so this lists a tier outright, newest first, a page at a
+/// time, with the count of every tier for the chips.
+async fn memory_browse(
+    State(s): State<Shared>,
+    Query(q): Query<BrowseQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let store = VectorStore::open(s.cfg.data_dir.join("vectors.db")).map_err(fail)?;
+    let scope = q.scope.unwrap_or_else(|| "all".into());
+    let session = q.session.unwrap_or_default();
+    let (total, rows) = store
+        .browse(&scope, &session, q.offset.unwrap_or(0), q.limit.unwrap_or(30).min(200))
+        .map_err(fail)?;
+    let items: Vec<Value> = rows
+        .iter()
+        .map(|(c, sc)| {
+            json!({
+                "session": c.session_id, "seq_start": c.seq_start, "seq_end": c.seq_end,
+                "text": c.text, "scope": sc,
+            })
+        })
+        .collect();
+    Ok(Json(json!({
+        "scope": scope,
+        "total": total,
+        "counts": store.tier_counts(&session).map_err(fail)?,
+        "items": items,
+    })))
+}
+
+#[derive(Deserialize)]
+struct FactsQuery {
+    #[serde(default)]
+    history: Option<bool>,
+}
+
+/// Remembered facts (src/facts.rs), current and optionally past.
+async fn facts_list(
+    State(s): State<Shared>,
+    Query(q): Query<FactsQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let v = s
+        .registry
+        .call(
+            "kuzu_graph",
+            "facts",
+            json!({ "include_history": q.history.unwrap_or(false), "limit": 1000 }),
+        )
+        .await
+        .map_err(fail)?;
+    Ok(Json(v))
 }
 
 async fn search(
@@ -1601,8 +1968,10 @@ async fn search(
         .embed(vec![sq.q.as_str()], None)
         .map_err(fail)?;
 
+    let scope = sq.scope.clone().unwrap_or_else(|| "everything".into());
+    let keep = crate::tools::scope_keep(&scope, sq.session.as_deref().unwrap_or(""));
     let hits: Vec<Value> = store
-        .search(&embedding[0], sq.limit.unwrap_or(10))
+        .search_where(&sq.q, &embedding[0], sq.limit.unwrap_or(10), keep)
         .map_err(fail)?
         .iter()
         .map(|h| {
@@ -1619,7 +1988,27 @@ async fn search(
     Ok(Json(json!({ "hits": hits })))
 }
 
-async fn graph(State(s): State<Shared>) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+/// Which slice of the graph to draw.
+///
+/// `?session=<id>` narrows to what ONE conversation contributed. Every edge
+/// already carries the session that produced it (§23), so this is a filter on
+/// data that is already there rather than a second store - which is exactly why
+/// per-session graphs were built as provenance instead of a database per
+/// session. The Graph page asks for everything; the pane under Memory asks for
+/// the session you are in.
+#[derive(serde::Deserialize)]
+struct GraphQuery {
+    #[serde(default)]
+    session: Option<String>,
+}
+
+async fn graph(
+    State(s): State<Shared>,
+    Query(q): Query<GraphQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if let Some(sid) = q.session.as_deref().map(safe_id).filter(|v| !v.is_empty()) {
+        return graph_for_session(&s, &sid).await;
+    }
     let nodes = s
         .registry
         .call(
@@ -1666,3 +2055,189 @@ async fn graph(State(s): State<Shared>) -> Result<Json<Value>, (StatusCode, Json
 /// graph today (1,013 entities, 1,179 relations) and low enough that a runaway
 /// one cannot hang the canvas.
 const GRAPH_LIMIT: usize = 20_000;
+
+/// One session's contribution: its edges, and only the entities they touch.
+///
+/// Both endpoints come back on the same row so the node set is derived from the
+/// edges rather than fetched separately. Asking for them in two queries is how
+/// the whole-graph path ended up drawing edges that pointed at nodes it had not
+/// loaded (§16a); scoping makes that mismatch far likelier, so it is avoided by
+/// construction here.
+async fn graph_for_session(
+    s: &Shared,
+    session: &str,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let rows = s
+        .registry
+        .call(
+            "kuzu_graph",
+            "cypher",
+            json!({
+                "query": format!(
+                    "MATCH (a:Entity)-[r:Rel]->(b:Entity) WHERE r.session = '{session}'                      RETURN a.name AS source, a.kind AS skind, b.name AS target,                             b.kind AS tkind, r.type AS type, r.weight AS weight"
+                ),
+                "limit": GRAPH_LIMIT,
+            }),
+        )
+        .await
+        .map_err(fail)?;
+
+    let rows = rows.get("rows").and_then(|r| r.as_array()).cloned().unwrap_or_default();
+    let mut nodes: std::collections::BTreeMap<String, Value> = Default::default();
+    let mut edges = Vec::new();
+    for r in &rows {
+        let get = |k: &str| r.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let (src, tgt) = (get("source"), get("target"));
+        if src.is_empty() || tgt.is_empty() {
+            continue;
+        }
+        nodes.entry(src.clone())
+            .or_insert_with(|| json!({ "name": src, "kind": get("skind") }));
+        nodes.entry(tgt.clone())
+            .or_insert_with(|| json!({ "name": tgt, "kind": get("tkind") }));
+        edges.push(json!({
+            "source": src, "target": tgt,
+            "type": get("type"),
+            "weight": r.get("weight").cloned().unwrap_or(json!(1)),
+        }));
+    }
+
+    // Plus whatever the session's log implies that `reduce` has not stored
+    // yet - so the graph of the conversation you are IN is not empty until the
+    // next rebuild. Same extraction the reducer uses, derived and discarded.
+    let mut live_added = 0usize;
+    if let Ok(events) =
+        crate::eventlog::EventLog::read(s.cfg.events_dir().join(format!("{session}.jsonl")))
+    {
+        let (lnodes, ledges) = crate::reduce::live_session_graph(&events);
+        for (src, tgt, ty, w) in ledges {
+            let known = edges.iter().any(|e| {
+                e["source"] == json!(src) && e["target"] == json!(tgt) && e["type"] == json!(ty)
+            });
+            if known {
+                continue;
+            }
+            for n in [&src, &tgt] {
+                let kind = lnodes.iter().find(|(x, _)| x == n).map(|(_, k)| k.clone()).unwrap_or_default();
+                nodes.entry(n.clone()).or_insert_with(|| json!({ "name": n, "kind": kind }));
+            }
+            edges.push(json!({ "source": src, "target": tgt, "type": ty, "weight": w, "live": true }));
+            live_added += 1;
+        }
+    }
+
+    let n: Vec<Value> = nodes.into_values().collect();
+    Ok(Json(json!({
+        "nodes": n,
+        "edges": edges,
+        "scope": "session",
+        "session": session,
+        "live_edges": live_added,
+        "truncated": rows.len() >= GRAPH_LIMIT,
+        "limit": GRAPH_LIMIT,
+    })))
+}
+
+// ---------------------------------------------------------------- sub-agents
+//
+// Thin over `SubAgents` on purpose. A sub-agent's TRANSCRIPT is not served here
+// because it does not need to be: it is a session like any other, so the panel
+// reads it through /api/events with the agent's session id, and the Sessions
+// page lists it without knowing what a sub-agent is.
+
+#[derive(Deserialize)]
+struct SpawnBody {
+    name: String,
+    #[serde(default)]
+    purpose: String,
+    /// Required, and may be empty. See src/subagents.rs on why there is no
+    /// "every server" option.
+    servers: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct AskBody {
+    id: String,
+    prompt: String,
+    #[serde(default)]
+    wait_seconds: Option<u64>,
+}
+
+#[derive(Deserialize)]
+struct StopBody {
+    id: String,
+}
+
+async fn agents_list(State(s): State<Shared>) -> Json<Value> {
+    Json(json!({ "agents": s.subagents.list(), "max": crate::subagents::MAX_AGENTS }))
+}
+
+async fn agents_spawn(
+    State(s): State<Shared>,
+    Json(b): Json<SpawnBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let info = s.subagents.spawn(&b.name, &b.purpose, b.servers).map_err(fail)?;
+    Ok(Json(json!({ "ok": true, "agent": info })))
+}
+
+async fn agents_ask(
+    State(s): State<Shared>,
+    Json(b): Json<AskBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    // The panel waits a beat too: a quick answer should appear without the
+    // UI having to poll for it.
+    let wait = b.wait_seconds.unwrap_or(45).min(120) * 1000;
+    match s.subagents.ask(&b.id, &b.prompt, wait).await.map_err(fail)? {
+        Some(reply) => Ok(Json(json!({ "ok": true, "reply": reply }))) ,
+        None => Ok(Json(json!({ "ok": true, "still_working": true }))),
+    }
+}
+
+async fn agents_stop(
+    State(s): State<Shared>,
+    Json(b): Json<StopBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    s.subagents.stop(&b.id).map_err(fail)?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct DespawnBody {
+    id: String,
+    /// Minutes of idleness before it ends itself. Absent or null means never,
+    /// which is the default - an agent vanishing on you is a worse surprise
+    /// than one that lingers, and idle agents cost nothing.
+    #[serde(default)]
+    mins: Option<u64>,
+}
+
+async fn agents_despawn(
+    State(s): State<Shared>,
+    Json(b): Json<DespawnBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    s.subagents.set_despawn(&b.id, b.mins).map_err(fail)?;
+    Ok(Json(json!({ "ok": true, "id": b.id, "mins": b.mins })))
+}
+
+#[derive(Deserialize)]
+struct ResumeBody {
+    session: String,
+    #[serde(default)]
+    name: String,
+    /// Given again rather than recovered from the transcript - the toolset is a
+    /// live decision about cost, not a property of what was said.
+    #[serde(default)]
+    servers: Vec<String>,
+}
+
+async fn agents_resume(
+    State(s): State<Shared>,
+    Json(b): Json<ResumeBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let name = if b.name.trim().is_empty() { "resumed" } else { b.name.trim() };
+    let info = s
+        .subagents
+        .resume(&safe_id(&b.session), name, b.servers)
+        .map_err(fail)?;
+    Ok(Json(json!({ "ok": true, "agent": info })))
+}

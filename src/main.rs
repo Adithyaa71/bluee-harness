@@ -6,7 +6,11 @@ mod codemap;
 mod config;
 mod dash;
 mod eventlog;
+mod facts;
+mod gui;
+mod hooks;
 mod llm;
+mod loops;
 mod mcp;
 mod memory;
 mod providers;
@@ -14,16 +18,16 @@ mod pty;
 mod reduce;
 mod roots;
 mod skills;
+mod subagents;
 mod system;
 mod tools;
+mod toolsearch;
 mod vision;
-// Aliased because this file already has a `tools` subcommand function.
-use tools as native_tools;
-
+mod voice;
 use anyhow::Result;
 use config::Config;
 use eventlog::{EventKind, EventLog};
-use llm::{Message, OpenAiCompatible, Provider};
+use llm::{OpenAiCompatible, Provider};
 use std::collections::BTreeMap;
 use tokio::io::{AsyncBufReadExt, BufReader};
 
@@ -35,6 +39,8 @@ const USAGE: &str = "usage:
   harness call <server__tool> [json]  call one MCP tool directly
   harness reduce                   rebuild vector + graph memory from the event log
   harness search <query>           semantic search over memory
+  harness loops                   list scheduled loops and when each last ran
+  harness loop <name>             run one loop now, ignoring its schedule
   harness dash [port]              open the dashboard in a browser
   harness app                      open the desktop app (Tauri window)";
 
@@ -49,6 +55,16 @@ async fn main() -> Result<()> {
         "log" => replay(cfg, std::env::args().nth(2)),
         "tools" => tools(cfg).await,
         "reduce" => reduce_cmd(cfg).await,
+        "loops" => loops_cmd(cfg),
+        "loop" => {
+            let Some(name) = std::env::args().nth(2) else {
+                eprintln!("loop needs a name - `harness loops` lists them
+
+{USAGE}");
+                std::process::exit(2);
+            };
+            loop_run_cmd(cfg, name).await
+        }
         "app" => tokio::task::block_in_place(|| app::run(cfg)),
         "dash" => {
             let port = std::env::args()
@@ -96,6 +112,12 @@ async fn reduce_cmd(cfg: Config) -> Result<()> {
     } else {
         println!("entities      : {}", stats.entities);
         println!("relations     : {}", stats.relations);
+        println!(
+            "facts         : {} ({} current, {} history)",
+            stats.facts,
+            stats.facts - stats.facts_closed,
+            stats.facts_closed
+        );
     }
 
     if stats.events == 0 {
@@ -118,7 +140,7 @@ fn search_cmd(cfg: Config, query: String) -> Result<()> {
 
     let mut model = TextEmbedding::try_new(TextInitOptions::new(EmbeddingModel::AllMiniLML6V2))?;
     let embedding = model.embed(vec![query.as_str()], None)?;
-    let hits = store.search(&embedding[0], 5)?;
+    let hits = store.search_hybrid(&query, &embedding[0], 5)?;
 
     println!("searching {total} chunk(s) for: {query}\n");
     for hit in hits {
@@ -187,6 +209,20 @@ async fn call(cfg: Config, qualified: String, args_json: Option<String>) -> Resu
     let (registry, failures) = mcp::McpRegistry::connect(&specs).await;
     for f in &failures {
         eprintln!("[warn] server failed to start - {f}");
+    }
+
+    // The composed GUI tools (§ src/gui.rs) are not MCP tools - they sit on top
+    // of UACC - so `harness call` has to know about them too. Without this the
+    // only way to exercise them is a real model turn, which costs money and
+    // makes a failure harder to attribute.
+    if gui::handles(&qualified) {
+        let out = gui::call(&registry, &qualified, &args).await;
+        match &out {
+            Ok(v) => println!("{}", serde_json::to_string_pretty(v)?),
+            Err(e) => eprintln!("failed: {e:#}"),
+        }
+        registry.shutdown().await;
+        return out.map(|_| ());
     }
 
     let Some((server, tool)) = registry.resolve(&qualified) else {
@@ -309,96 +345,64 @@ fn replay(cfg: Config, which: Option<String>) -> Result<()> {
     Ok(())
 }
 
-/// The turn loop. Text in, text out, no tools yet - Phase 0's smallest proof
-/// that the plumbing works. Every turn is written to the event log as it
-/// happens, so the log is complete from the very first run rather than
-/// retrofitted later.
 /// The turn loop, with tools.
 ///
-/// The model is handed every connected MCP tool and decides which to call; the
-/// harness executes them and feeds results back until the model answers in
-/// plain text. Every step - user message, each tool call, each result, the
-/// final reply - is appended to the event log as it happens (§4a), so the log
-/// is a complete trace rather than a summary written afterwards.
+/// It drives `Agent` - the same loop the dashboard websocket, loops (§36) and
+/// sub-agents (§42) drive - rather than a second copy of it. That was the
+/// stated intent when `Agent` was extracted in Phase 2 and the CLI was never
+/// actually moved onto it: `chat` went on building an `OpenAiCompatible`
+/// straight from `.env` and running its own 180-line tool loop.
+///
+/// The cost of that was not theoretical. It meant `harness chat` ignored the
+/// provider chain entirely - so with OpenRouter configured, enabled and
+/// answering 200 to a direct call, the CLI still failed with
+/// `402 Insufficient Balance` from the old `.env` endpoint, and the obvious
+/// reading of that was "the new provider is broken". It also missed failover
+/// logging (§51), workspace tool scoping (§25) and the vision gate (§6),
+/// because all three live in `Agent`.
 async fn chat(cfg: Config) -> Result<()> {
-    cfg.require_credentials()?;
-
-    let (persona, persona_files) = config::load_persona(&cfg.persona_dir)?;
-    let provider = OpenAiCompatible::new(&cfg.base_url, &cfg.api_key, &cfg.model, cfg.max_tokens);
-
-    // Connect tool servers up front so the toolset is fixed for the session.
+    // No `require_credentials` here: credentials now come from the provider
+    // chain, which may be configured entirely in the Providers page with
+    // nothing in `.env` at all. `ProviderChain::build` says so properly when
+    // there is genuinely no usable provider.
     let specs = mcp::load_server_specs(&cfg.mcp_config)?;
     let (registry, failures) = mcp::McpRegistry::connect(&specs).await;
     for f in &failures {
         eprintln!("[warn] server failed to start - {f}");
     }
+    let registry = std::sync::Arc::new(registry);
+    let servers = registry.servers().len();
+    let vision = std::sync::Arc::new(vision::VisionState::load(&cfg.data_dir));
 
-    // 106 tools is past what most models choose well from, and their schemas
-    // are a large chunk of every prompt. HARNESS_TOOL_SERVERS narrows it, which
-    // is the same mechanism workspaces (§4f) and the vision gate (§6) will use.
-    let allow: Option<Vec<String>> = std::env::var("HARNESS_TOOL_SERVERS")
-        .ok()
-        .map(|v| v.split(',').map(|s| s.trim().to_string()).collect());
+    let mut ag = agent::Agent::new(&cfg, registry.clone(), vision).await?;
 
-    // The harness's own memory tools come first: recall should be as reachable
-    // as action, and putting them at the head of the list keeps them visible
-    // when the tool list is long.
-    let mut native = native_tools::NativeTools::open(&cfg)?;
-    let mut tool_defs: Vec<llm::ToolDef> = native_tools::NativeTools::defs();
-    let native_count = tool_defs.len();
-
-    tool_defs.extend(
-        registry
-            .tools()
-            .iter()
-            .filter(|t| allow.as_ref().is_none_or(|a| a.contains(&t.server)))
-            // Withhold the graph's write tools - the reducer is its only
-            // writer, see native_tools::WITHHELD_FROM_MODEL.
-            .filter(|t| !native_tools::WITHHELD_FROM_MODEL.contains(&t.qualified().as_str()))
-            .map(|t| llm::ToolDef {
-                name: t.qualified(),
-                description: t.description.clone(),
-                parameters: t.schema.clone(),
-            }),
-    );
-
-    let mut log = EventLog::new_session(cfg.events_dir())?;
-    log.append(EventKind::SessionStart {
-        model: cfg.model.clone(),
-        persona_files: persona_files.clone(),
-    })?;
-
-    println!("model:   {}", cfg.model);
-    println!("session: {}", log.session_id());
-    println!(
-        "persona: {}",
-        if persona_files.is_empty() {
-            "(none yet - Phase 3)".to_string()
-        } else {
-            persona_files.join(", ")
-        }
-    );
-    println!(
-        "tools:   {} ({} memory + {} from {} server(s)){}",
-        tool_defs.len(),
-        native_count,
-        tool_defs.len() - native_count,
-        registry.servers().len(),
-        match &allow {
-            Some(a) => format!(" [limited to {}]", a.join(",")),
-            None => String::new(),
-        }
-    );
-    println!("\nType a message, or /quit to exit.\n");
-
-    let mut history: Vec<Message> = Vec::new();
-    if !persona.is_empty() {
-        history.push(Message::system(persona));
+    // Same scoping mechanism as the workspace tick-boxes (§25) and the vision
+    // gate (§6) - the cost lever of §12f, reached from the environment here
+    // because the CLI has no UI to tick.
+    if let Ok(list) = std::env::var("HARNESS_TOOL_SERVERS") {
+        ag.set_allowed_servers(Some(list.split(',').map(|s| s.trim().to_string()).collect()));
     }
 
-    // A runaway tool loop burns money silently, so it is capped rather than
-    // trusted. Hitting the cap is reported, not swallowed.
-    const MAX_TOOL_ROUNDS: usize = 8;
+    println!("provider: {} ({})", ag.provider_name, ag.model);
+    println!("session:  {}", ag.session_id());
+    println!(
+        "persona:  {}",
+        if ag.persona_files.is_empty() {
+            "(none)".to_string()
+        } else {
+            ag.persona_files.join(", ")
+        }
+    );
+    println!(
+        "tools:    {} ({} native + {} from {servers} server(s)) | {} provider(s) in the chain",
+        ag.tool_count(),
+        ag.native_count,
+        ag.tool_count() - ag.native_count,
+        ag.provider_count()
+    );
+    println!();
+    println!("Type a message, or /quit to exit.");
+    println!();
 
     let mut lines = BufReader::new(tokio::io::stdin()).lines();
     loop {
@@ -409,7 +413,7 @@ async fn chat(cfg: Config) -> Result<()> {
         let Some(line) = lines.next_line().await? else {
             break;
         };
-        let input = line.trim();
+        let input = line.trim().to_string();
         if input.is_empty() {
             continue;
         }
@@ -417,147 +421,126 @@ async fn chat(cfg: Config) -> Result<()> {
             break;
         }
 
-        log.append(EventKind::UserMessage { text: input.into() })?;
-        history.push(Message::user(input));
-
-        for round in 0..MAX_TOOL_ROUNDS {
-            let completion = match provider.complete(&history, &tool_defs).await {
-                Ok(c) => c,
-                Err(e) => {
-                    let message = format!("{e:#}");
-                    eprintln!("\n[error] {message}\n");
-                    log.append(EventKind::Error {
-                        context: "provider.complete".into(),
-                        message,
-                    })?;
-                    break;
+        // Every one of these is already in the event log by the time it gets
+        // here; printing them is the CLI's rendering of the same trace the
+        // dashboard streams as JSON.
+        for ev in ag.turn(&input).await {
+            match ev {
+                agent::TurnEvent::ToolCall { server, tool, args } => {
+                    println!("  - {server}__{tool} {args}");
                 }
-            };
-
-            // No tools requested: the model is answering, so the turn is done.
-            if completion.tool_calls.is_empty() {
-                let reply = completion.content.unwrap_or_default();
-                println!("\n{reply}\n");
-                log.append(EventKind::AssistantMessage {
-                    text: reply.clone(),
-                })?;
-                history.push(Message::assistant(reply));
-                break;
-            }
-
-            // The assistant turn carrying the tool calls must go into history
-            // verbatim, or the follow-up tool messages have nothing to pair to.
-            history.push(Message {
-                role: "assistant".into(),
-                content: completion.content.clone(),
-                tool_calls: Some(completion.tool_calls.clone()),
-                tool_call_id: None,
-            });
-
-            for tc in &completion.tool_calls {
-                let args: serde_json::Value =
-                    serde_json::from_str(&tc.function.arguments).unwrap_or(serde_json::json!({}));
-
-                println!("  · {} {}", tc.function.name, args);
-
-                // Native memory tools run in-process. They are logged with
-                // server "harness" so the event log records them exactly like
-                // any other tool call - the trace stays complete (§4a).
-                if native_tools::NativeTools::handles(&tc.function.name) {
-                    log.append(EventKind::ToolCall {
-                        call_id: tc.id.clone(),
-                        server: "harness".into(),
-                        tool: tc.function.name.clone(),
-                        args: args.clone(),
-                    })?;
-
-                    match native.call(&tc.function.name, &args) {
-                        Ok(value) => {
-                            log.append(EventKind::ToolResult {
-                                call_id: tc.id.clone(),
-                                ok: true,
-                                result: value.clone(),
-                            })?;
-                            history.push(Message::tool_result(&tc.id, value.to_string()));
-                        }
-                        Err(e) => {
-                            let message = format!("{e:#}");
-                            log.append(EventKind::ToolResult {
-                                call_id: tc.id.clone(),
-                                ok: false,
-                                result: serde_json::json!({ "error": message }),
-                            })?;
-                            history.push(Message::tool_result(
-                                &tc.id,
-                                format!("Tool call failed: {message}"),
-                            ));
-                        }
-                    }
-                    continue;
-                }
-
-                let Some((server, tool)) = registry.resolve(&tc.function.name) else {
-                    let message = format!("unknown tool `{}`", tc.function.name);
-                    log.append(EventKind::Error {
-                        context: "tool.resolve".into(),
-                        message: message.clone(),
-                    })?;
-                    history.push(Message::tool_result(&tc.id, message));
-                    continue;
-                };
-
-                log.append(EventKind::ToolCall {
-                    call_id: tc.id.clone(),
-                    server: server.clone(),
-                    tool: tool.clone(),
-                    args: args.clone(),
-                })?;
-
-                match registry.call(&server, &tool, args).await {
-                    Ok(value) => {
-                        log.append(EventKind::ToolResult {
-                            call_id: tc.id.clone(),
-                            ok: true,
-                            result: value.clone(),
-                        })?;
-                        history.push(Message::tool_result(&tc.id, value.to_string()));
-                    }
-                    Err(e) => {
-                        // A failed tool is reported back to the model rather
-                        // than aborting: it can often recover by trying another.
-                        let message = format!("{e:#}");
-                        log.append(EventKind::ToolResult {
-                            call_id: tc.id.clone(),
-                            ok: false,
-                            result: serde_json::json!({ "error": message }),
-                        })?;
-                        history.push(Message::tool_result(
-                            &tc.id,
-                            format!("Tool call failed: {message}"),
-                        ));
+                agent::TurnEvent::ToolResult { ok, result } => {
+                    if !ok {
+                        println!("    failed: {result}");
                     }
                 }
-            }
-
-            if round == MAX_TOOL_ROUNDS - 1 {
-                let message = format!("stopped after {MAX_TOOL_ROUNDS} tool rounds");
-                eprintln!("\n[warn] {message}\n");
-                log.append(EventKind::Error {
-                    context: "chat.tool_loop".into(),
-                    message,
-                })?;
+                agent::TurnEvent::Reply { text } => {
+                    println!();
+                    println!("{text}");
+                    println!();
+                }
+                agent::TurnEvent::Error { message } => {
+                    eprintln!();
+                    eprintln!("[error] {message}");
+                    eprintln!();
+                }
             }
         }
     }
 
-    log.append(EventKind::SessionEnd {
-        reason: "user exit".into(),
-    })?;
-    println!(
-        "\nsession {} written to {}",
-        log.session_id(),
-        log.path().display()
-    );
-    registry.shutdown().await;
+    ag.end("user exit");
+    let id = ag.session_id().to_string();
+    drop(ag);
+    println!();
+    println!("session {id} written to {}", cfg.events_dir().display());
+    // `shutdown` consumes the registry, so the agent's handle has to go first.
+    if let Ok(reg) = std::sync::Arc::try_unwrap(registry) {
+        reg.shutdown().await;
+    }
+    Ok(())
+}
+
+
+/// List every loop, its schedule, and what happened last time.
+///
+/// Reads the files and the state, and starts no MCP servers - listing what is
+/// configured should not cost a 26-second server boot.
+fn loops_cmd(cfg: Config) -> Result<()> {
+    let (loops, errs) = loops::load_all(&cfg.loops_dir);
+    for e in &errs {
+        eprintln!("[warn] {e}");
+    }
+    if loops.is_empty() {
+        println!(
+            "no loops in {}
+
+A loop is a markdown file with frontmatter:
+
+             ---
+  name: catch-up
+  every: 6h
+  servers: [kuzu_graph]
+---
+             What you want it to do, in plain English.",
+            cfg.loops_dir.display()
+        );
+        return Ok(());
+    }
+
+    let state = loops::StateFile::load(&cfg.data_dir.join("loops.json"));
+    println!("{} loop(s) in {}
+", loops.len(), cfg.loops_dir.display());
+    for l in &loops {
+        let st = state.loops.get(&l.name).cloned().unwrap_or_default();
+        let last = st
+            .last_run
+            .map(|t| t.format("%Y-%m-%d %H:%M").to_string())
+            .unwrap_or_else(|| "never".into());
+        let mark = match st.last_ok {
+            Some(true) => "ok",
+            Some(false) => "FAILED",
+            None => "-",
+        };
+        let scope = match &l.servers {
+            None => "every server".to_string(),
+            Some(v) if v.is_empty() => "no tools".to_string(),
+            Some(v) => v.join(", "),
+        };
+        println!(
+            "  {:<22} {:<16} {}  last {} ({})",
+            l.name,
+            l.trigger.describe(),
+            if l.enabled { " " } else { "[off]" },
+            last,
+            mark
+        );
+        if !l.description.is_empty() {
+            println!("      {}", l.description);
+        }
+        println!("      tools: {scope}");
+    }
+    Ok(())
+}
+
+/// Run one loop now. Deliberately ignores the schedule and the daily cap: this
+/// is a person asking for it, and the caps exist to bound what runs unattended.
+async fn loop_run_cmd(cfg: Config, name: String) -> Result<()> {
+    let (loops, _) = loops::load_all(&cfg.loops_dir);
+    let Some(l) = loops.into_iter().find(|l| l.name == name) else {
+        eprintln!("no loop called `{name}` - `harness loops` lists them");
+        std::process::exit(2);
+    };
+
+    let specs = mcp::load_server_specs(&cfg.mcp_config)?;
+    let (registry, failures) = mcp::McpRegistry::connect(&specs).await;
+    for f in &failures {
+        eprintln!("[warn] server failed to start - {f}");
+    }
+    let vision = std::sync::Arc::new(vision::VisionState::load(&cfg.data_dir));
+
+    println!("running loop `{name}`...
+");
+    let text = loops::run_once(&cfg, std::sync::Arc::new(registry), vision, &l).await?;
+    println!("{text}");
     Ok(())
 }

@@ -11,6 +11,7 @@ use rmcp::service::{RoleClient, RunningService, ServiceExt};
 use rmcp::transport::TokioChildProcess;
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 use std::path::Path;
 
 /// Separator between server name and tool name in the LLM-facing tool id.
@@ -125,9 +126,27 @@ struct Connection {
     tools: Vec<ToolInfo>,
 }
 
+/// Everything that changes when servers are (re)connected, swapped as one unit.
+struct Inner {
+    connections: BTreeMap<String, Connection>,
+    /// Why each enabled server is NOT here, kept rather than printed once.
+    ///
+    /// These used to go to stderr at startup and nowhere else, which is fine
+    /// for `harness dash` in a terminal and useless for `harness app`, where
+    /// there is no console at all. A desktop window that has silently lost
+    /// every tool server looks exactly like one that has an empty graph - and
+    /// that is precisely how it was read (§55).
+    failures: Vec<String>,
+}
+
 /// All connected MCP servers and their tools.
 pub struct McpRegistry {
-    connections: BTreeMap<String, Connection>,
+    /// Connections are replaced wholesale by `reconnect`, so every
+    /// `Arc<McpRegistry>` already handed out - the live agent, each sub-agent,
+    /// the loop scheduler - picks up the new servers without being rebuilt.
+    /// An `Arc` snapshot is taken for each call and the guard released
+    /// immediately, so no lock is ever held across an await.
+    inner: std::sync::RwLock<Arc<Inner>>,
 }
 
 impl McpRegistry {
@@ -137,6 +156,17 @@ impl McpRegistry {
     /// aborting startup - one broken tool server should not take the assistant
     /// down with it.
     pub async fn connect(specs: &BTreeMap<String, ServerSpec>) -> (Self, Vec<String>) {
+        let inner = Self::connect_all(specs).await;
+        let failures = inner.failures.clone();
+        (
+            Self {
+                inner: std::sync::RwLock::new(Arc::new(inner)),
+            },
+            failures,
+        )
+    }
+
+    async fn connect_all(specs: &BTreeMap<String, ServerSpec>) -> Inner {
         let mut connections = BTreeMap::new();
         let mut failures = Vec::new();
 
@@ -152,7 +182,34 @@ impl McpRegistry {
             }
         }
 
-        (Self { connections }, failures)
+        Inner {
+            connections,
+            failures,
+        }
+    }
+
+    /// Start every enabled server again and swap the result in.
+    ///
+    /// Restarting the whole app was the only cure for a startup where the
+    /// servers did not come up, which loses the conversation you were in the
+    /// middle of. Returns the failures, so the caller can say what is still
+    /// wrong rather than just "done".
+    pub async fn reconnect(&self, specs: &BTreeMap<String, ServerSpec>) -> Vec<String> {
+        let fresh = Self::connect_all(specs).await;
+        let failures = fresh.failures.clone();
+        let old = {
+            let mut guard = self.inner.write().unwrap();
+            std::mem::replace(&mut *guard, Arc::new(fresh))
+        };
+        // Only shut down the previous set if nothing else is still holding it;
+        // a tool call in flight owns its own snapshot and must be allowed to
+        // finish. Anything not cancelled here dies with its handle instead.
+        if let Ok(old) = Arc::try_unwrap(old) {
+            for (_, conn) in old.connections {
+                let _ = conn.service.cancel().await;
+            }
+        }
+        failures
     }
 
     async fn connect_one(name: &str, spec: &ServerSpec) -> Result<Connection> {
@@ -162,13 +219,61 @@ impl McpRegistry {
             cmd.env(k, v);
         }
 
-        let transport = TokioChildProcess::new(cmd)
+        // The child's own stderr is captured, not inherited. Twice (CLAUDE.md
+        // §55, §58) every server died with nothing but "connection closed:
+        // initialize response", while each child had printed the real reason -
+        // `No Python at '...'` - to a stream nobody could see from the desktop
+        // app. Lines are still forwarded to our stderr, so a terminal run looks
+        // the same; the last few are also kept for the failure message.
+        let (transport, stderr) = TokioChildProcess::builder(cmd)
+            .stderr(std::process::Stdio::piped())
+            .spawn()
             .with_context(|| format!("spawning `{}`", spec.command))?;
+        let tail = std::sync::Arc::new(std::sync::Mutex::new(std::collections::VecDeque::<String>::new()));
+        if let Some(err) = stderr {
+            let tail = tail.clone();
+            tokio::spawn(async move {
+                use tokio::io::AsyncBufReadExt;
+                let mut lines = tokio::io::BufReader::new(err).lines();
+                while let Ok(Some(line)) = lines.next_line().await {
+                    eprintln!("{line}");
+                    let mut t = tail.lock().unwrap();
+                    t.push_back(line);
+                    if t.len() > 12 {
+                        t.pop_front();
+                    }
+                }
+            });
+        }
 
-        let service = ()
-            .serve(transport)
-            .await
-            .with_context(|| format!("MCP handshake with {name}"))?;
+        let service = match ().serve(transport).await {
+            Ok(s) => s,
+            Err(e) => {
+                // Let the dying child's last words arrive before reading them.
+                tokio::time::sleep(std::time::Duration::from_millis(400)).await;
+                let said: Vec<String> = tail
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty())
+                    .collect();
+                let mut why = if said.is_empty() {
+                    String::new()
+                } else {
+                    format!(" - the server said: {}", said.join(" | "))
+                };
+                if said.iter().any(|l| l.contains("No Python at")) {
+                    why.push_str(
+                        " (the venv's base Python is not visible to this process - usually \
+                         because it was installed from inside a packaged app such as Claude, \
+                         which redirects AppData. Point the venv's pyvenv.cfg `home` at a \
+                         Python outside AppData; USER_GUIDE.md, 'When something goes wrong'.)",
+                    );
+                }
+                return Err(anyhow::anyhow!(e)).with_context(|| format!("MCP handshake with {name}{why}"));
+            }
+        };
 
         let tools = service
             .list_all_tools()
@@ -186,15 +291,26 @@ impl McpRegistry {
         Ok(Connection { service, tools })
     }
 
-    pub fn servers(&self) -> Vec<&str> {
-        self.connections.keys().map(|s| s.as_str()).collect()
+    /// The current set, borrowed for as short a time as possible.
+    fn snapshot(&self) -> Arc<Inner> {
+        self.inner.read().unwrap().clone()
     }
 
-    pub fn tools(&self) -> Vec<&ToolInfo> {
-        self.connections
+    pub fn servers(&self) -> Vec<String> {
+        self.snapshot().connections.keys().cloned().collect()
+    }
+
+    pub fn tools(&self) -> Vec<ToolInfo> {
+        self.snapshot()
+            .connections
             .values()
-            .flat_map(|c| c.tools.iter())
+            .flat_map(|c| c.tools.iter().cloned())
             .collect()
+    }
+
+    /// Why each enabled server that is not connected failed to start.
+    pub fn failures(&self) -> Vec<String> {
+        self.snapshot().failures.clone()
     }
 
     /// Resolve a namespaced id (`server__tool`) back to its parts.
@@ -203,7 +319,7 @@ impl McpRegistry {
     /// from `self`, and callers generally outlive the id they passed in.
     pub fn resolve(&self, qualified: &str) -> Option<(String, String)> {
         let (server, tool) = qualified.split_once(NS)?;
-        if self.connections.contains_key(server) {
+        if self.snapshot().connections.contains_key(server) {
             Some((server.to_string(), tool.to_string()))
         } else {
             None
@@ -217,10 +333,26 @@ impl McpRegistry {
         tool: &str,
         args: serde_json::Value,
     ) -> Result<serde_json::Value> {
-        let conn = self
-            .connections
-            .get(server)
-            .with_context(|| format!("no connected MCP server named `{server}`"))?;
+        // Snapshot first: the read guard is dropped here, before any await, so
+        // a slow tool cannot block a reconnect and a reconnect cannot cut off
+        // a call that is already running.
+        let inner = self.snapshot();
+        let conn = inner.connections.get(server).with_context(|| {
+            let live = inner
+                .connections
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ");
+            if live.is_empty() {
+                format!(
+                    "no MCP server is connected, so `{server}` is unreachable. \
+                     Settings -> MCP has the reason each one failed, and a Reconnect button."
+                )
+            } else {
+                format!("no connected MCP server named `{server}` (connected: {live})")
+            }
+        })?;
 
         let arguments = match args {
             serde_json::Value::Object(map) => Some(map),
@@ -235,11 +367,28 @@ impl McpRegistry {
             params = params.with_arguments(arguments);
         }
 
-        let result = conn
-            .service
-            .call_tool(params)
-            .await
-            .with_context(|| format!("calling {server}.{tool}"))?;
+        // Bounded. Measured: `uacc__get_screen_info {include_ocr: true}` with
+        // pytesseract missing fell through to EasyOCR and never returned - and
+        // with no bound, one hung tool held the agent (and every surface that
+        // shares it) for good. The provider already had a per-request timeout;
+        // tools had none. HARNESS_TOOL_TIMEOUT overrides, in seconds.
+        let limit = std::env::var("HARNESS_TOOL_TIMEOUT")
+            .ok()
+            .and_then(|v| v.parse::<u64>().ok())
+            .unwrap_or(120);
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(limit),
+            conn.service.call_tool(params),
+        )
+        .await
+        .map_err(|_| {
+            anyhow::anyhow!(
+                "{server}.{tool} did not answer within {limit}s and was abandoned. The server \
+                 may still be busy with it - do not repeat the same call; try a different \
+                 approach or a lighter variant."
+            )
+        })?
+        .with_context(|| format!("calling {server}.{tool}"))?;
 
         // Prefer the server's structured output when it provides one; fall back
         // to concatenated text content, which is what most servers return.
@@ -261,8 +410,11 @@ impl McpRegistry {
 
     /// Shut every server down cleanly, so child processes don't leak.
     pub async fn shutdown(self) {
-        for (_, conn) in self.connections {
-            let _ = conn.service.cancel().await;
+        let inner = self.inner.into_inner().unwrap();
+        if let Ok(inner) = Arc::try_unwrap(inner) {
+            for (_, conn) in inner.connections {
+                let _ = conn.service.cancel().await;
+            }
         }
     }
 }

@@ -938,6 +938,1271 @@ matches the source text exactly rather than the rendered markup.
 
 ---
 
+**35. Driving other applications - eight composed GUI tools (§ src/gui.rs).**
+Asked for so this can be demonstrated live in a lecture.
+
+*The primitives already existed and worked.* UACC has 70 tools and its window
+and accessibility reads are solid - `list_windows` returned 15 real windows with
+bounds and focus state on the first try. What was missing is that one useful
+action took five or six calls in the right order with the model improvising
+pixel coordinates in between. That is survivable when you can retry and wrong
+when someone is watching.
+
+So these compose and they **verify**: `focus_app` reads the active window back
+to check the focus actually landed, `open_app_window` waits for a window rather
+than reporting success because a process spawned, and `click_label` finds a
+control by its **visible label** in the accessibility tree. Eight tools instead
+of seventy is also the §12f cost lever pointing the same way.
+
+*Three real bugs, all found by running it rather than reading it:*
+
+- **UACC's entire input path was broken.** `click`, `type_text`, `hotkey`,
+  `scroll` and `drag` all call `invalidate_tree_cache` at module level, and
+  `server.py` only imports it inside one function - so every one of them threw
+  `NameError`. Reads worked, so the server looked fine. One-word fix, captured
+  as `mcps/patches/uacc-missing-invalidate-tree-cache.patch`. This is upstream's
+  bug and is presumably broken for everyone.
+- **`open_app_window` adopted an already-open window and called it "opened".**
+  The first live run matched a Notepad titled `*tmr ~ dbms review 1` - the
+  asterisk meaning unsaved changes - so a model told to "open notepad and type"
+  would have typed into the owner's unsaved work. It now reports
+  `already_open: true` and warns explicitly when the title starts with `*`.
+- **A click could land in the wrong window.** `click_label` re-reads the screen,
+  and the foreground can change between the read and the click; observed live,
+  a read found 171 controls in File Explorer and the click then reported on a
+  browser. `click_label` now takes `app`, focuses it first, and reports
+  `in_window` either way.
+
+*Two more of mine, both about hiding information:* every UACC failure was
+collapsed to "the GUI layer refused", which threw away the actionable message -
+UACC's own `User override: mouse moved away`. And the MouseSentinel (which
+aborts on any 40px cursor movement, a good safety feature) is now acknowledged
+and retried **once**, because one stray twitch bricking a demo until someone
+knows the magic incantation is not a safety feature, it is a trap. Twice in a
+row is treated as the human meaning it.
+
+*Verified live against real windows:* 14 windows listed and trimmed; File
+Explorer snapped from `1210x735 at 661,126` to `960x1080 at 0,0`; `read_screen`
+found **171 labelled controls**; `click_label` clicked `Large Icons` **by name**;
+`press_keys escape` round-tripped. Desktop restored afterwards.
+
+*Deliberately not built:* no vision, no OCR, no pixel hunting. Everything goes
+through the accessibility tree, which is what lets a failure say *why* - "no
+control labelled Save; here is what I can see" is useful and "I clicked at
+812,440 and nothing happened" is not. When a window exposes no labels at all,
+these tools say so and point at UACC's visual tools rather than pretending.
+
+---
+
+**36. Loops - work bluee does on its own (§ src/loops.rs).**
+A loop is a Markdown file in `loops/`, deliberately the same shape as a skill:
+frontmatter for the schedule, prose for the instruction. Asked for as "the
+easiest way for building loops ... as i will customize it manually later", and
+the easiest thing to customise is a text file, not a UI form writing JSON.
+
+*It is not a second turn loop.* `run_once` calls `Agent::turn_with`, the same
+function the CLI, the dashboard websocket and the voice loop drive (§11).
+
+*What falls out of §4a for free:* a loop runs in a real session, so everything
+it says lands in the event log, so `reduce` makes it searchable. Nothing extra
+was built to get that. Loop sessions are titled `loop: <name>` so they are
+obvious in the Sessions page and never look like something Adithya said.
+
+*Cost is the real risk, because this is the first subsystem that spends money
+while nobody is watching.* Three guards:
+  1. **No schedule means it never runs.** No `every:`/`at:`/`on:` is `Manual`.
+     Dropping an unfinished file into `loops/` cannot start a meter.
+  2. `max_runs` per day, checked **before** the schedule and against persisted
+     state, so a restart cannot be used to get around it. A crashed run still
+     counts - a reliably-failing loop should stop, not retry all night.
+  3. `servers:` scopes the toolset per loop (§12f). `[]` leaves the native
+     tools, which is what a memory-review loop actually needs. `[]` and unset
+     are kept distinct, the same call §25 makes.
+
+`every: 5s` is clamped to a minute - a typo that bills is still a typo.
+
+*Verified end to end against the real model, accidentally but conclusively:*
+starting `harness dash` for the terminal work fired `catch-up` (on: startup)
+twice and `daily-review` (at 22:00, past due) once. All three runs returned
+`last_ok: true` and `catch-up` produced a correct summary of recent sessions.
+8 unit tests cover the parser, the cap, and that `README.md` is not a loop.
+
+**37. The terminal: one xterm PER TAB, and connections as things you keep.**
+Reported as "outdated n boring ... multi terminal must be smooth without over
+lapping w other terminal sessions". The overlap half was a real bug, not a
+feeling.
+
+*Root cause.* There was ONE `Terminal` and one socket for every tab. Switching
+closed the socket and opened another but never touched the buffer - and the
+server replays up to 256 KB of scrollback on attach (§Phase 2). So the incoming
+session's history was written straight onto the outgoing one's: two shells
+interleaved in one buffer. Per-tab Terminals fix it by construction, and
+switching becomes a show/hide rather than a reconnect-and-replay, so it is
+instant and each tab keeps its own scroll position.
+
+`term`, `fit` and `ws` survive as aliases onto the active pane, because the
+pop-out, "terminal here" and the solo boot all reach for them.
+
+*A second bug found on the way:* `popTerminal` passed `shellKey()` - derived
+from the shell *name* - instead of the active tab. Popping out while on the
+second bash tab silently attached you to the first one, in a window claiming to
+be this one. Now it passes `termActive`. The solo window recovers the tab's
+shell from localStorage rather than a new URL parameter, because the OS-window
+path builds its own URL server-side and a parameter would have had to be
+plumbed through Rust to work in the case that matters.
+
+*Connections.* The `<select>` plus a free-text box is gone. Local shells and
+remote hosts are now one saved, named list - a cloud box you `ssh` into is not
+a different kind of thing from powershell, it is a command the pty runs, which
+is why this cost nothing on the server side. Remotes get a globe on the tab.
+
+*`dev/uiterm.mjs`* drives all of it in real Chrome. The load-bearing assertion
+is buffer isolation: a marker written into one tab must never appear in
+another, and must survive switching away and back. 20 checks, no console
+errors.
+
+*The pop-out was separately broken, reported as "isnt that accurate &
+consistant". Four faults, not one:*
+- **Closing an in-page pop-out made the terminal vanish.** `onClose` set
+  `strip.style.display = ''`, but `display` was never what hid it - the strip
+  was hidden by the `no-term` class and `--term:0px`, and neither was undone.
+  The strip went back into the DOM collapsed to zero height.
+- **The popped-out pane had no height at all - measured `h=0`.** In the page
+  `#term` gets its height from the grid row; inside `.win-body` there is no
+  grid, so `#xt` collapsed, and the pane is absolutely positioned inside `#xt`.
+  A popped-out terminal rendered nothing. `.win-body > #term{height:100%}`.
+- **The rail button stayed lit while the strip was gone**, so pressing it
+  toggled from a state it was not in - the button was a coin flip.
+- **The toggle-closed check sat after the `popOut` await**, so on the desktop
+  build (where `popOut` succeeds) pressing the button again opened another OS
+  window instead of putting the terminal back.
+
+Open state is three things - the class, the variable, the lit button - and they
+were being set in two places, with the pop-out setting two of the three.
+`setTermOpen()` is now the only thing that writes them. The OS-window path
+cannot restore automatically (a real window sends no event back), so it
+collapses the strip and leaves the button honestly OFF, one click from back.
+
+*Two lessons, both already in this file and both re-learned anyway:*
+- The screenshot caught what the assertions could not. Every check passed while
+  the bar read `powershell.exe | powershell.exe`, because `#termconn` and
+  `#termstat` were both printing the shell. The status line says `connected` /
+  `reattached` / `disconnected` now. **Read the screenshots** (§12c).
+- The first version of `uiterm.mjs` slept a fixed 3.5s after reload and failed
+  with `app is not defined` - the page script had not run yet, which `typeof
+  app` hides and `app.classList` does not. It waits on a condition now. A test
+  whose result depends on how busy the machine is proves nothing either way.
+- **`localStorage.clear()` at the top of a check was clearing the wrong
+  origin.** CDP hands you the target as soon as the tab exists, which can be
+  while the document is still `about:blank`, so the clear was a no-op and every
+  run inherited the last one's tabs and saved connections. It failed on counts
+  that were correct for a clean profile - the §12c "inherits state from the
+  previous step" trap, in a new costume. The clear now happens after the first
+  load, and the run asserts the profile really is empty before continuing.
+
+**38. Pop-outs were not isolating their view, and a photo proved it.**
+Reported as "every pop up feels weird", with a screenshot. Two CSS faults, both
+of which had been there since solo mode was written:
+
+- `#app.solo #term{display:flex!important}` carried no `only-terminal`
+  qualifier, so **every** pop-out got the shell toolbar. In the browser window
+  that showed as `powershell.exe  connected` above the page.
+- `#main` was hidden only for `only-tasks`/`only-log`. `only-terminal` turns
+  `#app` into a flex column, so the entire chat surface - heading, tagline and
+  the three suggestion chips - stacked on top of the terminal you popped out.
+
+*The check was passing the whole time*, because it only asserted that the thing
+you asked for had a size. **A pop-out is defined by what it leaves out**, so
+that is what it asserts now: rail, composer, chat welcome and terminal strip
+must all be absent unless they are the view. All four views report
+`bleed=none`; `only=browser` is covered too, which it was not before.
+
+*Also fixed in the same pass, all from the same screenshot:*
+- **`win-btn` was window chrome doing duty as a content button in 11 places.**
+  `.ibtn` is 28x26 with a border, `.win-btn` is 26x26 without one, and the
+  browser toolbar had both - two pixels out of alignment and two different
+  hover treatments in one row. `win-btn` is now the titlebar only (built in
+  JS); content uses `.ibtn`, with `.ibtn.bare` for dense panel headers.
+- **The browser panel's black rectangle was not a failure.** The browser was up
+  and sitting on `about:blank`, and a screenshot of a blank page is black. It
+  now shows a real empty state saying so, including that this is a separate
+  profile. `margin:auto` centres it on both axes while a real screenshot still
+  pins to the top - one rule, no modifier class.
+- **The playground "browser" button still said "Look at your real browser"** -
+  true before §28 and false after it.
+- **Connectors overloaded two facts onto one row.** The switch is "allowed in
+  this workspace", the dot is "running right now", and a server can honestly be
+  both on and down - snarevec's daemon idles out by design. That read as the
+  toggle lying. Down rows now dim and say why, under a one-line key.
+
+`prefers-reduced-motion` was already handled globally and needed nothing.
+
+**39. Two graphs, one store: the Graph page is everything, the Memory pane is
+this session.** Asked for with three photos, and it is the §12h item 4 that had
+been open since `session_graph()` was written and never called.
+
+`/api/graph?session=<id>` filters on the `session` property every edge already
+carries (§23) - which is the payoff of having built per-session graphs as
+provenance rather than a database per session. One store, two questions.
+**Measured: all = 1,062 nodes / 1,239 edges; one real session = 3 nodes / 3
+edges.** Both endpoints come back on the same Cypher row so the node set is
+derived from the edges, avoiding the §16a mismatch where edges pointed at nodes
+that had not been loaded - far likelier once a filter is involved.
+
+`gScope` is state rather than something read from the host, because the canvas
+moves between hosts (§22) and a pop-out has no host to ask. Switching scope
+invalidates the cached layout too, or the new data draws at the old positions.
+
+*The empty states were actively misleading, which is the part that mattered.*
+"Graph is empty. Run /reduce" was shown for three different situations and was
+correct for one:
+- a session with nothing in it yet needs no rebuild,
+- a graph server still starting needs 20 seconds, not a command,
+- and only a genuinely empty graph wants `reduce`.
+
+`gReady` now records whether the last fetch actually worked - the old code
+swallowed the error and then advised rebuilding a store that was never the
+problem. The session message says the honest thing: the graph is **derived**,
+so a live conversation is not in it until the reducer runs. Saying "it fills in
+as you go" would have been a pleasant lie.
+
+**Found while verifying: `reduce` has not run since 30 Aug.** Every edge in the
+graph is from 29-30 Aug, so nothing from September is in it at all - which is
+most of why the graph looked broken rather than stale.
+
+**40. The playground reopen arrow was a fourth button size.** A bespoke 24x24
+square at `left:8 top:56`, floating over the cards with nothing anchoring it,
+so it read as debris. It is an edge tab now - flush to the side the panel
+returns from, rounded only outward, vertically centred so it cannot collide
+with the page header, widening on hover so the affordance and the hit target
+are the same thing.
+
+**41. `reduce` ate 16 GB and looked like a hang. It was one argument.**
+Running it for the first time since 30 Aug, memory went 9 GB -> 16 GB on a
+32 GB machine with **zero rows inserted**, twice, reproducibly.
+
+*Cause:* `model.embed(texts, None)` handed the ENTIRE code corpus to the model
+in one batch. A transformer's attention is O(seq^2) **per item**, so ~1,540
+chunks at 512 tokens materialises tens of GB before the first vector comes
+back - 1540 x 12 heads x 512 x 512 x 4 bytes is about 19 GB, which is what the
+meter showed. `EMBED_BATCH = 32` at both call sites. Measured after: **2.0 ->
+2.3 GB, flat across the whole run.**
+
+*It was latent, not new.* Section 14 recorded 119 files / 1,038 chunks; it is
+165 / 1,544 now - voice, loops, gui, the dev checks. The single-batch call was
+always going to fall over at some corpus size, and nothing warned about it.
+
+*Why it read as a hang:* insertion happens after `embed()` returns for the
+whole set, so the store shows nothing for the entire run. Twelve minutes of
+correct work is indistinguishable from a deadlock from the outside. **Inserting
+per batch is the real fix and is not done** - it would cap peak memory further
+and give honest progress.
+
+*Two process notes, because both cost time here.* The symptom was memory
+pressure and it was called a hang - the wrong word sent the search in the wrong
+direction. And the corpus was theorised about before being measured; one
+command showed 165 files / 2.2 MB and ruled that whole line out. Measure first.
+
+*Result of the completed run:* 33 sessions, 505 events, 73 conversation chunks
+(from 29), 1,544 code chunks, 1,347 symbols, **1,321 entities and 1,627
+relations** (from 1,062 / 1,239).
+
+**42. Sub-agents (§ src/subagents.rs) - agents this one can start and work with.**
+
+A sub-agent is a REAL `Agent` with its own session, not a lighter thing and not
+a second turn loop (§11). Which means the parts that usually cost most were
+free: its transcript is a session the reducer indexes, the Sessions page lists
+it, its graph edges carry its session (§23), and `spawn_agent`/`ask_agent` are
+ordinary tool calls so they appear in the TASKS panel with arguments and
+durations. Third time the append-only log has paid for itself this way, after
+skills and loops.
+
+*Cost is the point.* §12f measured 129 tools at ~22,300 prompt tokens a turn.
+A sub-agent scoped to one server carries **23**. `servers` is therefore required
+on spawn, not optional - an unscoped sub-agent would be the most expensive
+object in the system, paying the full toolset every turn in a conversation
+nobody is watching. `MAX_AGENTS` is 8.
+
+*The design was forced by the compiler, twice, and both times the compiler was
+right.* `ask` awaiting `turn_with` is an async recursion rustc can neither size
+nor prove `Send` through - a turn can ask an agent, which runs a turn - and it
+took axum's handlers down with it. Boxing only moved the error. Each sub-agent
+now has a **worker task that owns it**, prompts arrive by channel, and
+`SubAgents` is synchronous where it can be.
+
+*Then the obvious objection, which Adithya raised:* queue-and-poll means the
+main agent keeps asking "done yet", and every poll is a whole turn carrying
+every tool schema. That is the number this feature exists to reduce. The fix is
+that **waiting on a channel is not the recursion** - only awaiting `turn_with`
+was. `ask_agent` now waits inline up to 45s (120s cap) and returns the reply
+directly, falling back to "still working" only for genuinely long jobs. Most
+delegated work is one round trip.
+
+*Despawn timers default to NEVER.* An agent that vanishes while you were away is
+a worse surprise than one still sitting there, and idle agents cost nothing
+because only turns bill. A clock in the panel sets 15m/1h/4h; a sweeper skips
+anything still running. **Closing bluee does not despawn** - the worker's
+channel drops, the log closes cleanly, and the session is in the history to
+resume.
+
+*Resume is `Agent::resume`*, the same call the Sessions page uses. The toolset
+is asked for again rather than recovered from the transcript: what an agent may
+reach is a live decision about cost, not a property of what it once said.
+Opening one session twice is refused - two workers appending to one log.
+
+*Drag-out is pointer-based*, not HTML5 drag, which gives no usable position over
+a webview and cannot tell "left the panel" from "left the page". An 8px
+threshold keeps a click a click - the same distinction §20 makes between a pan
+and a pin - and the ghost turns accent-coloured once past the edge so the
+outcome is visible before you commit.
+
+*One bug worth recording because the warning was already written.* Popped-out
+agent windows measured **zero height**. The blanket
+`#app.solo:not(.only-tasks):not(.only-log) #side{display:none!important}` has
+three classes of specificity; the `.only-agents` rule meant to override it had
+two, so the blanket won despite `!important` on the loser. There is a comment
+directly above that rule describing this exact trap from the last time `#side`
+came back 0px. The first fix treated the symptom by switching `#app` to flex;
+only counting specificity found it. `:not(.only-agents)` now sits where it
+belonged.
+
+`dev/uiagents.mjs` covers rail placement, the pane, spawn, the clock, resize,
+drag-out, resume and solo - 21 checks, no console errors.
+
+**43. The sub-agents panel is its OWN panel, and the docked panels finally agree
+with each other.**
+
+Reported as "i want that sub agent panel to be separated, not included n is part
+of tools & logs panel", with a screenshot of the Claude Code GUI's Files and
+Background-tasks panels as the reference for "corners, edges, the roundness &
+consistency".
+
+*The separation was not cosmetic.* `#agpane` was a child of `#side`, so it
+shared that panel's box and its borders - and `#app.no-side #side{display:none}`
+meant **closing the log closed the sub-agents too**, with no way to have one
+without the other. The right column is now `#rightcol`, a stack holding two
+independent panels. Measured after: closing the log leaves sub-agents at
+304x779; each panel closes from its own header without touching the other.
+
+*One place computes the column width.* It is a function of BOTH panels, and two
+call sites each setting `--side` from their own flag is exactly how closing one
+collapsed the other. `syncRight()` is the only writer, and the CSS carries the
+same rule declaratively: `#app.no-side:not(.agents-on){--side:0px}`.
+
+*The consistency ask, made concrete.* Every docked panel wears one class:
+`.dockcard` (same background, same 1px edge, same `--r3` radius) with a 34px
+`.phead`. The terminal strip was the last square, full-bleed panel and now wears
+it too - which is what made the bottom of the window look like a different
+application from the side of it. The checks assert it rather than trusting the
+eye: both panels report `12px vs 12px` radius and `1px vs 1px` border.
+
+*Three real bugs found by measuring instead of looking:*
+- **`.pcard` already existed** - it is the provider card on the Settings page.
+  Naming the new panel class the same thing silently gave every provider card
+  `display:flex;flex-direction:column`, and gave the two docked panels a stray
+  `margin-bottom:10px` and `padding:13px` from a rule about something else. It
+  only surfaced because the measured seam was 18px where the design said 8. The
+  panel class is `.dockcard`; measured after, the seam is exactly 8px.
+- **`#sidetabs button` was styling the pop-out button too**, handing it `flex:1`.
+  That is why it stretched and sat at a different size from every other icon
+  button in the app. Scoped to `[data-sp]`.
+- **A 0px-high box still paints its borders.** With the terminal closed the row
+  is 0px, so the new full border would have left a stray 2px rule floating above
+  the bottom edge. Not `display:none` - xterm measures that as zero and refits
+  to one column (§37).
+
+*The grip lives in the gap between the cards*, pulled back over the 8px seam
+with negative margins, so it belongs to neither panel. It is hidden when the log
+is closed: alone in the column there is nothing to drag against, and a grip
+resizing nothing is debris (§40, same argument).
+
+*Empty states are the whole panel now.* With no agents, the transcript and
+composer were two empty boxes under a paragraph explaining there was nothing
+there - and the explanation had a scrollbar, because it was being capped at 44%
+by a rule meant for a list of rows.
+
+`dev/uiagents.mjs` asserts separation rather than nesting - it used to assert
+the opposite, and passed, because the pane genuinely was inside `#side`. 37
+checks, no console errors.
+
+**44. Pop-out windows opened EMPTY, and the reason was a responsive rule.**
+
+Reported with a screenshot: two pop-out windows, both black, and the docked
+panels still sitting in the main window behind them.
+
+*The cause, measured rather than guessed.* WebView2 speaks CDP, so the real
+window could be interrogated directly - start the app with
+`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--remote-debugging-port=9333` and attach.
+The window had navigated correctly, `readyState: complete`, the right classes
+on `#app`, 287 KB of HTML, **no console error at all** - and `#rightcol` was
+`0x0, display:none`. The culprit was `@media (max-width:900px)`, which hides the
+companion column so a cramped main area is not squeezed. **The log pop-out opens
+at 760px and the sub-agents one at 520px**, so the rule meant to protect a
+narrow layout was deleting the entire contents of every panel pop-out.
+`:not(.solo)` on both rules; a pop-out IS that column.
+
+*Why every check missed it for weeks.* The solo checks navigated to `?only=...`
+in a **1440px** window. They asserted the right things about a width no pop-out
+ever has. All four now run at the size their window actually opens at, which is
+the only version of that check worth having.
+
+*Second half of the report - "old ones aint disappearing".* `popSide` and
+`#agpop` returned as soon as the OS window opened, without collapsing the docked
+copy, so the same panel was in two places and only one of them was live. They
+now collapse through `syncRight()`, the way `popTerminal` already did.
+Verified in the real app over CDP: `#sidepop` takes the column 320 -> 0 and the
+button dark; `#agpop` the same.
+
+*A third, found on the way:* in a popped-out window the panel header's own close
+button removed the class the panel is displayed BY - so pressing it blanked the
+window it was in. Those buttons are hidden in `.solo` and in `.win-body`.
+
+**45. Motion: the transition that was not transitioning, and a check that had
+been measuring the reduced-motion path all along.**
+
+- **`transition:grid-template-columns` did nothing.** Measured: 320 -> 0 in one
+  sample. The track is `var(--side)`, and an **unregistered custom property has
+  no type**, so it changes discretely and the substituted track jumps.
+  `@property --side{syntax:'<length-percentage>'}` (and `--term`) gives them a
+  real type; the tracks then interpolate for free. Measured after:
+  `320 -> 92 -> 26 -> 7 -> 1 -> 0`, which is the expo-out curve doing its job.
+- **`box-sizing:border-box` floors used width at padding+border**, so a fully
+  closed column still measured **16px** - a sliver of page background welded to
+  the right edge after the panel had gone. The padding transitions away with it.
+- **Headless Chrome reports `prefers-reduced-motion: reduce`.** The first motion
+  measurement came back `transition-duration: 1e-05s` - the global reduced-motion
+  override, not the rule. Every animation check ever run in `dev/` has been
+  measuring the reduced-motion path and calling it the real one. Probes now send
+  `Emulation.setEmulatedMedia` with `no-preference`.
+- Nothing is `display:none` on the way out any more: the column animates to zero
+  and `overflow:hidden` does the hiding, so a panel slides away instead of
+  vanishing a beat before the gap closes.
+- **Anything sized from its host must redraw AFTER the travel, not during it.**
+  `drawGraph` ran at 90ms into a 280ms move and fitted the canvas to a width it
+  no longer had; `xterm.fit()` had the same problem with the terminal strip.
+  Both now fire at 320ms.
+
+**46. One toolbar, one height, one corner.** All measured, all fixed:
+- The top-bar panel button was the **only icon-only `.ghost` in the app** - a
+  text button's padding around a 16px glyph, so it sat wider and at a different
+  corner from every other icon button on screen. It is an `.ibtn`. Same §38
+  mistake, new place.
+- `.ibtn` measured **26px** tall against `.ghost`'s 28. Both are 28 now, and
+  `.seg` and `#vis` too - `#vis` was a third size, 25px, in the same row.
+  Measured after: every control in the top bar is `h=28 top=9 r=6px`.
+- The last two hard-coded radii (`3px`, `4px`) and the last two ad-hoc easing
+  curves (`cubic-bezier(.2,.8,.3,1)` twice) are folded into the `:root` scale.
+  `pulse` was running at two different durations for one animation.
+- `.ghost` gained the hover/active/focus treatment `.ibtn` already had, so a
+  text button and an icon button respond the same way to the same gesture.
+
+**47. `detect` was asking the wrong provider. Two bugs, one message.**
+
+Reported as: adding OpenRouter's free `qwen3.8 27b`, pressing **detect**, and
+being told *this provider does not offer "qwen/qwen3.827b:free" (412 models
+listed)* - when OpenRouter plainly lists it.
+
+*The count was the whole diagnosis.* 412 is not OpenRouter's catalogue. Measured
+both endpoints directly: **aicredits.in lists 412 models, OpenRouter lists 447.**
+So detect had queried aicredits.in while the button sat on an OpenRouter row.
+
+`/api/models` used `chain.primary_client()` - the **saved** chain's first
+provider. A row you are still typing is not in the saved chain at all, which is
+exactly the situation you are in while adding one. It now takes the row's
+`base_url` and key (masked key means "the one stored under this name", the same
+rule `save_providers` already uses) and the answer names the endpoint it asked,
+so a wrong one can never be invisible again.
+
+*The second fault was a typo - `qwen3.827b` for `qwen3.8-27b` - and the app was
+holding the answer while saying no.* A model id is copied by hand off a web
+page, which is precisely where a hyphen goes missing, and the whole catalogue is
+in hand at that moment. Detect now ranks near matches on a punctuation-stripped
+subsequence score and offers the best one as a button. Verified end to end
+against the live endpoint: the mistyped id produces *"did you mean
+qwen/qwen3.8-27b:free"*, one click fills it in, and the context length comes
+back **262,144** - which matches the 262K OpenRouter publishes.
+
+`dev/uidetect.mjs` reproduces the exact report. It skips without a key rather
+than failing, because it calls a real endpoint.
+
+**48. The Log/Tasks panel could not be closed - `#sidetabs button` again.**
+
+`$$('#sidetabs button')` matches **every** button in that row, including the
+pop-out and close buttons sitting beside the two tabs. So the tab-switch loop
+**overwrote their handlers**, and clicking the X ran the tab code for a button
+with no `data-sp`: `$('#sp-' + undefined)` is null and `.classList` on it threw.
+The button was not dead, it was running the wrong handler and dying.
+
+**This is §43's bug, one line away, in the other language.** That entry records
+scoping the CSS to `[data-sp]` for exactly this reason and the JS was left
+alone. `#sidepop` escaped only because it is re-bound 2,000 lines further down
+the file - the kind of accident that makes a bug look selective and sends you
+looking in the wrong place. All three `#sidetabs button` selectors are scoped
+now.
+
+`dev/uiclose.mjs` drives every route that claims to close the panel - the top-bar
+toggle, the header X, and the same two with the sub-agents panel open.
+
+**49. The memory pop-out, and a caption that was lying.**
+
+Asked for as "check the ui n its inconsistency in memory pop out window".
+
+- **Two panes in one window is the same shape as the right column**, so it wears
+  the same clothes now: 8px inset, both panes as `--r3` cards, a real seam
+  between them. They were full-bleed squares butted together, in a window whose
+  siblings are all rounded cards.
+- `#app.solo #memsplit{display:none}` meant **the split could not be moved** -
+  in the one place a split most needs to, since the window itself resizes. The
+  drag also had to learn which pane is the fixed one: the graph on the page, the
+  text above it in the pop-out. Dragging the wrong one sets a height `flex:1`
+  overrules immediately, which reads as a divider that does nothing.
+- `#memtop` was pinned at `45vh`, landing the suggestion chips exactly on the
+  boundary, so the graph pane sliced them in half. Visible in the report's photo.
+- **Every pop-out carried a 56px dead strip down its left edge.** Hiding `#rail`
+  does not collapse its grid TRACK. Measured: an 860px memory window had 804px
+  of content. The three side-panel views zeroed it by hand; nothing covered the
+  rest.
+
+*And the caption was lying.* `gScopeUrl()` fell back to the **unscoped** URL when
+the scope was `session` but no conversation was open - so the Memory pane fetched
+all 1,322 entities and captioned them "1322 this session". §39 wrote an honest
+empty state for precisely this case and the fallback walked straight past it.
+`null` now means "nothing this scope could return", not "fetch everything".
+Measured after: Graph page **1322 of 1322**, Memory pane **no session yet,
+nodes=0**. Both true for the first time.
+
+**50. Both providers failed at once - and the error was hiding the reason.**
+
+Reported with a screenshot: *all 2 provider(s) failed*, nine lines of nested
+JSON, the chat dead. Three separate things, only one of which was a harness bug.
+
+*What was actually true.* `qwen/qwen3.8-27b:free` was **429 rate-limited
+upstream** - OpenRouter routes the free tier through a shared pool (ModelRun)
+and it was saturated. Confirmed by hand: three spaced requests, three 429s. Not
+a harness fault, and not something a retry fixes. The fallback was aicredits.in,
+which is out of balance (402). So both rungs of the chain were genuinely down.
+
+*Bug one: the retry order was backwards.* Six attempts against the rate-limited
+pool, ~11s of backoff, **before the chain was allowed to try anything else**.
+A 429 is not a hiccup, it is a verdict about right now - and hammering a
+saturated shared pool is what the limit exists to stop. `is_rate_limit` is now
+separate from `is_transient`, and a 429 falls through immediately **when there
+is another provider to fall through to**. The in-place retry survives only for
+the last provider in the chain, where it is the only option left.
+`ProviderChain::build` is the one thing that knows the chain's shape, so it sets
+`with_fallback` on every entry but the last.
+
+*Bug two: the error threw away its own point.* Gateways nest the sentence you
+need: OpenRouter sends `{"error":{"message":"Provider returned error",
+"metadata":{"raw":"<the actual sentence>","provider_name":"ModelRun"}}}` - and
+the outer `message` is the useless half. `explain()` unwraps `metadata.raw`
+first, appends which upstream, collapses whitespace, and **passes unparseable
+bodies through untouched** rather than swallowing them. Nine lines became one.
+
+*The fix he actually needed: a model that works.* `dev/freemodels.mjs` tests
+every free tool-capable model on OpenRouter under the harness's real conditions
+- **133 tool schemas and streaming**, because a model that tool-calls with one
+tool can fall back to prose with a hundred, and the harness streams (§12g).
+Measured: six of eleven free models emit proper `tool_calls`; `poolside` and
+`qwen` were 429; `nemotron-3.5-lightning` timed out at 60s.
+
+The chain is now `deepseek/deepseek-v4-flash-0731:free` (1,048,576 context,
+free) -> `inclusionai/ling-3.0-flash-vl:free` (262k, fastest at ~1.5s) -> the
+rate-limited qwen (a shared pool recovers on its own, so it is kept, not
+deleted) -> aicredits. Verified through `/api/chat`: tool call to
+`kuzu_graph__graph_stats`, correct answer of 1,322 entities / 1,627 relations.
+
+*One observation worth keeping, because it nearly sent me the wrong way.* The
+first harness run with deepseek returned its tool call as **text markup**
+(`<｜DSML｜_call>`) instead of the `tool_calls` field - which looks like an
+answer and is useless. It did not reproduce: 8 further runs at full toolset,
+streamed, with a persona-sized system prompt, were all clean. Free endpoints
+route across backends, so one of them served a raw template. Worth knowing it
+can happen; not worth designing around on one occurrence.
+
+*Amended on request: one model family, two rungs.* Adithya asked for
+`qwen/qwen3.8-27b:free` and nothing else, so deepseek and ling are out. The
+chain is now the free model as **default** with the **paid** `qwen/qwen3.8-27b`
+behind it on the same key - 1,000,000 context against the free variant's
+262,144, which is the real maximum for this model.
+
+*Which is what makes the §50 retry rule pay off.* Measured through the running
+harness the moment it was configured:
+
+```
+[warn] Qwen 3.8 27B (free) failed: 429 ... rate-limited upstream
+       (upstream: ModelRun) (after 0.5s, attempt 1)
+answered by: qwen/qwen3.8-27b        reply: PONG        5.65s total
+```
+
+**Attempt 1, not attempt 6.** The 429 fell straight through instead of spending
+~7.5s backing off against a pool that was not going to clear, and the paid rung
+answered. With the free model alone this same turn was simply dead.
+
+*The limit is NOT an account limit, and that distinction matters.* The 429
+carries no `x-ratelimit-*` headers at all and the first one named its source as
+`upstream_provider_shared_pool`; the account reports `usage: 0`,
+`limit: null`. So it has nothing to do with how much Adithya has used it -
+every OpenRouter free-tier caller for this model draws on one upstream
+allowance, and he is queued behind strangers. Using it less does not help;
+only BYOK (his own ModelRun key at openrouter.ai/settings/integrations) or the
+paid rung does.
+
+*Where it bites hardest, and it is not the chat box.* **A turn is not one
+request** - the tool loop runs up to 8 rounds and each round is its own call
+(§Phase 0). So a message that checks the graph, reads a file and searches memory
+is four requests, and a flickering pool can serve round 1 and refuse round 3 -
+killing the turn *after* tools have already run and written to the log. Loops
+(§36) are worse: `daily-review` fires once at 22:00, a 429 in that minute counts
+as a run against `max_runs`, and the day's review is silently lost until
+tomorrow. Sub-agents (§42) are the most likely to trip it, since asking three
+at once is three concurrent calls into the same tight pool.
+
+*Cost of the paid rung, from its own usage report:* $0.214/M prompt,
+$2.55/M completion. At §12f's 22,300 prompt tokens a turn that is ~$0.005 of
+prompt before anything is said, so a four-round tool turn lands near $0.02.
+**Note the model reasons:** a 20-token completion came back as
+`reasoning_tokens: 20` with empty content - thinking bills at the completion
+rate, twelve times the prompt rate, and it is invisible in the reply.
+
+**51. "its using paid one... not free" - and the log had no way to say so.**
+
+Reported with two screenshots: the OpenRouter activity page showing real spend
+on `Qwen3.8 27B` via DekaLLM, against a session whose log line 1 read
+`model qwen/qwen3.8-27b:free`.
+
+*Both were true, which is the whole problem.* The free rung 429'd, the chain
+fell through to the paid one exactly as designed, and it answered every turn -
+but `session_start` is written once, at session creation, with the model the
+session OPENED with. The failover updated `self.model` in memory and **wrote
+nothing to the event log**, so the Log panel went on naming a model that had not
+answered anything. The comment there claimed the switch "shows up in the session
+metadata"; it showed up in `/api/session`, never in the append-only log, which
+is the source of truth and the thing the panel reads.
+
+A failover now appends a `System` event naming both models. That keeps §4a
+intact - nothing is overwritten, the switch is just part of the trace, and
+`reduce` picks it up like any other event.
+
+*Config: free only, again.* Every paid rung is disabled, `retries` back to 4
+since the free model is once more the last rung and retrying in place is the
+only thing that can work. A 429 now means the turn fails, which is the trade he
+asked for.
+
+**52. Timestamps on every message and every log row.**
+
+Asked for as "add time details per msg in the log n normal chat... below (aside
+the copy, resend, edit options)".
+
+*The row is always there now; the BUTTONS are what hide.* §34 made the whole
+actions row `opacity:0` until hover, which is right for actions and wrong for a
+timestamp - "when did this happen" is information you want without going looking
+for it. Time first so the buttons appear to its right and **nothing moves**
+when they do (measured: the time sits at x=273 before and after).
+
+`fmtTime` gives `HH:MM` for today and `Sep 19 23:13` for anything older, because
+a bare time on a session replayed from last week says almost nothing; the full
+stamp is in the tooltip either way. Replayed messages carry the real `e.ts` from
+the log rather than the time they were re-rendered.
+
+The log panel gets the same treatment, right-aligned per row. That panel is the
+transparency window (§4a) and "when" is half of what makes a trace readable -
+reading it backward to answer "why did it do that" needs the clock, not just
+the order.
+
+*Two check faults found while verifying, neither an app bug:*
+- **`uimsgacts` reported `MISMATCH` on copy against an app that copies
+  perfectly.** Two causes stacked: headless Chrome denies clipboard reads
+  without `Browser.grantPermissions`, and the check printed the first 44
+  characters while judging the whole string - so two identical-looking lines
+  carried a verdict nobody could act on. With permission granted, a single-line
+  message is byte-identical. The long one reads back **379 against 373**, and
+  the difference is exactly its six line breaks: **Windows hands back CRLF from
+  the clipboard whatever you wrote into it.** The comparison normalises line
+  endings and says so.
+- The idle assertion still described the old design, and asserting the row's
+  opacity alone would pass whether or not the actions were correctly hidden. It
+  checks the real contract now: `row=1 buttons=0 time="23:25"`.
+
+`dev/uimsgacts.mjs` covers it; measured after: 4/4 messages and 5/5 log rows
+carry a time, console clean.
+
+**53. The free model has THREE separate failure modes, and only one of them was
+a rate limit.**
+
+Reported with a screenshot of *"429 Rate limit exceeded: free-models-per-day.
+Add 5 credits to unlock 1000 free model requests per day (after 0.0s,
+attempt 5)"*. Chasing it turned up two more things sitting behind it.
+
+**(a) A DAILY quota, which is not the §50 limit.** The account endpoint says it
+outright: `free_model_daily_requests: {used, limit: 50, remaining}`. Fifty free
+requests a day, and **a turn is not one request** - the tool loop runs up to 8
+rounds, each its own call, so 50/day is closer to **6-12 real messages**. That
+is the number that will define the experience, not the token cost.
+
+*The bug:* `after 0.0s, attempt 5` - five attempts against a wall that resets on
+a calendar. §50's rule only skipped the in-place retry when a fallback existed;
+with the free model as the sole rung it retried anyway. `is_quota_limit` now
+splits "spent allowance" from "busy moment" and never retries the former.
+*Measured afterwards, and worth stating precisely rather than assuming the
+worse version:* a rejected 429 does **not** count against the daily allowance -
+five failed attempts left `used` at 2, the two calls that actually succeeded.
+So the waste was time, not quota.
+
+**(b) The upstream shared pool, still flickering.** Independent of (a) and the
+same limit as §50. Confirmed both live at once: the daily counter had reset
+(`used 2 of 50`) while direct calls alternated 200 and 429 minute to minute.
+Two limits on one model, which is why it looked inconsistent.
+
+**(c) The one that was not a rate limit at all - and would have gone on being
+blamed on them.** A turn came back:
+
+```
+400 Bad Request: failed to translate request: folding the request grammar:
+grammar rejected: tool "kuzu_graph__query_graph" parameter schema:
+parameter "relation": more than one JSON reading of the same emitted value
+```
+
+**ModelRun compiles the whole toolset into a constrained-decoding grammar**, and
+a parameter that is BOTH nullable and optional is ambiguous to it: `str | None
+= None` emits `anyOf:[string,null]` with `default:null` and no `required` entry,
+so the same meaning has two encodings - omit the field, or send `null`. The
+whole turn 400s on a tool the model never called. **The paid rung never hit
+this**, which is exactly why it read as a free-tier problem.
+
+Fixed in both of our own servers: `str = ""`, converting back with `x or None`
+at the call site where the callee distinguishes them (`_call` in nyx-tools
+already drops `None` kwargs, so the wire behaviour is byte-identical). 12
+signatures and 12 call sites in nyx-tools, one in kuzu-graph. **Three required
+params got the `or None` treatment by the same sweep and were reverted** - on a
+required field that would silently turn an empty string into "use the current
+buffer" instead of an error.
+
+*And a stale note corrected:* §12h-b says nyx-tools is "registered disabled". It
+is **enabled**, which is how `nyx_tools__file_symbols` became the next tool the
+grammar rejected after kuzu was fixed.
+
+**`dev/schemacheck.py`** starts every enabled server over real stdio and lists
+every nullable-optional parameter. After the fixes: kuzu_graph 0, nyx_tools 0,
+snarevec 0, nvim_lsp 0 - and **uacc 22**, because UACC is third-party
+(§Phase 0). So today, on this provider, **the free model and UACC cannot both
+be on**: verified by disabling uacc and watching the 400 disappear entirely,
+leaving only the pool's 429s. UACC was restored afterwards rather than quietly
+left off - which server is on is his call, and the per-workspace Connectors
+tick-box (§25) is the control that already exists for it.
+
+**54. The call on §53: keep UACC, pay for the model - and a CLI that had been
+answering from the wrong provider the whole time.**
+
+§53 ended with a trade: on this provider the free model and UACC cannot both be
+on. Adithya took the second option and gave the reason, which changes what the
+decision is about: UACC's screen reading is **load-bearing for what comes next**,
+not a nice-to-have, because a tool he is building ("jev") will take instructions
+from bluee and drive the desktop, and both sides still need to see the screen.
+Dropping 70 tools to dodge a grammar bug in one of their schemas would have cut
+the capability the next feature depends on.
+
+*Config now:* `qwen/qwen3.8-27b` **paid** is the only enabled rung, at 1,000,000
+context, `retries: 3` (last rung, so retrying in place is all there is). The
+free rung and the aicredits.in one stay in the file, disabled, one tick from
+coming back. UACC stays enabled.
+
+*Verified through a real turn, not by reading the config:* 157 tools with every
+server on, `kuzu_graph__graph_stats` called and answered correctly (1,322
+entities / 1,627 relations). **No 400.** The grammar rejection of §53c is
+specific to the free endpoint's constrained decoder; the paid route does not
+compile the toolset that way and UACC's 22 ambiguous schemas pass straight
+through.
+
+*What it costs, measured on that turn rather than estimated:* `total_usage` went
+0.61363698 -> 0.62301808, so **$0.0094 for one two-round tool turn** carrying the
+full 157-tool schema set. On the $5 balance that is roughly **460 turns**, and
+§12f's lever still applies - scoping a workspace to one server cuts most of the
+prompt. The daily-quota and shared-pool limits of §53a/§53b are gone entirely:
+they were both properties of `:free`.
+
+**The bug this turned up, which is worse than the thing it was hiding.**
+The first verification run returned `402 Payment Required: Insufficient Balance`
+while a direct curl to the same model on the same key returned **HTTP 200**.
+Cause: **`harness chat` never used the provider chain.** It built an
+`OpenAiCompatible` straight from `.env` and ran its own ~180-line tool loop - so
+it answered from aicredits.in (out of balance) no matter what the Providers page
+said, and the obvious reading of its error was "the new provider is broken".
+
+Phase 2 records extracting `Agent` precisely so "the dashboard, the CLI and
+later voice all drive the same loop rather than three parallel implementations".
+The dashboard and voice were moved; the CLI was left behind and nobody noticed,
+because the two loops agreed on everything except which provider to ask. `chat`
+is now ~110 lines over `Agent`, and inherits what the duplicate silently lacked:
+the chain and its fallback order, the §51 failover event, workspace tool scoping
+(§25), and the §6 vision gate.
+
+*Worth stating plainly:* every measurement taken through `harness chat` before
+this was taken against `.env`'s provider, not the configured one.
+
+**Recorded, not built: the jev bridge.** The tool is not written yet and the
+repo path is coming. When it lands, the work is (a) connect it as an MCP server
+for bluee and register it here, and (b) write its input format into
+`persona/TOOLS.md` so bluee emits instructions in the shape jev expects, rather
+than prose it has to guess at. Nothing about that should be designed before
+seeing the real format - the one thing this file has been wrong about most often
+is guessing at an interface instead of reading it.
+
+**55. "No entities" - the graph was full, every tool server was dead, and the
+page confidently blamed the wrong thing.**
+
+Reported with two photos: a Graph page reading *"Graph is empty. Run /reduce to
+build it from your conversations"*, and a chat where bluee answered a question
+about the graph by running `list_folders`, `run_command` four times and
+`read_file`, then giving up at *"stopped after 8 tool rounds"*.
+
+*Nothing was wrong with the graph.* Measured against the running window over its
+own API: **1,322 entities and 1,627 relations, exactly as before.** What the app
+said about itself, through the same API:
+
+```
+/api/stats   servers 0   tools 0
+/api/mcp     kuzu_graph enabled true  connected false  tools 0   (and the other four)
+/api/graph   500  {"error":"no connected MCP server named `kuzu_graph`"}
+```
+
+**Every one of its five tool servers had failed to start**, so bluee had only
+its own native tools - which is exactly why it went hunting through the
+filesystem for an answer that was one `kuzu_graph__graph_stats` call away. It
+was not being stupid; it had been left without the tool. The same binary,
+started again from the same directory, connects all five and 133 tools, so this
+was a bad startup, not a broken configuration.
+
+**Why it presented as an empty graph, which is the part worth fixing.** Two
+faults stacked:
+
+- **`api()` was `fetch(p,o).then(r=>r.json())` - it never looked at the status.**
+  A 500 carrying `{"error":"..."}` resolved like data. So `.catch()` never ran,
+  `failed` was never set, `gReady` stayed true, and the page printed the
+  *empty-graph* message while the server was telling it, in that very response,
+  that the graph server was not connected. §39 wrote that honest empty state and
+  it could never fire.
+- **The failure text existed for about a second and was then thrown away.**
+  `McpRegistry::connect` returns the failures, `serve_on` prints them to stderr
+  and drops them. That is fine for `harness dash` in a terminal and useless for
+  `harness app`, which has no console at all. The one artefact that could have
+  named the cause went to a stream nobody was reading.
+
+*So the error was available the whole time and unreachable from where he was
+looking.* Fixed at every layer: `api()` marks any non-2xx `failed` and
+synthesises an `error` when the body has none; the Graph page distinguishes a
+fourth case - store fine, server missing - and prints the real sentence plus
+where to go; the registry keeps the failures and `/api/mcp` serves them per
+server; the MCP page shows each reason inline and a banner when the count is
+zero.
+
+**And a way out that is not "restart everything".** Restarting was the only cure
+and it ends the conversation you are in the middle of. `McpRegistry` now holds
+its connections in a `RwLock<Arc<Inner>>` and `reconnect()` swaps a freshly
+connected set in - so the live agent, every sub-agent and the loop scheduler
+pick up the new servers **without being rebuilt**, because they all hold an
+`Arc` to the same registry. A snapshot is taken per call and the guard dropped
+before any await, so a slow tool cannot block a reconnect and a reconnect cannot
+cut off a call already in flight. `Agent::refresh_tools` tells the running agent,
+or the reconnect would appear to do nothing until the next new chat.
+
+*Verified by breaking it on purpose rather than by reading the code.* A dash
+started against a config whose commands do not exist:
+
+```
+connected 0
+  kuzu_graph  spawning `no/such/python.exe`: The system cannot find the path specified. (os error 3)
+  ... and the same for nvim_lsp, nyx_tools, snarevec, uacc
+/api/graph   500  "no MCP server is connected, so `kuzu_graph` is unreachable"
+```
+
+then the config repaired on disk and **one POST to `/api/mcp/reconnect`, no
+restart**: `ok true, connected 5, tools 133, failures []`, and `/api/graph` came
+straight back with **1,322 nodes / 1,627 edges**.
+
+`dev/uigraphdown.mjs` drives both states in real Chrome - a healthy instance and
+a deliberately broken one - and asserts the thing that actually went wrong: that
+a failed fetch is *recognised* as failed, that the reason survives to the
+screen, and that the page does not say `Run /reduce`. 10 checks, console clean.
+
+*One honest gap:* the failure text from his instance is gone, so **why** all five
+failed to spawn at 11:41 that morning is not knowable now - the same command in
+the same directory works before and after. Keeping the reason is the fix for
+next time; guessing at it would be inventing a cause.
+
+**56. A pass over the whole harness for cost, recall and control - five
+changes, each measured through the running harness with the real model.**
+
+Asked for as "go through the whole harness and suggest improvements which can
+drastically increase my use". The research list in `RESEARCH.md` had ranked
+most of these already; none had been built.
+
+*(a) Deferred tool loading - `src/toolsearch.rs`.* The model now gets bluee's
+own tools, the graph, and ONE `find_tools` tool whose description is a
+catalogue of every other tool's name. It loads the schemas a job needs (keyword
+search or `select:a,b`) and they stay loaded for the session. Calling a
+catalogued tool by name without loading it also works and loads it - observed
+live, the model did exactly that with `uacc__get_screen_info`. Measured on the
+same question with every server on:
+
+```
+                     tools in prompt   prompt tokens / round
+deferral off              157               27,483
+deferral on                32                7,010
+```
+
+Same answer both ways (it used the native `list_apps`, the cheapest right
+tool). `find_tools` → `snarevec__snarevec_status` → correct "not running,
+idled out" verified live. Workspace scoping still applies first: an unticked
+server is not in the catalogue. **Side effect worth testing:** §53c's grammar
+rejection came from UACC's schemas being compiled into the free endpoint's
+decoder; deferred schemas are never sent until loaded, so the free model may
+work again until something loads UACC. Not verified.
+
+*Honest note on money:* dollar cost per turn barely moved in the one-off
+measurements, because OpenRouter's usage counter lags and this model's hidden
+reasoning tokens (§50, billed at 12x the prompt rate) dominate a short turn.
+The token figure is exact; the saving grows with every extra tool round.
+`HARNESS_TOOL_SEARCH=off` is the escape hatch.
+
+*(b) Hybrid memory search - `src/memory.rs`.* FTS5 keyword index beside the
+vectors (external-content table kept in step by triggers, so every existing
+delete path maintains it untouched), fused with dense ranks by reciprocal rank
+fusion. The cosine is still what `score` reports, because the Memory page's
+relevance bar is calibrated on it. Two copies of one turn (live `session` +
+reducer `global`) collapse to one. FTS5 is inside the bundled SQLite - no new
+dependency; existing stores backfill on open (1,723/1,723 rows).
+
+*(c) Live indexing.* Each finished turn is embedded into `session` scope as it
+lands, so recall no longer waits on `reduce`, which §39 found had not run for
+three weeks. Verified: turns from minutes earlier, never reduced, came back
+from `harness search`. Best-effort - a failure never costs the reply.
+`HARNESS_LIVE_INDEX=off` disables.
+
+*(d) Hooks - `src/hooks.rs`.* `hooks.json` (example: `hooks.example.json`,
+`hooks/examples/`). pre_tool: exit 0 allows, anything else blocks, and a
+crash, timeout or unparseable file also blocks - fail closed. post_tool: output
+attached to the result as `hook_output`, which is the compiler-feedback path
+RESEARCH.md §7 asked for. Verified with the real model: `echo hello-ok` ran with
+the post-hook note attached; `echo BLOCKME` never ran and bluee reported the
+guard's reason verbatim. `raw_arg` for `cmd /C`, or a hook with its own quotes
+breaks - the live test's hook had nested quotes and survived.
+
+*(e) Turn robustness.*
+- **MCP calls had no timeout.** Found live, not theorised: the model asked
+  UACC for `get_screen_info {include_ocr: true}`, pytesseract is not installed,
+  EasyOCR never returned, and the turn - and the agent every surface shares -
+  hung for 10+ minutes. Now 120s (`HARNESS_TOOL_TIMEOUT`), with an error that
+  tells the model not to repeat the call. Verified at 15s via `harness call`.
+- Round cap 8 → 20, and hitting it no longer ends on an error: one final
+  tool-less completion makes the model say what it found and what is left.
+  (§55 ended on "stopped after 8 tool rounds".) Not triggered live.
+- Tool results go into the *prompt* clipped to 20k chars (head + tail, cut
+  stated); the log keeps every byte.
+- A withheld or out-of-workspace tool called by guessed name is now refused.
+  Before, `registry.resolve` would execute any tool on a connected server,
+  including `upsert_entity`, if the model typed its name.
+
+The Connectors menu's "about 23,009 prompt tokens a turn" was stale the moment
+(a) landed; it now reports the catalogue cost when deferral is on
+(`/api/stats` carries `tool_search`).
+
+**Noticed, not changed:** the `catch-up` loop (`on: startup`) fires on every
+launch - three paid runs during this pass's restarts. Capped at 6/day as
+designed, but every restart of the app costs a turn. *(Fixed in §57 - and the
+cap turned out not to apply to startup loops at all.)*
+
+**57. Memory that is always there: three tiers, remembered facts with
+history, and recall that happens without being asked.**
+
+Asked for as: graph and RAG "working all the time, as they are long term
+memory"; every MCP server connected but none loaded until the agent chooses;
+"I just want the agent to be able to use memory - long term, short term, per
+session". Plus the five next steps from §56, in order.
+
+*Memory is never optional.* `kuzu_graph` is a core server: loaded up front, and
+allowed in every workspace, loop and sub-agent regardless of the Connectors
+tick-boxes (`mcp_pool` bypasses scoping for core servers; the UI shows its
+switch locked as *memory · always on*). Everything else is deferred behind
+`find_tools` whenever there is anything to defer (`MIN_DEFERRED` 25 → 1).
+
+*Three tiers, one search path.* `search_memory` gained `scope`: `session`
+(this conversation, including what `/compact` moved out), `recent` (last 7
+days - read off the session id's date prefix, no new column), `all` (every
+conversation, the default) and `code`. **Code is no longer in the default** -
+1,736 code chunks against 79 conversation chunks meant repo text crowded
+conversational questions out of the top results. Filtering happens before
+ranking, so a narrow scope still gets a full k.
+
+*Facts - `src/facts.rs`, RESEARCH.md items 2 and 3.* `remember(subject,
+relation, object, ...)` stores one fact; `recall(about)` returns facts, graph
+links and matching conversations. **The design choice worth recording:** facts
+are stated by the model, not guessed by a background extractor. A `remember`
+call is an ordinary logged tool call, so the log line IS the evidence; the
+harness writes it to the graph live, and the reducer derives the identical set
+again from the same lines. No new event kind, no LLM at reduce time, fully
+reproducible. The graph write tools (`record_fact`, `close_facts`,
+`drop_session`) are withheld from the model.
+
+*Bi-temporal.* `Rel` gained `valid_from`, `valid_to`, `seq`, `note`. A fact that
+changes is closed, never deleted; `query_graph` returns current facts unless
+`include_history`. Supersession is one pure function (`facts::apply`) shared
+by the rebuild, with tests.
+
+*Auto-recall.* Before each message the harness attaches facts about anything
+the message names, plus past turns scoring >= 0.42 from other conversations,
+for that turn only (inserted, then removed - it never accumulates). Logged as
+a `System` note. `HARNESS_AUTO_RECALL=off` disables.
+
+*Verified live, in order, with a fake person so real memory stayed clean:*
+1. "my friend Zorblat Testperson works at Acme Test Co ... deadline 15 October"
+   → four `remember` calls in one round, no announcement.
+2. Restart, fresh session: "What's Zorblat's deadline again, and where does he
+   work?" → correct, from long-term memory.
+3. Fresh session: "Zorblat just left and joined Globex Test Ltd" → second
+   question "where before Globex?" answered "Acme Test Co" with auto-recall
+   attaching 4-5 facts.
+
+*Three faults found by those runs, all fixed:*
+- **Auto-recall matched whole names only**, so "Zorblat" never matched
+  "Zorblat Testperson" and nothing was attached. `facts::mentions` now also
+  matches a distinctive word of a multi-word name (>= 4 chars, not in a
+  common-word list, whole word only - "jev" does not match "jevons").
+- **`recall` did an exact-name graph lookup** and missed the same way, costing
+  a second round. It now resolves names through the fact list first.
+- **The model stored the new job without `replaces_previous`** - leaving two
+  current employers - and then told the user the old one was "kept as
+  history", which was false. One-value relations (`works_at`, `reports_to`,
+  `role`, `lives_in`, ...) now replace implicitly, and `remember` returns
+  `also_still_current` so an unclosed old value cannot be misread as history.
+  **`reduce` then repaired the live graph on its own**: rebuilt from the same
+  log lines under the fixed rules, 5 facts, 4 current, 1 history. That is §4a
+  earning its keep - a derived store with a bug in it is fixed by re-deriving.
+
+*§56 next steps:*
+- **3. OCR.** `pytesseract` into UACC's uv venv, Tesseract 5.4 via winget, and
+  `mcps/patches/uacc-tesseract-path.patch` because the installer does not put
+  it on PATH. Reads a rendered test string at ~200ms; the call that hung for
+  10+ minutes now has a working fast path.
+- **5. Startup loops.** `min_gap` (default 4h for `on: startup`). Found on the
+  way: the startup branch skipped `due()`, which is where `max_runs` lives, so
+  **startup loops had no daily cap at all**. `startup_due` applies both; test
+  covers fresh / 10 min ago / 5 h ago / capped. Verified: a restart minutes
+  after a run did not fire `catch-up`.
+- **4. The free model - inconclusive, not failed.** Chain temporarily set to
+  `qwen/qwen3.8-27b:free` alone (providers.json backed up and restored
+  byte-identical). Twelve attempts over ~15 minutes, plain memory questions and
+  a UACC-loading one, were every one `429 ... rate-limited upstream (ModelRun)`
+  - the §50 shared pool, before any request reached the model. So whether
+  deferral avoids the §53c grammar 400 is still unknown. Worth one retry at a
+  quieter hour; the test is the same two messages.
+
+**Known gap:** deleting the session that *closed* a fact does not reopen it
+until the next `reduce` (the live `close_facts` has no undo). Rebuilding gets
+it right; the live path does not try to.
+
+**58. "No MCP server is connected" - the real cause of §55, found. And the
+Memory page shows everything.**
+
+Reported with a screenshot of an empty Graph page: *no MCP server is
+connected, so `kuzu_graph` is unreachable*. §55 hit the same thing and had to
+close with "why is not knowable now". It is knowable now.
+
+*Diagnosis, from inside the running app rather than guessed.* `/api/mcp` said
+all five failed with `connection closed: initialize response`; `reconnect`
+failed identically, so it was not a startup race. The app's own terminal
+endpoint spawns a shell that inherits exactly what the MCP children inherit,
+so the checks were run there (a throwaway pty session; the script had to
+answer ConPTY's `ESC[6n` itself, which xterm.js normally does - Phase 2). From
+inside the app:
+
+```
+.venv\Scripts\python.exe mcps\kuzu-graph\server.py
+No Python at '"C:\Users\adity\AppData\Roaming\uv\python\cpython-3.12.14-...\python.exe'
+dir that python.exe  ->  The system cannot find the path specified.
+```
+
+From my shell the same file existed and worked. **Cause: MSIX filesystem
+virtualization.** The Claude desktop app is a packaged app; uv installed the
+3.12 interpreter (Phase 0, Aug 28) from inside it, so Windows redirected the
+write into `%LOCALAPPDATA%\Packages\Claude_pzs8sxrjxfjjc\LocalCache\Roaming\uv`.
+Processes started from within Claude see that private copy merged over the
+real `AppData\Roaming`; bluee launched from the desktop shortcut
+(`bluee-app.vbs` → `cmd` → `harness app`, no package identity) sees the real
+folder, where there is no interpreter. Every Python tool server - which is all
+five - died before the handshake. That is also why it looked intermittent in
+§55: it depended entirely on *what launched the app*, and every test run from
+a Claude-hosted shell worked.
+
+*Fix:* the interpreter was copied to
+`D:\tgt\python\cpython-3.12.14-windows-x86_64-none` (D: is never virtualized)
+and both `pyvenv.cfg` files (`.venv`, `mcps/UACC/.venv`) repointed, originals
+kept as `pyvenv.cfg.bak-appdata`. Verified from the app's side ("APP-SIDE OK"),
+then **one POST to `/api/mcp/reconnect` on the live app: 5 connected, 136
+tools, graph 1,432 nodes / 1,765 edges** - no restart, no lost conversation.
+
+*So it can never be silent again:* `connect_one` now pipes each child's stderr
+(still forwarded to ours), keeps the last lines, and puts them in the failure:
+`MCP handshake with X - the server said: <its words>`, plus a plain-language
+hint when the words are `No Python at`. Verified with a server that prints and
+exits: the reason and the hint came through. This is what §55 needed and did
+not have - it kept *our* error, when the useful sentence was the child's.
+
+*Lesson worth keeping for this machine:* **anything installed from a shell
+inside the Claude desktop app may exist only for processes started from
+Claude.** Install tools from a normal terminal, or into D:.
+
+*The Memory page, as asked ("graph of that session & whole rag must be
+visible"):* it was search-only - an empty box and three example chips. Now:
+- **Tier chips with counts** - This session / Last 7 days / All conversations
+  / Facts / Code - matching the tiers the agent uses (§57). `/api/memory`
+  browses a tier newest first (code by file), a page at a time, grouping the
+  live and rebuilt copies of one turn so each is listed once (test covers it).
+- **Search narrows the selected tier** (`/api/search` takes `scope` and
+  `session`); an empty box goes back to browsing.
+- **Facts** (`/api/facts`) with a *show history* toggle; ended facts are
+  struck through with their end date.
+- **The session graph fills in live.** It showed only what `reduce` had
+  stored, so the conversation you were in was always empty.
+  `reduce::live_session_graph` runs the reducer's own extraction and fact rules
+  over the session's log and the endpoint merges the result in, marked
+  `live` - derived and discarded, nothing written, so §4a holds and what it
+  shows is exactly what `reduce` will store. Verified with one real turn:
+  stored fact + 3 live tool edges, 6 nodes drawn.
+- The empty-state copy that said "run /reduce to fold it in" is gone, because
+  it is no longer true.
+
+Also: log rows for `system` events printed the word "system" instead of the
+note, hiding auto-recall, failovers and compaction. They print the note now.
+
+**59. Blank replies were not swallowed errors - the model thought until its
+budget ran out, and the harness never looked at why a reply ended.**
+
+Session `20260829-101419-58c030b6`: three empty bubbles in a row on a long
+PC-build question. bluee itself, asked afterwards, blamed a swallowed `402`.
+The log said otherwise: **no error events at all** - three `assistant_message`
+events with empty text, each ~50s after the question.
+
+*Reproduced against the live provider*, same message, model and 3000-token cap,
+streamed as the harness streams: `finish_reason: length`, **3000 of 3000
+completion tokens were `reasoning_tokens`, 0 characters of answer**, 52s,
+$0.0075 billed. The provider calls that success. The stream parser read only
+`content` and `tool_calls`, so "thought until the budget ran out" and "had
+nothing to say" were indistinguishable, and the chat drew an empty bubble.
+With OpenRouter's `reasoning: {max_tokens: 1200}` the same prompt answered in
+2,106 characters, `finish_reason: stop`, at the same cost.
+
+*Fixed in five small steps:*
+1. `Completion` carries `finish_reason` and `reasoning_chars`; the SSE parser
+   reads `finish_reason`, `delta.reasoning` and `delta.reasoning_content`.
+   Test built from the failing shape.
+2. **Thinking cap**, `reasoning_budget` per provider: unset = 40% of
+   `max_tokens` on OpenRouter, not sent elsewhere (a strict server may reject
+   the field), `0` = off.
+3. An empty reply is an `Error` event (`provider.empty_reply`) that says why
+   and what to change - never an empty `assistant_message`. Also on the
+   out-of-rounds final answer.
+4. Tool arguments that do not parse used to become `{}` and RUN. Now the model
+   is told (and whether the budget cut them off), and nothing runs.
+5. Replay drew neither `error` events (a failed turn reopened as a question
+   with no answer and no reason) nor whitespace-only replies. Both render now.
+
+*Verified:* the same question through the harness answered in full ($0.0064).
+Reopening the original session in real Chrome: 8 assistant bubbles, **0
+blank, 3 explained**.
+
+*Lesson:* the assistant's own explanation of a failure is a hypothesis, not a
+diagnosis - it confidently named a 402 that never happened, because the log
+held nothing that could tell it otherwise.
+
+**60. Demo prep: a better model (measured), skills that load themselves, and
+a real cart.**
+
+*Model.* `dev/modelbench.mjs` runs candidates through bluee itself (fresh data
+copy per model, scored from the event log). Easy set (graph stats, open apps,
+remember, SnareVec status via a deferred tool, memory recall) and hard set
+(crawl → embed → search chain; a Cypher question):
+
+```
+model                    easy  hard  speed (easy/hard)  $/M in/out
+z-ai/glm-5.3-flash        5/5   2/2   17s / 15s          0.15 / 0.50   <- default now
+deepseek/deepseek-v4.1    5/5   2/2   44s / 28s          0.30 / 1.20
+openai/gpt-5.6-luna       5/5   2/2   29s / 30s          0.20 / 1.20
+openai/gpt-6-luna         5/5   2/2   30s / 78s (wandered: 18 calls)  0.10 / 0.50
+qwen/qwen3.8-27b          5/5   2/2   47s / 33s          0.425 / 2.55  <- fallback
+google/gemini-3.8-flash   4/5   -     looped search_memory 60s, $0.23   dropped
+xiaomi/mimo-v2.6-flash    3/5   -     answered graph stats WITHOUT the tool (137 vs 1,434)  dropped
+```
+
+GLM-5.3-Flash is the default (`max_tokens` 6000), the paid Qwen behind it.
+Three benchmark lessons: a shared data copy let one model's `remember` make
+"already stored" the right answer for the next; the first run lost two models
+to a cold network path (warm it first); and **once the SnareVec extension
+connected mid-run, the shopping task added a real item (a Belkin USB-C cable)
+to Adithya's real Amazon cart** - correctly stopping at the cart, but on his
+account. The shopping task is now opt-in (`--shop`).
+
+*Skills load themselves* (`skills::matching`, `skills::for_servers`). A message
+naming a server (with aliases: "snare vec", "neovim"), a tool, a skill's new
+optional `- triggers:` line, or the skill itself attaches up to three skills
+to that turn AND loads their tools; `find_tools` lists the skills for any
+server it loads. `proposed/` is never offered. Triggers survive re-saves from
+the Settings editor and `save_skill` (test covers it). Six skills shipped:
+web-and-desktop-hybrid, shop-add-to-cart (stops at the cart, never pays),
+snarevec-crawl-and-search, uacc-desktop-control, graph-memory, code-navigation.
+
+*Two bugs found by the benchmark, both fixed:*
+- **`find_tools` answered "Nothing matched" for tools already loaded** - which
+  auto-loaded skills made common. GPT-6 Luna called it five times in a row.
+  It now says `already_loaded`. Qwen's hard score went 1/3 → 2/2 after.
+- **`loops.json` with a UTF-8 BOM loaded as "never run"**, re-arming every
+  loop's daily cap. BOM stripped; an unparseable file is now reported.
+
+*Desktop, live with GLM:* "open Notepad and type a line" → `open_app_window`
+failed (Windows 11 Notepad opens a TAB in the existing window, so no new
+window appears), the model recovered via `uacc.launch_app` +
+`wait_for_element`, found the existing window titled `*tmr ~ dbms review 1`,
+and **stopped to ask** rather than type into unsaved work. Correct behaviour;
+the tab case is a real gap in `open_app_window` worth closing.
+
+*Setup the demo depends on* (USER_GUIDE "Demo checklist"): the SnareVec daemon
+idles out after 30 minutes and the extension must be polling; Bash from
+Claude Code has no network here (PowerShell does), so model tests run through
+PowerShell.
+
+**61. Demo-readiness sweep: playground browser, sub-agents, voice, graph and
+memory - one real bug.**
+
+All on a copy of `data/`, free checks first, three GLM turns at the end:
+- **Voice:** worker healthy (faster-whisper tiny + Kokoro, CPU). TTS → STT round
+  trip: 3.3s of speech made in 4.6s cold, heard back in 2.3s as "this is
+  **Blueie**". STT had no vocabulary hint and auto language; set `prompt` to
+  the project's names and `language: en` (backup in scratch) → "this is
+  **Bluee**", word-perfect, 0.4s warm. `dev/uivoice.mjs`: page, engine swap,
+  "Speak it" 1.3s, mic live, console clean.
+- **Playground browser:** navigate `amazon.in` 1.6s, full page rendered,
+  6,482 chars of text. Separate profile, so signed out. The first `text` read
+  can land before load completes.
+- **Sub-agents panel:** `dev/uiagents.mjs` 42/42.
+- **Graph + memory, live:** `remember` + `graph_stats` in one turn (3.9s); in
+  a NEW session "when is my CP1 review demo?" answered in 1.3s with no tool
+  call - auto-recall had attached the fact.
+- **The bug: the model could never spawn a sub-agent.** The four sub-agent
+  tools were offered but missing from the turn loop's harness-routing list,
+  so `spawn_agent` fell through to the MCP lookup and came back "unknown
+  tool" - the panel worked, bluee did not. Only a real chat turn shows this;
+  §42's checks drove the panel. Fixed with one line; verified: spawn
+  `grapher` scoped to `kuzu_graph` → `ask_agent` → correct answer → bluee
+  stopped the agent itself.
+
+`dev/uipage.mjs memory` walks every tier with no query, "load more", and the
+history toggle. Measured: all 76 turns (30 + load more), recent 52, session 1,
+code 1,736 by file, facts 3 → 4 with history, 1 marked past; console clean.
+The Graph page needed no code change: with the servers back it draws the full
+1,432 entities.
+
+---
+
 ### 4h. Requested next, sized honestly (not yet built)
 
 Recorded so none of it is lost, with the reason each is a separate pass.
@@ -1297,13 +2562,45 @@ Voice is not in Phase 0-3 at all. It's Phase 5, explicitly optional, and nothing
     this path ever needs to be faster, the screenshot is what to optimise, not
     the model.
 
-### Phase 5 — Voice module (optional — add only once Phases 0-4 are solid)
-- [ ] Install whisper.cpp in the same 3.12 venv, benchmark `base` vs `small`, pick whichever hits real-time
-- [ ] Wire STT → the existing text-in path (no change to the harness core — it already takes text, voice just becomes another way to produce text input)
-- [ ] Piper TTS on the response side
-- [ ] Wake word via OpenWakeWord, with push-to-talk as the documented fallback (§1 kill criterion)
+### Phase 5 — Voice module — BUILT (STT + TTS; wake word still open)
+- [x] **STT: faster-whisper, not whisper.cpp.** §1 planned whisper.cpp for CPU
+      reasons. The target machine changed - this is being set up on a friend's
+      8GB GPU - and CTranslate2 is what actually runs Whisper fast on a consumer
+      card while shipping prebuilt wheels, where whisper.cpp wants a build.
+      Model, device, precision, language, beam size, temperature, VAD, the
+      vocabulary hint and the translate/transcribe switch are all on the page.
+- [x] **TTS: Piper and Kokoro**, plus a command escape hatch. Piper is ~30-60MB
+      a voice and fast on CPU; Kokoro is ~310MB and clearly better. Both are
+      ONNX, which is why the GPU story is `pip install onnxruntime-gpu` rather
+      than matching a CUDA build of torch.
+- [x] **Wired into the existing text path**, exactly as §1 predicted: the mic
+      produces text and drops it in the composer. It is NOT sent automatically -
+      Whisper mishears, and sending before you can see what it heard is how you
+      end up apologising to your own assistant.
+- [x] Settings → Voice: every setting, plus a status strip that reports what is
+      installed and which device it landed on.
+- [ ] Wake word (OpenWakeWord). Push-to-talk is built and is the documented
+      fallback (§1 kill criterion), so this is now an addition rather than a gap.
 
-This phase is skippable entirely if time runs out — the harness is fully usable via text without it, by design.
+**Measured end to end on this machine (i5-11300H, no GPU):** Piper synthesises a
+short sentence in **65-90ms**; Whisper `tiny` transcribes a 3.6s clip in
+**786ms** warm. The round trip is exact - speech synthesised by Piper and fed
+straight back to Whisper came back verbatim at 0.98 language confidence.
+
+**Architecture (§ src/voice.rs + voice/worker.py).** The models live in a Python
+child that the harness owns - start it, adopt one a previous run left behind,
+kill only what we started, the same shape as `src/browser.rs`. Two reasons, both
+practical: rebuilding the binary would otherwise drop hundreds of megabytes of
+loaded weights, and a model that segfaults would take the assistant with it.
+`data/voice.json` is written by the settings page and read directly by the
+worker on mtime change - one file, one writer, no second copy to drift.
+
+**Nothing leaves the machine, and the page says so.** There is no key field
+because there is no service being called. The LLM stays separate and can be a
+cloud API while all the speech is local, which is exactly the split this is for.
+
+**`voice/README.md`** carries the GPU install, what fits in 8GB, and where to
+get voices.
 
 ### Phase 6 — Rehearsal + buffer
 - [ ] Run through the flow 2–3 times as you'll actually use it day to day

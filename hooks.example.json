@@ -1,0 +1,17 @@
+{
+  "$comment": "Copy to hooks.json to enable. Re-read on every tool call - no restart needed. See src/hooks.rs and USER_GUIDE.md 'Hooks'. pre_tool: exit 0 allows, anything else blocks (and a hook that crashes or times out blocks too). post_tool: never blocks; what it prints is attached to the result the model sees.",
+  "pre_tool": [
+    {
+      "match": "harness__run_command",
+      "command": "python hooks/examples/guard_commands.py",
+      "timeout_secs": 10
+    }
+  ],
+  "post_tool": [
+    {
+      "match": "harness__create_artifact",
+      "command": "python hooks/examples/check_artifact.py",
+      "timeout_secs": 20
+    }
+  ]
+}

@@ -3,7 +3,7 @@
 > quick disk usage check
 
 - category: toolkit
-- tools: uacc__run_command
+- tools: harness__run_command
 - created: 2026-08-29T14:24:37.047702900+00:00
 - updated: 2026-08-29T14:24:37.047702900+00:00
 
