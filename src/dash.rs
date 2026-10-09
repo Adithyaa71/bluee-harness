@@ -305,6 +305,10 @@ async fn chat_stream(mut socket: WebSocket, s: Shared) {
            bluee was waiting on has arrived. The message says plainly that
            Adithya did not type it - the log must not put words in his mouth. */
         let wake = frame.get("wake").and_then(|v| v.as_bool()).unwrap_or(false);
+        let picks: crate::agent::Picks = frame
+            .get("picks")
+            .and_then(|p| serde_json::from_value(p.clone()).ok())
+            .unwrap_or_default();
         let text = if wake {
             if s.subagents.hub().pending() == 0 {
                 let done = json!({ "type": "done" });
@@ -371,6 +375,7 @@ async fn chat_stream(mut socket: WebSocket, s: Shared) {
             if let Some(note) = state.subagents.hub().drain() {
                 agent.add_note(&note);
             }
+            agent.set_picks(picks);
             agent.turn_with(&text, Some(&tx)).await;
             Some((
                 agent.session_id().to_string(),
@@ -2260,6 +2265,8 @@ async fn agents_despawn(
 struct SayBody {
     id: String,
     text: String,
+    #[serde(default)]
+    picks: crate::agent::Picks,
 }
 
 /// Adithya talking to an agent from its window. Queued, never waited on: the
@@ -2272,7 +2279,7 @@ async fn agents_say(
         return Err(fail(anyhow::anyhow!("nothing to say")));
     }
     s.subagents
-        .ask(&b.id, &b.text, crate::subagents::From::User, 0)
+        .ask_with(&b.id, &b.text, crate::subagents::From::User, 0, b.picks)
         .await
         .map_err(fail)?;
     Ok(Json(json!({ "ok": true, "queued": true })))

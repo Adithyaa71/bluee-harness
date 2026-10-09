@@ -20,6 +20,29 @@ use crate::vision::{VisionMode, VisionState};
 /// the moment they happen instead of arriving in a lump when the turn ends.
 pub type EventSink = tokio::sync::mpsc::UnboundedSender<TurnEvent>;
 
+/// What Adithya picked in the composer for one message: `/skill` and
+/// `@server` / `@tool` / `@browser` chips. Applied to that turn only - the
+/// skills are attached, the tools loaded, and the model told plainly that he
+/// chose them, which is stronger than any amount of matching on his words.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct Picks {
+    #[serde(default)]
+    pub skills: Vec<String>,
+    #[serde(default)]
+    pub servers: Vec<String>,
+    /// Qualified `server__tool` names.
+    #[serde(default)]
+    pub tools: Vec<String>,
+    #[serde(default)]
+    pub browser: Option<String>,
+}
+
+impl Picks {
+    pub fn is_empty(&self) -> bool {
+        self.skills.is_empty() && self.servers.is_empty() && self.tools.is_empty() && self.browser.is_none()
+    }
+}
+
 fn emit(out: &mut Vec<TurnEvent>, sink: Option<&EventSink>, ev: TurnEvent) {
     if let Some(tx) = sink {
         let _ = tx.send(ev.clone());
@@ -147,6 +170,8 @@ pub struct Agent {
     /// Set when THIS agent is a sub-agent: its line to bluee and to Adithya
     /// (`message_parent`, `ask_user`). Never both this and `subagents`.
     child: Option<crate::subagents::ChildLink>,
+    /// Composer picks for the NEXT turn only; taken (and cleared) by it.
+    picks: Picks,
     /// Separate client: ACTIVE screen reads need a model that accepts images,
     /// which is rarely the same one doing the chatting.
     vision_client: crate::llm::OpenAiCompatible,
@@ -354,6 +379,7 @@ impl Agent {
             allowed_servers: allow,
             subagents: None,
             child: None,
+            picks: Picks::default(),
             defer: crate::toolsearch::enabled(),
             core_servers: crate::toolsearch::core_servers(),
             loaded: Default::default(),
@@ -611,6 +637,112 @@ impl Agent {
     /// anything under 0.42 is left out rather than padding every prompt with
     /// noise. Three past turns at most, clipped - a few hundred tokens, and
     /// usually nothing at all. `HARNESS_AUTO_RECALL=off` disables it.
+    /// Composer picks for the next turn (see `Picks`).
+    pub fn set_picks(&mut self, picks: Picks) {
+        self.picks = picks;
+    }
+
+    /// Apply this turn's picks: allow and load the picked servers and tools,
+    /// fetch the picked skills, and say plainly that Adithya chose them.
+    ///
+    /// A picked server is ADDED to what this agent may reach. It is his
+    /// explicit choice, which is exactly what scoping is meant to defer to. On
+    /// the main chat the workspace gate is re-applied next turn, so there it
+    /// lasts one message; on a sub-agent it stays, since a sub-agent has no
+    /// workspace gate and he asked for it in that agent's own window.
+    fn apply_picks(&mut self) -> Option<(String, String)> {
+        let p = std::mem::take(&mut self.picks);
+        if p.is_empty() {
+            return None;
+        }
+        let mut servers = p.servers.clone();
+        for t in &p.tools {
+            if let Some((s, _)) = t.split_once("__") {
+                if !servers.iter().any(|x| x == s) {
+                    servers.push(s.to_string());
+                }
+            }
+        }
+        if let Some(allow) = &self.allowed_servers {
+            let mut a = allow.clone();
+            for s in &servers {
+                if !a.contains(s) {
+                    a.push(s.clone());
+                }
+            }
+            if a.len() != allow.len() {
+                let _ = self.log.append(EventKind::System {
+                    note: format!("picked: now allowed to use {}", servers.join(", ")),
+                });
+                self.allowed_servers = Some(a);
+            }
+        }
+
+        let pool: Vec<String> = self.mcp_pool().into_iter().map(|d| d.name).collect();
+        for name in &pool {
+            if p.servers.iter().any(|s| name.starts_with(&format!("{s}__")))
+                || p.tools.contains(name)
+            {
+                self.loaded.insert(name.clone());
+            }
+        }
+        let mut skills = Vec::new();
+        for want in &p.skills {
+            if let Ok(Some(s)) = self.native.skills().get(want) {
+                for t in &s.tools {
+                    if pool.contains(t) {
+                        self.loaded.insert(t.clone());
+                    }
+                }
+                skills.push(s);
+            }
+        }
+        self.rebuild_tools();
+
+        let mut msg = String::from(
+            "[picked by Adithya] He chose these in the composer for this message - treat them as \
+             part of his instruction.",
+        );
+        if !p.servers.is_empty() {
+            msg.push_str(&format!(
+                "\n- Use these tool servers (their tools are loaded): {}",
+                p.servers.join(", ")
+            ));
+        }
+        if !p.tools.is_empty() {
+            msg.push_str(&format!("\n- Use these tools (loaded): {}", p.tools.join(", ")));
+        }
+        if let Some(b) = &p.browser {
+            msg.push_str(&format!(
+                "\n- Do any browsing in the `{b}` browser: pass browser: \"{b}\" to the snarevec \
+                 browser_* tools, and do not touch other browsers."
+            ));
+        }
+        for s in &skills {
+            let body: String = s.body.chars().take(4000).collect();
+            msg.push_str(&format!(
+                "\n\n### Skill he picked: {}\n{}\n{}",
+                s.name,
+                if s.description.is_empty() { String::new() } else { format!("> {}\n", s.description) },
+                body
+            ));
+        }
+        let missing: Vec<&String> =
+            p.skills.iter().filter(|w| !skills.iter().any(|s| &s.slug == *w || &s.name == *w)).collect();
+        if !missing.is_empty() {
+            msg.push_str(&format!(
+                "\n- (Skill(s) not found, tell him: {})",
+                missing.iter().map(|s| s.as_str()).collect::<Vec<_>>().join(", ")
+            ));
+        }
+        let mut parts = Vec::new();
+        if !p.skills.is_empty() { parts.push(format!("skill {}", p.skills.join(", "))); }
+        if !p.servers.is_empty() { parts.push(format!("server {}", p.servers.join(", "))); }
+        if !p.tools.is_empty() { parts.push(format!("tool {}", p.tools.join(", "))); }
+        if let Some(b) = &p.browser { parts.push(format!("browser {b}")); }
+        Some((msg, format!("picked: {}", parts.join("; "))))
+    }
+
     async fn auto_recall(&mut self, input: &str) -> Option<(String, String)> {
         if matches!(std::env::var("HARNESS_AUTO_RECALL").as_deref(), Ok("off") | Ok("0")) {
             return None;
@@ -1119,7 +1251,13 @@ impl Agent {
     /// again - so it never accumulates in the prompt, and the next message
     /// gets its own fresh recall.
     pub async fn turn_with(&mut self, input: &str, sink: Option<&EventSink>) -> Vec<TurnEvent> {
+        let picked = self.apply_picks();
         let recall = self.auto_recall(input).await;
+        let recall = match (picked, recall) {
+            (None, r) => r,
+            (Some(p), None) => Some(p),
+            (Some((pt, pn)), Some((rt, rn))) => Some((format!("{pt}\n\n{rt}"), format!("{pn}; {rn}"))),
+        };
         let at = recall.as_ref().map(|(text, _)| {
             self.history.push(Message::system(text.clone()));
             self.history.len() - 1

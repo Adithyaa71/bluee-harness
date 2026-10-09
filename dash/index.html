@@ -724,7 +724,34 @@ input[type=checkbox]:disabled{opacity:.4;cursor:not-allowed}
 .cwrap{position:relative}
 #slash{display:none;position:absolute;bottom:calc(100% + 8px);left:0;right:0;
   background:var(--panel);border:1px solid var(--line);border-radius:var(--r3);
-  overflow:hidden;box-shadow:0 8px 28px rgba(0,0,0,.5);z-index:30}
+  overflow-y:auto;max-height:min(320px,50vh);box-shadow:0 8px 28px rgba(0,0,0,.5);z-index:30;
+  padding-bottom:4px}
+#slash .shd{position:sticky;top:0;background:var(--panel);padding:6px 12px 3px;
+  font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--faint);z-index:1}
+#slash .sitem b{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:45%}
+#slash .sitem span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0}
+/* Picked chips. Highlighted on purpose: they change what the model gets, so
+   they should never be mistaken for text. One tint per kind. */
+#picks{display:flex;flex-wrap:wrap;gap:6px;padding:0 12px}
+#picks:not(:empty){padding-top:10px}
+.pk{display:inline-flex;align-items:center;gap:5px;height:24px;padding:0 4px 0 9px;
+  border-radius:999px;font-size:12.5px;font-family:var(--mono);
+  color:var(--pk,var(--accent));border:1px solid var(--pk,var(--accent));
+  background:color-mix(in srgb,var(--pk,var(--accent)) 14%,transparent);
+  animation:pkin var(--d-fast,.15s) var(--e-out,ease-out)}
+.pk i{font-style:normal;opacity:.7}
+.pk button{border:0;background:transparent;color:inherit;cursor:pointer;font-size:14px;
+  width:18px;height:18px;border-radius:50%;line-height:1;padding:0}
+.pk button:hover{background:color-mix(in srgb,var(--pk,var(--accent)) 25%,transparent)}
+.pkline .pk{padding-right:9px}
+.pk.k-skill{--pk:var(--accent)}
+.pk.k-server,.pk.k-tool{--pk:var(--ok,#4caf7a)}
+.pk.k-browser{--pk:var(--warn,#e0a040)}
+.sitem.k-skill b{color:var(--accent)}
+.sitem.k-server b,.sitem.k-tool b{color:var(--ok,#4caf7a)}
+.sitem.k-browser b{color:var(--warn,#e0a040)}
+@keyframes pkin{from{transform:scale(.85);opacity:0}to{transform:none;opacity:1}}
+.pkline{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
 .sitem{display:flex;gap:var(--s3);align-items:baseline;padding:6px 12px 6px 10px;
   cursor:pointer;border-left:2px solid transparent;
   transition:background var(--d-fast) var(--e-io),border-color var(--d-fast) var(--e-io)}
@@ -1561,6 +1588,7 @@ body.dragging{cursor:grabbing;user-select:none}
         <div class="cwrap">
           <div id="slash"></div>
           <div id="attached"></div>
+          <div id="picks"></div>
           <textarea id="input" rows="1" placeholder="Ask bluee…  (Enter to send, Shift+Enter for newline)"></textarea>
           <div class="crow">
             <button class="cb" id="plus" title="Add files, folders, connectors, skills">+</button>
@@ -1998,6 +2026,9 @@ $$('#sidetabs button[data-sp]').forEach(b=>b.onclick=()=>{
 
 /* ---------- chat ---------- */
 const stream=$('#stream'); let busy=false, attachments=[], currentSession=null;
+// Composer chips (`/skill`, `@server`...). Declared up here because syncSend
+// reads it at startup, long before the picker code below runs.
+let picks=[];
 /* Follow the bottom only while the reader is already there. `stick` goes false
    as soon as they scroll away and true again when they return, so a long
    streaming answer never steals the viewport out from under them. */
@@ -2132,8 +2163,13 @@ function thinking(on){
   stream.appendChild(d); scrollDown();
 }
 async function send(){
-  const ta=$('#input'); const text=ta.value.trim();
-  if(!text||busy) return;
+  const ta=$('#input'); let text=ta.value.trim();
+  if(busy) return;
+  // Chips alone are a complete instruction ("run this skill").
+  if(!text && picks.length) text='Go ahead with what I picked.';
+  if(!text) return;
+  const pk=picks.length ? picksPayload() : null, pkHtml=picksHtml();
+  picks=[]; renderPicks();
   // A still-uploading attachment has no path yet and a failed one never will -
   // sending either would silently drop it, so hold the turn until every
   // upload has settled rather than send an incomplete reference.
@@ -2144,7 +2180,7 @@ async function send(){
     full=attachments.map(a=>a.binary
       ? `--- file: ${a.name} (binary, saved at ${a.path}) ---`
       : `--- file: ${a.name} ---\n${a.text}`).join('\n\n')+'\n\n'+text;
-  addMsg('me',md(text)+(attachments.length
+  addMsg('me',md(text)+pkHtml+(attachments.length
     ?`<p class="attline">${ico('clip','sm')} ${attachments.map(a=>esc(a.name)).join(', ')}</p>`:''),
     text);
   ta.value=''; ta.style.height='auto'; attachments=[]; renderAtt(); syncSend();
@@ -2152,9 +2188,9 @@ async function send(){
   $('#slash').style.display='none';
   busy=true; $('#send').disabled=true; $('#send').classList.add('busy'); thinking(true);
   liveBody=null; liveHtml='';
-  if(agentMode){ agentSay(full); return; }
+  if(agentMode){ agentSay(full, pk); return; }
   const sock=chatSocket();
-  const fire=()=>sock.send(JSON.stringify({message:full}));
+  const fire=()=>sock.send(JSON.stringify(pk ? {message:full, picks:pk} : {message:full}));
   if(sock.readyState===1) fire(); else sock.addEventListener('open',fire,{once:true});
 }
 
@@ -2234,7 +2270,7 @@ function syncSend(){
   const btn=$('#send'); if(!btn) return;
   if(busy) return;                       // the busy state owns the button mid-turn
   const uploading=attachments.some(a=>a.uploading);
-  btn.disabled = uploading || (!$('#input').value.trim() && !attachments.length);
+  btn.disabled = uploading || (!$('#input').value.trim() && !attachments.length && !picks.length);
 }
 $('#input').addEventListener('input',e=>{
   e.target.style.height='auto'; e.target.style.height=Math.min(e.target.scrollHeight,180)+'px';
@@ -2617,37 +2653,166 @@ const SLASH=[
   ['/skills','list your saved skills'],
   ['/help','list commands'],
 ];
-function slashMenu(){
-  const v=$('#input').value;
-  const box=$('#slash');
-  if(!v.startsWith('/')||v.includes(' ')){ box.style.display='none'; return; }
-  const q=v.slice(1).toLowerCase();
-  const hits=SLASH.filter(c=>c[0].slice(1).startsWith(q));
-  if(!hits.length){ box.style.display='none'; return; }
-  box.innerHTML=hits.map((c,i)=>
-    '<div class="sitem'+(i===0?' sel':'')+'" data-c="'+c[0]+'">'+
-    '<b>'+c[0]+'</b><span>'+esc(c[1])+'</span></div>').join('');
-  box.style.display='block';
-  $$('#slash .sitem').forEach(it=>it.onmousedown=e=>{
-    e.preventDefault();
-    $('#input').value=it.dataset.c+' ';
-    box.style.display='none'; $('#input').focus();
-  });
+/* ---------- composer pickers: `/` and `@` ----------
+   `/` - slash commands (at the start of the main chat only - they are about the
+         session, and a sub-agent window has no slash commands) and skills.
+   `@` - tool servers, single tools, and browsers.
+   Typing after the trigger filters; arrows move, Tab/Enter picks, Escape
+   closes. A picked skill/server/tool/browser leaves the text and becomes a
+   chip above the box, and goes with the message as `picks` - the harness
+   attaches the skill, loads the tools and tells the model he chose them
+   (Agent::apply_picks). Backspace on an empty box removes the last chip. */
+let pickData = null, pickLoaded = 0, pickToken = null;
+
+async function loadPickData(){
+  if(pickData && Date.now() - pickLoaded < 60000) return pickData;
+  const [sk, tl, br] = await Promise.all([
+    api('/api/skills').catch(() => ({ skills: [] })),
+    api('/api/tools').catch(() => []),
+    api('/api/browsers').catch(() => ({ browsers: [] })),
+  ]);
+  const tools = Array.isArray(tl) ? tl : (tl.tools || []);
+  const byServer = {};
+  tools.forEach(t => { byServer[t.server] = (byServer[t.server] || 0) + 1; });
+  pickData = {
+    skills: (sk.skills || []).filter(s => s.category !== 'proposed'),
+    servers: Object.keys(byServer).sort().map(s => ({ name: s, n: byServer[s] })),
+    tools,
+    browsers: br.browsers || [],
+  };
+  pickLoaded = Date.now();
+  return pickData;
+}
+
+// The trigger token the caret is in: `/foo` or `@foo` at a word start.
+function pickTokenAt(){
+  const ta = $('#input'), upto = ta.value.slice(0, ta.selectionStart);
+  const m = upto.match(/(^|\s)([\/@])([^\s\/@]*)$/);
+  if(!m) return null;
+  return { ch: m[2], q: m[3].toLowerCase(), start: upto.length - m[3].length - 1, end: ta.selectionStart };
+}
+
+function pickItems(tok, d){
+  const q = tok.q, out = [];
+  const score = (name, desc) => {
+    const n = (name || '').toLowerCase(), s = (desc || '').toLowerCase();
+    if(!q) return 1;
+    if(n.startsWith(q)) return 0;
+    if(n.includes(q)) return 1;
+    if(s.includes(q)) return 2;
+    return -1;
+  };
+  const add = (group, list) => {
+    const hit = list.map(x => ({ ...x, sc: score(x.label, x.desc) }))
+      .filter(x => x.sc >= 0).sort((a, b) => a.sc - b.sc);
+    if(hit.length) out.push({ group, items: hit });
+  };
+  if(tok.ch === '/'){
+    if(tok.start === 0 && !agentMode)
+      add('commands', SLASH.map(c => ({ kind:'cmd', id:c[0], label:c[0], desc:c[1] })));
+    add('skills', d.skills.map(s => ({ kind:'skill', id:s.slug, label:s.name || s.slug,
+      desc:s.description || '' })));
+  } else {
+    add('browsers', d.browsers.map(b => ({ kind:'browser', id:b.id, label:b.label || b.id,
+      desc:b.desc || 'browser' })));
+    add('servers', d.servers.map(s => ({ kind:'server', id:s.name, label:s.name,
+      desc:s.n + ' tools' })));
+    add('tools', d.tools.map(t => ({ kind:'tool', id:t.id, label:t.server + '.' + t.name,
+      desc:t.description || '' })));
+  }
+  return out;
+}
+
+const PICK_ICON = { cmd:'/', skill:'/', server:'@', tool:'@', browser:'@' };
+async function slashMenu(){
+  const box = $('#slash');
+  const tok = pickTokenAt();
+  pickToken = tok;
+  if(!tok){ box.style.display = 'none'; return; }
+  const d = await loadPickData();
+  // The caret may have moved on while the lists loaded.
+  const now = pickTokenAt();
+  if(!now || now.ch !== tok.ch || now.q !== tok.q) return;
+  const groups = pickItems(tok, d);
+  if(!groups.length){
+    box.innerHTML = '<div class="shd">nothing matches ' + esc(tok.ch + tok.q) + '</div>';
+    box.style.display = 'block'; return;
+  }
+  let first = true, n = 0;
+  box.innerHTML = groups.map(g =>
+    '<div class="shd">' + g.group + '</div>' +
+    g.items.slice(0, 60).map(x => {
+      const html = '<div class="sitem k-' + x.kind + (first ? ' sel' : '') + '" data-kind="' + x.kind +
+        '" data-id="' + esc(x.id) + '" data-label="' + esc(x.label) + '">' +
+        '<b>' + esc((x.kind === 'cmd' ? '' : PICK_ICON[x.kind]) + x.label) + '</b><span>' +
+        esc(x.desc.length > 90 ? x.desc.slice(0, 90) + '…' : x.desc) + '</span></div>';
+      first = false; n++;
+      return html;
+    }).join('')).join('');
+  box.style.display = 'block';
+  box.scrollTop = 0;
+  $$('#slash .sitem').forEach(it => it.onmousedown = e => { e.preventDefault(); pickItem(it); });
+}
+
+function pickItem(it){
+  const ta = $('#input'), tok = pickToken || pickTokenAt();
+  $('#slash').style.display = 'none';
+  if(it.dataset.kind === 'cmd'){
+    ta.value = it.dataset.id + ' ';
+  } else {
+    if(tok) ta.value = ta.value.slice(0, tok.start) + ta.value.slice(tok.end).replace(/^\s/, '');
+    const p = { kind: it.dataset.kind, id: it.dataset.id, label: it.dataset.label };
+    // One browser per message - a second pick replaces the first.
+    if(p.kind === 'browser') picks = picks.filter(x => x.kind !== 'browser');
+    if(!picks.some(x => x.kind === p.kind && x.id === p.id)) picks.push(p);
+    renderPicks();
+  }
+  ta.focus();
+  const at = tok ? tok.start : ta.value.length;
+  ta.setSelectionRange(Math.min(at, ta.value.length), Math.min(at, ta.value.length));
+  syncSend();
 }
 function slashPick(){
-  const sel=$('#slash .sitem.sel');
+  const sel = $('#slash .sitem.sel');
   if(!sel) return false;
-  $('#input').value=sel.dataset.c+' ';
-  $('#slash').style.display='none';
+  pickItem(sel);
   return true;
 }
 function slashMove(dir){
-  const items=$$('#slash .sitem'); if(!items.length) return;
-  let i=items.findIndex(x=>x.classList.contains('sel'));
-  items.forEach(x=>x.classList.remove('sel'));
-  i=(i+dir+items.length)%items.length;
+  const items = $$('#slash .sitem'); if(!items.length) return;
+  let i = items.findIndex(x => x.classList.contains('sel'));
+  items.forEach(x => x.classList.remove('sel'));
+  i = (i + dir + items.length) % items.length;
   items[i].classList.add('sel');
+  items[i].scrollIntoView({ block: 'nearest' });
 }
+
+function renderPicks(){
+  const el = $('#picks'); if(!el) return;
+  el.innerHTML = picks.map((p, i) =>
+    '<span class="pk k-' + p.kind + '" title="' + esc(p.kind + ': ' + p.id) + '">' +
+      '<i>' + PICK_ICON[p.kind] + '</i>' + esc(p.label) +
+      '<button data-i="' + i + '" title="Remove">×</button></span>').join('');
+  el.querySelectorAll('button').forEach(b => b.onmousedown = e => {
+    e.preventDefault(); picks.splice(+b.dataset.i, 1); renderPicks(); syncSend();
+  });
+}
+// What goes over the wire, in the shape Agent::apply_picks reads.
+function picksPayload(){
+  const of = k => picks.filter(p => p.kind === k).map(p => p.id);
+  const b = of('browser')[0];
+  return { skills: of('skill'), servers: of('server'), tools: of('tool'), browser: b || null };
+}
+function picksHtml(){
+  return picks.length ? '<p class="pkline">' + picks.map(p =>
+    '<span class="pk k-' + p.kind + '"><i>' + PICK_ICON[p.kind] + '</i>' + esc(p.label) + '</span>').join(' ') + '</p>' : '';
+}
+$('#input').addEventListener('keydown', e => {
+  if(e.key === 'Backspace' && picks.length && e.target.selectionStart === 0 && e.target.selectionEnd === 0){
+    picks.pop(); renderPicks(); syncSend();
+  }
+});
+$('#input').addEventListener('click', () => slashMenu());
 
 /* ---------- context meter ---------- */
 function paintContext(s){
@@ -6252,9 +6417,9 @@ function agEnd(){
   $('#input').disabled = true; $('#send').disabled = true;
 }
 
-function agentSay(text){
+function agentSay(text, pk){
   agPendingLocal = text;
-  agPost('/api/agents/say', { id: soloId, text }).then(r => {
+  agPost('/api/agents/say', pk ? { id: soloId, text, picks: pk } : { id: soloId, text }).then(r => {
     if(r && r.error){
       agPendingLocal = null;
       renderEvent({ type:'error', message: r.error });

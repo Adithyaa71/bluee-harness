@@ -360,6 +360,8 @@ impl ChildLink {
 
 struct Job {
     prompt: String,
+    /// Composer picks that came with it (/skill, @server, ...).
+    picks: crate::agent::Picks,
     from: From,
     /// Somewhere to put the answer if the caller is still listening. If the
     /// caller gave up (timed out), a Parent job's answer goes to the inbox.
@@ -489,6 +491,7 @@ impl Worker {
                 From::Parent => format!("{PARENT_PREFIX}{}", job.prompt),
                 From::User => job.prompt.clone(),
             };
+            a.set_picks(job.picks.clone());
             let events = a.turn_with(&prompt, Some(&etx)).await;
             drop(etx);
             let _ = fwd.await;
@@ -675,7 +678,13 @@ impl SubAgents {
         Ok(info)
     }
 
-    fn send(&self, id: &str, prompt: &str, from: From) -> Result<oneshot::Receiver<Result<String, String>>> {
+    fn send(
+        &self,
+        id: &str,
+        prompt: &str,
+        from: From,
+        picks: crate::agent::Picks,
+    ) -> Result<oneshot::Receiver<Result<String, String>>> {
         let map = self.agents.lock().unwrap();
         let Some(entry) = map.get(id) else {
             bail!("no sub-agent `{id}`. `list_agents` shows which exist.");
@@ -688,7 +697,7 @@ impl SubAgents {
         }
         entry
             .tx
-            .send(Msg::Job(Job { prompt: prompt.to_string(), from, reply_to: Some(tx) }))
+            .send(Msg::Job(Job { prompt: prompt.to_string(), picks, from, reply_to: Some(tx) }))
             .map_err(|_| anyhow::anyhow!("sub-agent `{id}` is no longer running"))?;
         Ok(rx)
     }
@@ -699,7 +708,19 @@ impl SubAgents {
     /// is still working; the answer will be delivered when it lands (to bluee's
     /// inbox if bluee asked). `wait_ms == 0` is a pure background ask.
     pub async fn ask(&self, id: &str, prompt: &str, from: From, wait_ms: u64) -> Result<Option<String>> {
-        let rx = self.send(id, prompt, from)?;
+        self.ask_with(id, prompt, from, wait_ms, Default::default()).await
+    }
+
+    /// `ask`, carrying composer picks for that job.
+    pub async fn ask_with(
+        &self,
+        id: &str,
+        prompt: &str,
+        from: From,
+        wait_ms: u64,
+        picks: crate::agent::Picks,
+    ) -> Result<Option<String>> {
+        let rx = self.send(id, prompt, from, picks)?;
         if wait_ms == 0 {
             // Dropping the receiver is what routes the answer to the inbox.
             drop(rx);
