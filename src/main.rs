@@ -20,6 +20,7 @@ mod roots;
 mod skills;
 mod subagents;
 mod system;
+mod plan;
 mod templates;
 mod webtools;
 mod tools;

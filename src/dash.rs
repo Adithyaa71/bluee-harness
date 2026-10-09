@@ -197,6 +197,7 @@ pub async fn serve_on(cfg: Config, std_listener: std::net::TcpListener) -> Resul
         .route("/artifacts/{id}/", get(artifact_root))
         .route("/artifacts/{id}/{*path}", get(artifact_file))
         .route("/files/{root}/{*path}", get(root_file))
+        .route("/api/plan", get(plan_get))
         .route("/api/chat", post(chat))
         .route("/ws/chat", get(chat_ws))
         .route("/api/persona", get(get_persona).post(save_persona))
@@ -1083,6 +1084,28 @@ async fn list_artifacts(
             .map(|(t, n)| json!({ "topic": t, "count": n })).collect::<Vec<_>>(),
         "artifacts": arts,
         "root": q.root,
+    })))
+}
+
+/// A repo's plan, parsed - `<repo>/.bluee/plan.md`. Costs no model call: the
+/// Playground reads where a project stands straight from the file bluee keeps.
+async fn plan_get(
+    State(s): State<Shared>,
+    Query(q): Query<ArtifactsQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let id = q.root.unwrap_or_else(|| "playground".into());
+    let r = crate::roots::get(&s.cfg, &id).map_err(fail)?;
+    let f = r.path.join(".bluee").join("plan.md");
+    let Ok(text) = std::fs::read_to_string(&f) else {
+        return Ok(Json(json!({ "exists": false, "root": id, "path": ".bluee/plan.md" })));
+    };
+    let updated = std::fs::metadata(&f)
+        .and_then(|m| m.modified())
+        .ok()
+        .map(|t| chrono::DateTime::<chrono::Utc>::from(t).to_rfc3339());
+    Ok(Json(json!({
+        "exists": true, "root": id, "path": ".bluee/plan.md",
+        "updated": updated, "plan": crate::plan::parse(&text),
     })))
 }
 
