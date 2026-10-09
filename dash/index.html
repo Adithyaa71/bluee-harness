@@ -1225,6 +1225,29 @@ input[type=checkbox]:disabled{opacity:.4;cursor:not-allowed}
 .cmenu .crow.brw.taken{opacity:.45;cursor:not-allowed}
 .cmenu .crow.brw .c{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:240px}
 .cmenu .crow.tpl .c{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:220px}
+/* ---------- workspace board ---------- */
+.bdtools{display:flex;align-items:center;gap:var(--s3);margin-bottom:10px}
+.bdhint{font-size:12px;color:var(--faint)}
+#board{position:relative;min-height:300px}
+.tile{position:absolute;display:flex;flex-direction:column;background:var(--panel);
+  border:1px solid var(--line);border-radius:var(--r3);overflow:hidden;
+  box-shadow:0 2px 10px rgba(0,0,0,.25);transition:box-shadow var(--d-fast,.15s)}
+.tile.moving{box-shadow:0 12px 34px rgba(0,0,0,.45);border-color:var(--accent);z-index:5}
+.tile .th{flex:none;height:32px;display:flex;align-items:center;gap:4px;padding:0 6px 0 12px;
+  border-bottom:1px solid var(--line);cursor:grab;user-select:none;font-size:12.5px}
+.tile.moving .th{cursor:grabbing}
+.tile .tt{font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.tile .tb{flex:1;min-height:0;overflow:auto;position:relative}
+.tile.k-plan .tb{padding:0}
+.tile.k-plan .plan{border:0;border-radius:0;margin:0;min-height:100%}
+.tile iframe{position:absolute;inset:0;width:100%;height:100%;border:0;background:#0f1116}
+.tile .rz{position:absolute;right:0;bottom:0;width:16px;height:16px;cursor:nwse-resize;
+  background:linear-gradient(135deg,transparent 50%,var(--faint) 50%,var(--faint) 58%,transparent 58%,
+    transparent 70%,var(--faint) 70%,var(--faint) 78%,transparent 78%);opacity:.5}
+.tile:hover .rz{opacity:.9}
+body.tiledrag iframe{pointer-events:none}
+body.tiledrag{cursor:grabbing}
+
 /* ---------- project progress panel ---------- */
 .plan{background:var(--panel);border:1px solid var(--line);border-radius:var(--r3);padding:16px 18px;
   margin-bottom:var(--s4);display:flex;flex-direction:column;gap:12px}
@@ -1800,6 +1823,7 @@ body.dragging{cursor:grabbing;user-select:none}
           <button class="ibtn" id="pgsrc" title="Show the source">&lt;/&gt;</button>
           <button class="ibtn" id="pgwrapbtn" title="Soft wrap long lines"><svg class="i"><use href="#i-wrap"/></svg></button>
           <button class="ibtn" id="pgterm" title="Open a terminal in this folder">&gt;_</button>
+          <button class="ibtn" id="pgpin" title="Pin this page to the project's board"><svg class="i"><use href="#i-grid"/></svg></button>
           <button class="ibtn" id="pgpop" title="Open in its own window"><svg class="i"><use href="#i-popout"/></svg></button>
         </div>
         <div id="pgcodewrap"><div id="pggutter"></div><pre id="pgcode"></pre></div>
@@ -2013,6 +2037,14 @@ function bootSolo(){
       $('#aframe').src='/artifacts/'+encodeURIComponent(soloId)+'/';
       $('#aname').textContent=soloId;
     },80);
+  } else if(soloView==='plan' && soloId){
+    // A project's progress in its own window - refreshes itself, never asks
+    // the model anything.
+    show('#v-play');
+    const paint=async()=>{ fileRoot=soloId; const h=await planPanel();
+      $('#playbody').innerHTML=h||'<div class="empty"><p>No plan for this folder.</p></div>'; bindPlanPanel(); };
+    setTimeout(()=>{ paint(); setInterval(paint,30000); },80);
+    document.title='bluee · progress';
   } else if(soloView==='file' && soloId){
     // A page from a granted folder, popped out: same viewer as an artifact.
     show('#v-play');
@@ -4042,19 +4074,11 @@ async function loadPlayground(){
   if(!viewingFile && !viewingArtifact) $('#playbody').style.display='';
   const planHtml=await planPanel();
   if(planHtml){
-    // A repo: its progress first, then its artifacts (if any).
-    $('#playbody').innerHTML=planHtml+(list.length
-      ? '<div class="agrid">'+list.map(a=>`
-    <div class="acard" data-id="${esc(a.id)}" role="button" tabindex="0" aria-label="Open ${esc(a.name)}">
-      <div class="an">${esc(a.name)}</div><span class="at">${esc(a.topic)}</span>
-      <div class="ad">${esc(a.description||a.kind)}</div>
-      <div class="au">${esc((a.updated||'').slice(0,16).replace('T',' '))}</div></div>`).join('')+'</div>'
-      : '');
-    bindPlanPanel();
-    $$('#playbody .acard').forEach(c=>{ c.onclick=()=>openArtifact(c.dataset.id);
-      c.onkeydown=e=>{ if(e.key==='Enter'||e.key===' '){ e.preventDefault(); openArtifact(c.dataset.id); } }; });
+    // A repo: its board - progress, its artifacts, pinned pages, as tiles.
+    await renderBoard(list, planHtml);
     return;
   }
+  boardRoot=null;
   if(!list.length){
     $('#playbody').innerHTML=`<div class="empty">
       <h2>Playground</h2>
@@ -4136,6 +4160,242 @@ function bindPlanPanel(){
   const b = $('#planopen');
   if(b) b.onclick = () => openFile('.bluee/plan.md');
 }
+
+/* ---------- the workspace board ----------
+   A granted repo opens as a board of tiles: its progress, its artifacts, and
+   any page pinned from the file viewer. Drag a tile by its header, resize it
+   from the corner, pop it out to its own window (a second monitor), or take
+   it off the board (the file stays). Layout lives in <repo>/.bluee/board.json
+   so the board comes back with the project.
+
+   Tiles are kept, not rebuilt, across refreshes: a refresh runs after every
+   turn, and rebuilding would reload every live page on the board each time.
+   Only the progress tile's content is replaced, and an artifact's frame only
+   reloads when that artifact actually changed. */
+let boardRoot = null, boardTiles = [], boardEls = new Map(), boardArts = [];
+const SNAP = 10;
+const snap = v => Math.round(v / SNAP) * SNAP;
+
+function tileTitle(t){
+  if(t.kind === 'plan') return 'Progress';
+  if(t.kind === 'artifact') return (boardArts.find(a => a.id === t.ref) || {}).name || t.ref;
+  return t.ref.split('/').pop();
+}
+function tileUrl(t){
+  if(t.kind === 'artifact') return (boardArts.find(a => a.id === t.ref) || {}).url || '';
+  if(t.kind === 'file') return fileUrl(t.ref);
+  return '';
+}
+// Somewhere free: a column to the right of the progress tile, wrapping.
+function placeTile(kind){
+  const W = Math.max(600, ($('#playbody').clientWidth || 900) - 40);
+  if(kind === 'plan') return { x: 0, y: 0, w: Math.min(760, Math.round(W * 0.58)), h: 440 };
+  const used = boardTiles.filter(t => t.kind !== 'plan').length;
+  const colX = Math.min(780, Math.round(W * 0.58) + 20), colW = Math.max(300, W - colX);
+  return colW >= 300
+    ? { x: colX, y: used * 320, w: colW, h: 300 }
+    : { x: 0, y: 460 + used * 320, w: W, h: 300 };
+}
+
+async function renderBoard(arts, planHtml){
+  const root = fileRoot;
+  boardArts = arts;
+  const body = $('#playbody');
+  if(boardRoot !== root){
+    // Another repo (or first time): load its saved layout.
+    boardRoot = root; boardEls = new Map();
+    const d = await api('/api/board?root=' + encodeURIComponent(root)).catch(() => ({ tiles: [] }));
+    boardTiles = Array.isArray(d.tiles) ? d.tiles : [];
+    body.innerHTML = '<div class="bdtools"><span class="bdhint">Drag tiles by their header, resize from the corner.</span>' +
+      '<div class="spacer"></div><button class="ghost" id="bdadd">+ tile</button></div><div id="board"></div>';
+    $('#bdadd').onclick = e => { e.stopPropagation(); boardAddMenu($('#bdadd')); };
+  } else if(!$('#board')){
+    body.innerHTML = '<div class="bdtools"><div class="spacer"></div><button class="ghost" id="bdadd">+ tile</button></div><div id="board"></div>';
+    $('#bdadd').onclick = e => { e.stopPropagation(); boardAddMenu($('#bdadd')); };
+    boardEls = new Map();
+  }
+  let changed = false;
+  // The progress tile is always there unless taken off; every artifact gets one.
+  if(!boardTiles.some(t => t.kind === 'plan') && !boardTiles.some(t => t.kind === 'plan-off')){
+    boardTiles.push({ id: 'plan', kind: 'plan', ref: '', ...placeTile('plan') }); changed = true;
+  }
+  for(const a of arts){
+    const id = 'art:' + a.id;
+    if(!boardTiles.some(t => t.id === id) && !boardTiles.some(t => t.id === id + ':off')){
+      boardTiles.push({ id, kind: 'artifact', ref: a.id, ...placeTile('artifact') }); changed = true;
+    }
+  }
+  // Artifacts that no longer exist leave the board.
+  const before = boardTiles.length;
+  boardTiles = boardTiles.filter(t => t.kind !== 'artifact' || arts.some(a => a.id === t.ref));
+  if(boardTiles.length !== before) changed = true;
+
+  const board = $('#board');
+  for(const [id, el] of boardEls){
+    if(!boardTiles.some(t => t.id === id && !t.id.endsWith(':off'))){ el.remove(); boardEls.delete(id); }
+  }
+  for(const t of boardTiles){
+    if(t.kind.endsWith('-off') || t.id.endsWith(':off')) continue;
+    let el = boardEls.get(t.id);
+    if(!el){ el = makeTile(t); board.appendChild(el); boardEls.set(t.id, el); }
+    placeEl(el, t);
+    if(t.kind === 'plan'){ el.querySelector('.tb').innerHTML = planHtml; bindPlanPanel(); }
+    if(t.kind === 'artifact'){
+      const a = arts.find(x => x.id === t.ref);
+      if(a && el.dataset.updated !== a.updated){ el.dataset.updated = a.updated;
+        const f = el.querySelector('iframe'); f.src = a.url; }
+      el.querySelector('.tt').textContent = tileTitle(t);
+    }
+  }
+  sizeBoard();
+  if(changed) saveBoard();
+}
+
+function makeTile(t){
+  const el = document.createElement('div');
+  el.className = 'tile k-' + t.kind;
+  el.dataset.id = t.id;
+  el.innerHTML = '<div class="th"><span class="tt"></span><span class="spacer"></span>' +
+    (t.kind !== 'plan' ? '<button class="ibtn bare" data-a="reload" title="Reload">' + ico('refresh','sm') + '</button>' : '') +
+    '<button class="ibtn bare" data-a="pop" title="Open in its own window">' + ico('popout','sm') + '</button>' +
+    '<button class="ibtn bare" data-a="off" title="Take off the board (the file stays)">' + ico('close','sm') + '</button></div>' +
+    '<div class="tb">' + (t.kind === 'plan' ? '' :
+      '<iframe sandbox="allow-scripts allow-forms allow-popups" src="' + esc(tileUrl(t)) + '"></iframe>') + '</div>' +
+    '<div class="rz" title="Resize"></div>';
+  el.querySelector('.tt').textContent = tileTitle(t);
+  el.querySelectorAll('.th button').forEach(b => b.onclick = e => { e.stopPropagation(); tileAction(t.id, b.dataset.a); });
+  tileDrag(el, t.id);
+  return el;
+}
+function placeEl(el, t){
+  el.style.left = t.x + 'px'; el.style.top = t.y + 'px';
+  el.style.width = t.w + 'px'; el.style.height = t.h + 'px';
+}
+function sizeBoard(){
+  const b = $('#board'); if(!b) return;
+  const bottom = Math.max(0, ...boardTiles.filter(t => !t.id.endsWith(':off') && !t.kind.endsWith('-off')).map(t => t.y + t.h));
+  b.style.height = (bottom + 40) + 'px';
+}
+let boardSaveT = null;
+function saveBoard(){
+  clearTimeout(boardSaveT);
+  const root = boardRoot, tiles = boardTiles.map(t => ({ ...t }));
+  boardSaveT = setTimeout(() => api('/api/board', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ root, tiles }) }).catch(() => {}), 400);
+}
+
+function tileAction(id, act){
+  const t = boardTiles.find(x => x.id === id); if(!t) return;
+  if(act === 'reload'){ const f = boardEls.get(id)?.querySelector('iframe'); if(f) f.src = f.src; }
+  if(act === 'pop'){
+    if(t.kind === 'plan') popOut('plan', { id: boardRoot, title: 'Progress · ' + boardRoot, w: 760, h: 620 });
+    else {
+      const url = tileUrl(t);
+      if(url.startsWith('/files/')) popOut('file', { id: url.slice('/files/'.length), title: tileTitle(t), w: 900, h: 640 });
+      else popOut('artifact', { id: t.ref, title: tileTitle(t), w: 900, h: 640 });
+    }
+  }
+  if(act === 'off'){
+    // Remembered as taken off, so the next refresh does not put it back.
+    if(t.kind === 'plan'){ t.kind = 'plan-off'; }
+    else if(t.kind === 'artifact'){ t.id = t.id + ':off'; }
+    else boardTiles = boardTiles.filter(x => x.id !== id);
+    boardEls.get(id)?.remove(); boardEls.delete(id);
+    sizeBoard(); saveBoard();
+  }
+}
+
+/* Pointer drag for move (header) and resize (corner). While dragging, the
+   live pages under the pointer are made deaf to it - an iframe swallows
+   mousemove and the tile would stop following the cursor. */
+function tileDrag(el, id){
+  const start = (e, mode) => {
+    if(e.button !== 0 || e.target.closest('button')) return;
+    e.preventDefault();
+    const t = boardTiles.find(x => x.id === id); if(!t) return;
+    const x0 = e.clientX, y0 = e.clientY, s = { ...t };
+    document.body.classList.add('tiledrag');
+    el.classList.add('moving');
+    el.parentNode.appendChild(el);               // to the front
+    // Kept inside the board's width: a tile pushed past the right edge hid
+    // its own header buttons behind a sideways scrollbar.
+    const W = el.parentNode.clientWidth;
+    const move = ev => {
+      const dx = ev.clientX - x0, dy = ev.clientY - y0;
+      if(mode === 'move'){
+        t.x = Math.min(Math.max(0, snap(s.x + dx)), Math.max(0, W - t.w));
+        t.y = Math.max(0, snap(s.y + dy));
+      } else {
+        t.w = Math.min(Math.max(240, snap(s.w + dx)), Math.max(240, W - t.x));
+        t.h = Math.max(150, snap(s.h + dy));
+      }
+      placeEl(el, t); sizeBoard();
+    };
+    const up = () => {
+      removeEventListener('mousemove', move); removeEventListener('mouseup', up);
+      document.body.classList.remove('tiledrag'); el.classList.remove('moving');
+      saveBoard();
+    };
+    addEventListener('mousemove', move); addEventListener('mouseup', up);
+  };
+  el.querySelector('.th').addEventListener('mousedown', e => start(e, 'move'));
+  el.querySelector('.rz').addEventListener('mousedown', e => start(e, 'size'));
+}
+
+function boardAddMenu(anchor){
+  document.getElementById('connmenu')?.remove();
+  const flat = [];
+  const walk = ns => (ns || []).forEach(n => { if(n.children) walk(n.children); else if(/\.html?$/i.test(n.path) && !n.path.startsWith('.bluee/artifacts/')) flat.push(n.path); });
+  walk(fileTree);
+  const opts = [];
+  if(boardTiles.some(t => t.kind === 'plan-off')) opts.push(['plan', '', 'Progress']);
+  boardTiles.filter(t => t.id.endsWith(':off')).forEach(t => opts.push(['artifact', t.ref, tileTitle({ ...t, kind: 'artifact' })]));
+  flat.filter(p => !boardTiles.some(t => t.kind === 'file' && t.ref === p)).forEach(p => opts.push(['file', p, p]));
+  const m = document.createElement('div');
+  m.id = 'connmenu'; m.className = 'cmenu';
+  m.innerHTML = '<div class="hd">Add a tile</div>' + (opts.length ? opts.map(([k, r, l]) =>
+    '<div class="crow" data-k="' + k + '" data-r="' + esc(r) + '"><span class="k">' + ico(k === 'plan' ? 'check' : 'file', 'sm') +
+    '</span><span class="n">' + esc(l) + '</span><span class="c">' + (k === 'file' ? 'page' : k) + '</span></div>').join('')
+    : '<div class="agempty">Everything is on the board. Pages (.html) in this folder can be added here.</div>');
+  document.body.appendChild(m);
+  const r = anchor.getBoundingClientRect();
+  m.style.maxHeight = (innerHeight - 16) + 'px'; m.style.overflowY = 'auto';
+  m.style.left = Math.max(8, Math.min(r.right - m.offsetWidth, innerWidth - m.offsetWidth - 8)) + 'px';
+  m.style.top = Math.max(8, Math.min(r.bottom + 6, innerHeight - m.offsetHeight - 8)) + 'px';
+  m.querySelectorAll('.crow').forEach(row => row.onclick = () => {
+    m.remove();
+    const k = row.dataset.k, ref = row.dataset.r;
+    if(k === 'plan'){ const t = boardTiles.find(t => t.kind === 'plan-off'); t.kind = 'plan'; }
+    else if(k === 'artifact'){ const t = boardTiles.find(t => t.id === 'art:' + ref + ':off'); t.id = 'art:' + ref; }
+    else boardTiles.push({ id: 'file:' + ref, kind: 'file', ref, ...placeTile('file') });
+    saveBoard(); loadPlayground();
+  });
+  setTimeout(() => document.addEventListener('click', function off(e){
+    if(!m.contains(e.target)){ m.remove(); document.removeEventListener('click', off); }
+  }), 0);
+}
+
+// Pin the page open in the file viewer to the board.
+function pinCurrentFile(){
+  if(!filePick || fileRoot === 'playground' || !/\.html?$/i.test(filePick)) return;
+  // Straight to disk, then the board reloads from it on the way back - no
+  // race with the debounced save, no stale tile elements.
+  const go = async () => {
+    clearTimeout(boardSaveT);
+    const d = await api('/api/board?root=' + encodeURIComponent(fileRoot)).catch(() => ({ tiles: [] }));
+    const tiles = Array.isArray(d.tiles) ? d.tiles : [];
+    if(!tiles.some(t => t.kind === 'file' && t.ref === filePick)){
+      boardTiles = tiles;
+      tiles.push({ id: 'file:' + filePick, kind: 'file', ref: filePick, ...placeTile('file') });
+    }
+    await api('/api/board', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ root: fileRoot, tiles }) }).catch(() => {});
+    boardRoot = null;
+    const b = $('#pgpin'); b.classList.add('on'); b.title = 'Pinned - it is on the board';
+  };
+  go();
+}
+$('#pgpin').onclick = pinCurrentFile;
 
 // Which artifact is open, by id - names repeat across topics.
 let aCurrent=null, aCurrentUpdated=null;
@@ -5862,6 +6122,9 @@ async function openFile(path){
   // a Source toggle for when you want the code instead.
   const isHtml = /\.html?$/i.test(path) && canRender();
   $('#pgsrc').style.display = isHtml ? '' : 'none';
+  // Only a page inside a project can go on that project's board.
+  $('#pgpin').style.display = (isHtml && fileRoot !== 'playground') ? '' : 'none';
+  $('#pgpin').classList.remove('on'); $('#pgpin').title = "Pin this page to the project's board";
   $('#pgsrc').dataset.mode = 'render';
   $('#pgsrc').classList.remove('on');
   $('#pgsrc').title = 'Show the source';

@@ -47,8 +47,9 @@ await p.until("return typeof loadFiles === 'function' && document.readyState ===
 await p.ev("document.querySelector('.rb[data-page=\"play\"]').click(); return 1");
 await sleep(800);
 await p.ev(`const s=document.querySelector('#pgroot'); await loadRoots?.(); s.value='${id}'; s.dispatchEvent(new Event('change')); return 1`);
-const card = await p.until("return !!document.querySelector('.acard[data-id=\"progress\"]')", 8000);
-check('selecting the repo shows its artifact card', card);
+// Since stage E a repo opens as a board: its artifact is a tile, not a card.
+const card = await p.until("return !!document.querySelector('.tile[data-id=\"art:progress\"] iframe')", 8000);
+check('selecting the repo shows its artifact on the board', card);
 
 await p.ev("await openFile('web/index.html'); return 1");
 await sleep(1200);

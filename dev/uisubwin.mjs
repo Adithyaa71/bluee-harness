@@ -94,7 +94,8 @@ const w = await attach(winT);
 await w.until("return !!document.querySelector('#aghd .nm') && document.querySelector('#aghd .nm').textContent === 'tester'", 15000);
 const hd = await w.ev("const h=document.querySelector('#aghd');const c=document.querySelector('#composer');return {nm:h.querySelector('.nm').textContent, st:h.dataset.st, tm:h.querySelector('.tm').textContent, comp:c.getBoundingClientRect().height, rail:document.querySelector('#rail').getBoundingClientRect().width, ph:document.querySelector('#input').placeholder}");
 check('header names it', hd.nm === 'tester', JSON.stringify(hd));
-check('timers shown 45m / 2h', hd.tm === 'sleeps 45m · ends 2h', hd.tm);
+// The header also leads with the agent's spend since sub-agents stage 4.
+check('timers shown 45m / 2h', /sleeps 45m · ends 2h$/.test(hd.tm), hd.tm);
 check('composer visible', hd.comp > 40, 'h=' + hd.comp);
 check('no rail in the window', hd.rail === 0);
 check('placeholder says bluee sees it', /bluee sees/.test(hd.ph));

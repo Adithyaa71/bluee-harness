@@ -467,6 +467,37 @@ Proper handling needs a proxy that holds the key server-side — not built.
 
 ---
 
+## Project workspaces — a repo as a board
+
+Select a granted folder in the Playground's folder picker and the page becomes
+that project's **board**:
+
+- **Progress tile.** The project's plan, read from `<repo>/.bluee/plan.md`:
+  phase N of M, a progress bar per phase, the current phase's tasks, what's
+  next, and what's waiting on you. Viewing it costs nothing; no model is asked.
+  No plan yet? Say *"set up a project plan for this repo"*. bluee writes one,
+  then keeps it current as you work: it ticks tasks off, updates *Next* and
+  logs what happened.
+- **Artifact tiles.** Everything bluee built for this project lives in
+  `<repo>/.bluee/artifacts/` and shows here running. Ask *"build a dashboard
+  for this repo"* while the folder is selected.
+- **Pinned pages.** Open any `.html` file from the file tree; it runs live (CSS
+  and JS included), not as source. The grid button pins it to the board.
+
+Drag a tile by its header, resize it from the corner, **pop it out** to its own
+window (put it on another monitor), or take it off with **×** (the file stays;
+**+ tile** puts it back). The layout is saved in `<repo>/.bluee/board.json`, so
+the board comes back as you left it.
+
+**bluee can now write in granted folders**: create files, write into them, and
+change part of a file. Only inside folders you granted, never `.git/`, and every
+write is in the log. Add `.bluee/` to the repo's `.gitignore` if you don't want
+the plan, board and artifacts committed.
+
+**Safety:** every page bluee serves (artifacts and repo pages alike) runs
+sandboxed, even opened in its own tab. A page can draw and fetch from the web,
+but it can't touch bluee's data, memory or terminal.
+
 ## Skills — teaching it procedures
 
 When it works something out that will come up again:

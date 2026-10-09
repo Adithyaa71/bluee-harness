@@ -2253,6 +2253,41 @@ Checks: `dev/uisubwin.mjs` 20, `uipickers` 19, `uitemplates` 16, `uibrowsers`
 16, `uigrid` 12, `uiagents` (updated), SnareVec `tests/test_browser_actions.py`
 69. Shared CDP helpers moved to `dev/cdp.mjs`.
 
+**63. Playground fixes, then project workspaces** (`dev/plan-workspaces.md`).
+
+*Three bugs, each reproduced on the old build by `dev/uiplaybugs.mjs` before
+being fixed:* an open artifact closed on the refresh that runs after every
+turn (and never reloaded to show bluee's edit); pop-out found the artifact by
+NAME, so two topics' "Chart" mixed up; and "open in new tab" ran an artifact
+top-level on bluee's origin - `fetch('/api/stats')` from it came back
+`reachable`. Every served page now carries `Content-Security-Policy: sandbox
+...` (opaque origin wherever it is opened): `blocked`.
+
+*Then, as asked - the interface, no example artifacts, no API-key proxy yet:*
+- **A: `write_file` / `edit_file`.** `roots::resolve_new` checks a path that
+  does not exist yet against its nearest existing ancestor (catches symlinked
+  folders); `.git` refused. A sub-agent's relative paths start in its own
+  folder, like its commands.
+- **B: repos render live.** §18's "granted folders only as source" rule existed
+  to stop granting from exposing pages to bluee's API; the server-side sandbox
+  is the real protection, so it went. `/files/<root>/<path>`; a repo's
+  artifacts live in `<repo>/.bluee/artifacts` (`ArtifactStore::at`).
+- **D: `<repo>/.bluee/plan.md`**, parsed by `src/plan.rs`, kept current by the
+  `project-plan` skill, shown without a model call. Verified live: bluee
+  ticked a task, panel 3/6 -> 4/6.
+- **E: the board** - tiles (progress, artifacts, pinned pages), drag/resize/
+  pop-out, `<repo>/.bluee/board.json`. Tiles are diffed, not rebuilt, so the
+  post-turn refresh does not reload every live page.
+
+*Class collisions, twice more:* `.phead` (docked panel header) and `.fin`
+(settings input) both restyled the new panel - the §43 `.pcard` trap again.
+New panel classes are `pl-` prefixed. A regex rename then rewrote JS property
+names (`p.phases`) and visible text ("tasks") - caught by the checks.
+
+Checks: `uiplaybugs` 8, `livewrite` 3, `uirepoview` 11, `uiplan` 9, `uiboard`
+17, plus `uisubwin`/`uiagents` re-run as regressions (two stale expectations
+updated).
+
 ---
 
 ### 4h. Requested next, sized honestly (not yet built)

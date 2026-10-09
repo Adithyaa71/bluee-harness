@@ -198,6 +198,7 @@ pub async fn serve_on(cfg: Config, std_listener: std::net::TcpListener) -> Resul
         .route("/artifacts/{id}/{*path}", get(artifact_file))
         .route("/files/{root}/{*path}", get(root_file))
         .route("/api/plan", get(plan_get))
+        .route("/api/board", get(board_get).post(board_save))
         .route("/api/chat", post(chat))
         .route("/ws/chat", get(chat_ws))
         .route("/api/persona", get(get_persona).post(save_persona))
@@ -1107,6 +1108,45 @@ async fn plan_get(
         "exists": true, "root": id, "path": ".bluee/plan.md",
         "updated": updated, "plan": crate::plan::parse(&text),
     })))
+}
+
+/// A repo's board layout - `<repo>/.bluee/board.json`: which tiles, where, and
+/// how big. Lives in the repo beside its plan and artifacts, so the board
+/// comes back with the project. GET returns `{tiles: []}` when there is none.
+async fn board_get(
+    State(s): State<Shared>,
+    Query(q): Query<ArtifactsQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let id = q.root.unwrap_or_default();
+    let r = crate::roots::get(&s.cfg, &id).map_err(fail)?;
+    let f = r.path.join(".bluee").join("board.json");
+    let v = std::fs::read_to_string(&f)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(t.trim_start_matches('\u{feff}')).ok())
+        .unwrap_or_else(|| json!({ "tiles": [] }));
+    Ok(Json(v))
+}
+
+#[derive(Deserialize)]
+struct BoardBody {
+    root: String,
+    tiles: Vec<Value>,
+}
+
+async fn board_save(
+    State(s): State<Shared>,
+    Json(b): Json<BoardBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if b.root == "playground" {
+        return Err(fail(anyhow::anyhow!("the board is for granted project folders")));
+    }
+    let (_, f) = crate::roots::resolve_new(&s.cfg, &b.root, ".bluee/board.json").map_err(fail)?;
+    if let Some(d) = f.parent() {
+        std::fs::create_dir_all(d).map_err(fail)?;
+    }
+    let body = serde_json::to_string_pretty(&json!({ "tiles": b.tiles })).unwrap_or_default();
+    std::fs::write(&f, body).map_err(fail)?;
+    Ok(Json(json!({ "ok": true, "tiles": b.tiles.len() })))
 }
 
 /// A file inside a granted folder, served so its HTML runs as a page - the
