@@ -207,15 +207,16 @@ const clock = await ev(`
            rows: m ? m.querySelectorAll('.crow').length : 0 };
 `);
 check('clock menu opens', clock.open);
-check('offers never as the default', clock.text.includes('Default is never'), '');
-check('offers timer choices', clock.rows >= 4, 'rows=' + clock.rows);
+// Sub-agents v2: sleep (45m) and end (2h) by default, and only idle time counts.
+check('explains that only idle time counts', clock.text.includes('Idle timers'), clock.text.slice(0, 60));
+check('offers sleep, end and cap choices', clock.rows >= 12, 'rows=' + clock.rows);
 await ev(`
-  const row = [...document.querySelectorAll('#connmenu .crow')].find(r => r.dataset.m === '15');
+  const row = [...document.querySelectorAll('#connmenu .crow')].find(r => r.dataset.k === 'sleep' && r.dataset.v === '15');
   if (row) row.click();
 `);
 await sleep(900);
 check('timer applied to the agent',
-  (await ev("return document.querySelector('#aglist').textContent")).includes('15m'));
+  (await fetch('http://127.0.0.1:' + PORT + '/api/agents').then(r => r.json())).agents.some(a => a.sleep_after_mins === 15));
 
 console.log('\n=== RESIZE ===');
 /* From a KNOWN height. `--agh` persists in localStorage, so successive runs

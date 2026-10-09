@@ -2270,6 +2270,22 @@ async fn agents_caps(
 /// address and token its MCP server uses (~/.snarevec/config.json). Empty when
 /// the daemon is down - which is normal, it idles out.
 async fn snarevec_browsers() -> Vec<Value> {
+    /* Remembered briefly. When the daemon is down - its normal idle state -
+       Windows takes ~1.5s to refuse a connection to a closed local port, and
+       the spawn dialog waited on that every time it opened (measured: 1.5s
+       per call, found by the panel's own UI check timing out). */
+    static CACHE: std::sync::Mutex<Option<(std::time::Instant, Vec<Value>)>> = std::sync::Mutex::new(None);
+    if let Some((at, v)) = CACHE.lock().unwrap().as_ref() {
+        if at.elapsed() < std::time::Duration::from_secs(15) {
+            return v.clone();
+        }
+    }
+    let v = snarevec_browsers_fresh().await;
+    *CACHE.lock().unwrap() = Some((std::time::Instant::now(), v.clone()));
+    v
+}
+
+async fn snarevec_browsers_fresh() -> Vec<Value> {
     let path = std::env::var("SNAREVEC_CONFIG")
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|_| {
@@ -2282,7 +2298,11 @@ async fn snarevec_browsers() -> Vec<Value> {
     let Ok(cfg) = serde_json::from_str::<Value>(raw) else { return vec![] };
     let port = cfg.pointer("/settings/port").and_then(|v| v.as_u64()).unwrap_or(8756);
     let token = cfg.pointer("/settings/token").and_then(|v| v.as_str()).unwrap_or("").to_string();
-    let Ok(client) = reqwest::Client::builder().timeout(std::time::Duration::from_millis(1500)).build() else {
+    let Ok(client) = reqwest::Client::builder()
+        .connect_timeout(std::time::Duration::from_millis(300))
+        .timeout(std::time::Duration::from_millis(1500))
+        .build()
+    else {
         return vec![];
     };
     let Ok(res) = client

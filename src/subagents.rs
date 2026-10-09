@@ -135,6 +135,9 @@ pub struct AgentInfo {
     /// Caps: once reached it refuses new work until raised. `None` = none.
     pub max_turns: Option<u32>,
     pub max_cost: Option<f64>,
+    /// What it is doing this moment - the tool it is in, or "thinking".
+    /// Empty when idle.
+    pub activity: String,
     /// `Instant` means nothing outside this process; `idle_secs` is the
     /// serialised form.
     #[serde(skip)]
@@ -586,10 +589,22 @@ impl Worker {
             let a = agent.as_mut().unwrap();
 
             // Forward the turn's events to the window as they happen.
+            // ...and keep `activity` current, for the agents grid.
             let (etx, mut erx) = mpsc::unbounded_channel::<TurnEvent>();
-            let bus = self.bus.clone();
+            let (bus, info, hub) = (self.bus.clone(), self.info.clone(), self.hub.clone());
+            self.set(|i| i.activity = "thinking".into());
             let fwd = tokio::spawn(async move {
                 while let Some(ev) = erx.recv().await {
+                    let act = match &ev {
+                        TurnEvent::ToolCall { server, tool, .. } => Some(format!("{server}.{tool}")),
+                        TurnEvent::ToolResult { .. } => Some("thinking".to_string()),
+                        _ => None,
+                    };
+                    if let Some(a) = act {
+                        let mut i = info.lock().unwrap();
+                        i.activity = a;
+                        hub.publish(&i);
+                    }
                     if let Ok(v) = serde_json::to_value(&ev) {
                         let _ = bus.send(v);
                     }
@@ -652,6 +667,7 @@ impl Worker {
             i.turns += 1;
             i.idle_since = Some(Instant::now());
             i.question = None;
+            i.activity.clear();
             match &result {
                 Ok(r) => {
                     i.status = if i.queued > 0 { Status::Running } else { Status::Ready };
@@ -801,6 +817,7 @@ impl SubAgents {
             tokens: 0,
             max_turns: spec.max_turns,
             max_cost: spec.max_cost,
+            activity: String::new(),
             idle_since: Some(Instant::now()),
         };
         let shared = Arc::new(Mutex::new(info.clone()));
@@ -1231,6 +1248,7 @@ mod tests {
             queued: 0, question: None, sleep_after_mins: None, end_after_mins: None,
             idle_secs: 0, browser: None, model: None, template: None, idle_since: None,
             folder: String::new(), cost: 0.0, tokens: 0, max_turns: None, max_cost: None,
+            activity: String::new(),
         };
         assert!(!i.busy());
         i.queued = 1;

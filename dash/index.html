@@ -1225,6 +1225,48 @@ input[type=checkbox]:disabled{opacity:.4;cursor:not-allowed}
 .cmenu .crow.brw.taken{opacity:.45;cursor:not-allowed}
 .cmenu .crow.brw .c{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:240px}
 .cmenu .crow.tpl .c{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:220px}
+/* ---------- agents page ---------- */
+#agridbody{flex:1;min-height:0;overflow-y:auto;padding:22px;max-width:1180px;margin:0 auto;width:100%}
+#agridbody .secthead{display:flex;align-items:center;gap:var(--s3);margin-bottom:var(--s4)}
+#agridbody .secthead h3{margin:0}
+.agsum{color:var(--faint);font-size:12.5px}
+#agrid{display:grid;grid-template-columns:repeat(auto-fill,minmax(300px,1fr));gap:var(--s3)}
+.agcard{background:var(--panel);border:1px solid var(--line);border-radius:var(--r3);padding:12px 14px 10px;
+  display:flex;flex-direction:column;gap:7px;min-width:0;cursor:default;
+  transition:border-color var(--d-fast,.15s) var(--e-io,ease)}
+.agcard:hover{border-color:var(--line-strong,var(--faint))}
+.agcard.running{border-color:color-mix(in srgb,var(--accent) 55%,var(--line))}
+.agcard.waiting{border-color:var(--warn,#e0a040)}
+.agcard .ah{display:flex;align-items:center;gap:8px;min-width:0}
+.agcard .ah b{overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.agcard .dot{width:9px;height:9px;border-radius:50%;background:var(--faint);flex:none}
+.agcard.running .dot{background:var(--accent);animation:pulse 1.4s ease-in-out infinite}
+.agcard.waiting .dot{background:var(--warn,#e0a040)}
+.agcard.ready .dot{background:var(--ok,#4caf7a)}
+.agcard.failed .dot{background:var(--bad)}
+.agcard.sleeping .dot{background:transparent;border:1.5px solid var(--faint)}
+.agcard.sleeping{opacity:.75}
+.agcard .tag{font-size:11px;color:var(--accent);border:1px solid var(--accent-dim,var(--line));
+  border-radius:999px;padding:0 7px;flex:none}
+.agcard .st{margin-left:auto;font-size:11.5px;color:var(--faint);flex:none}
+.agcard .pu{font-size:12.5px;color:var(--dim,var(--faint));overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.agcard .now{font-size:13px;line-height:1.4;min-height:2.8em;display:-webkit-box;-webkit-line-clamp:2;
+  -webkit-box-orient:vertical;overflow:hidden;word-break:break-word}
+.agcard .now .act{font-family:var(--mono);font-size:12px;color:var(--accent)}
+.agcard .now .need{color:var(--warn,#e0a040);font-weight:600}
+.agcard .now .bad{color:var(--bad)}
+.agcard .now .dim{color:var(--faint)}
+.agcard .meta{display:flex;flex-wrap:wrap;gap:4px 10px;font-size:11.5px;color:var(--faint)}
+.agcard .meta span{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:100%}
+.agcard .af{display:flex;align-items:center;gap:8px;border-top:1px solid var(--line);padding-top:8px;
+  font-size:12px;color:var(--faint)}
+.agcard .af .sp{flex:1}
+.agcard .af .cost{font-family:var(--mono);font-size:11.5px;white-space:nowrap}
+.agcard .af .when{white-space:nowrap}
+.agcard .af .ibtn{flex:none}
+.agcard .af .ibtn.err{color:var(--bad)}
+.agempty.grid{grid-column:1/-1;padding:28px;text-align:center;color:var(--faint);
+  border:1px dashed var(--line);border-radius:var(--r3)}
 .note a.agq{color:var(--accent);text-decoration:none}
 .note a.agq:hover{text-decoration:underline}
 .qcard{border:1px solid var(--accent);border-radius:var(--r3);padding:var(--s3);
@@ -1504,6 +1546,7 @@ body.dragging{cursor:grabbing;user-select:none}
 <symbol id="i-sessions" viewBox="0 0 24 24"><path d="M9 6h11M9 12h11M9 18h11"/><circle cx="4.6" cy="6" r="1.15"/><circle cx="4.6" cy="12" r="1.15"/><circle cx="4.6" cy="18" r="1.15"/></symbol>
 <symbol id="i-settings" viewBox="0 0 24 24"><circle cx="12" cy="12" r="3.1"/><path d="M18.9 14.8a1.5 1.5 0 0 0 .3 1.7l.1.1a1.85 1.85 0 1 1-2.6 2.6l-.1-.1a1.5 1.5 0 0 0-1.7-.3 1.5 1.5 0 0 0-.9 1.4v.3a1.85 1.85 0 1 1-3.7 0v-.2a1.5 1.5 0 0 0-1-1.4 1.5 1.5 0 0 0-1.7.3l-.1.1a1.85 1.85 0 1 1-2.6-2.6l.1-.1a1.5 1.5 0 0 0 .3-1.7 1.5 1.5 0 0 0-1.4-.9h-.3a1.85 1.85 0 1 1 0-3.7h.2a1.5 1.5 0 0 0 1.4-1 1.5 1.5 0 0 0-.3-1.7l-.1-.1a1.85 1.85 0 1 1 2.6-2.6l.1.1a1.5 1.5 0 0 0 1.7.3h.1a1.5 1.5 0 0 0 .9-1.4v-.3a1.85 1.85 0 1 1 3.7 0v.2a1.5 1.5 0 0 0 .9 1.4 1.5 1.5 0 0 0 1.7-.3l.1-.1a1.85 1.85 0 1 1 2.6 2.6l-.1.1a1.5 1.5 0 0 0-.3 1.7v.1a1.5 1.5 0 0 0 1.4.9h.3a1.85 1.85 0 1 1 0 3.7h-.2a1.5 1.5 0 0 0-1.4.9Z"/></symbol>
 <symbol id="i-terminal" viewBox="0 0 24 24"><path d="M5 6.5 10.5 12 5 17.5M12.5 17.5h7"/></symbol>
+<symbol id="i-grid" viewBox="0 0 24 24"><rect x="4" y="4" width="6.5" height="6.5" rx="1.6"/><rect x="13.5" y="4" width="6.5" height="6.5" rx="1.6"/><rect x="4" y="13.5" width="6.5" height="6.5" rx="1.6"/><rect x="13.5" y="13.5" width="6.5" height="6.5" rx="1.6"/></symbol>
 <symbol id="i-panel" viewBox="0 0 24 24"><rect x="3.5" y="4.5" width="17" height="15" rx="2.5"/><path d="M14.5 4.5v15"/></symbol>
 <symbol id="i-plus" viewBox="0 0 24 24"><path d="M12 5.5v13M5.5 12h13"/></symbol>
 <symbol id="i-clip" viewBox="0 0 24 24"><path d="M19.6 11.9 12 19.5a4.7 4.7 0 0 1-6.6-6.6l7.7-7.7a3.1 3.1 0 0 1 4.4 4.4l-7.7 7.7a1.6 1.6 0 0 1-2.2-2.2l7.1-7.1"/></symbol>
@@ -1543,7 +1586,8 @@ body.dragging{cursor:grabbing;user-select:none}
     <button class="rb"    data-page="memory" data-tip="Memory"><svg class="i"><use href="#i-memory"/></svg></button>
     <button class="rb"    data-page="graph"  data-tip="Graph"><svg class="i"><use href="#i-graph"/></svg></button>
     <button class="rb"    data-page="play"   data-tip="Playground"><svg class="i"><use href="#i-play"/></svg></button>
-    <button class="rb"    data-page="sess"   data-tip="Sessions"><svg class="i"><use href="#i-sessions"/></svg></button>
+    <button class="rb"    data-page="agents" data-tip="Agents"><svg class="i"><use href="#i-grid"/></svg></button>
+<button class="rb"    data-page="sess"   data-tip="Sessions"><svg class="i"><use href="#i-sessions"/></svg></button>
     <button class="rb"    data-page="set"    data-tip="Settings"><svg class="i"><use href="#i-settings"/></svg></button>
     <div class="rsep"></div>
     <button class="rb" data-toggle="term" data-tip="Terminal"><svg class="i"><use href="#i-terminal"/></svg></button>
@@ -1753,6 +1797,16 @@ body.dragging{cursor:grabbing;user-select:none}
     </div>
 
     <div class="view" id="v-sess"><div id="sessbody"></div></div>
+    <div class="view" id="v-agents">
+      <div id="agridbody">
+        <div class="secthead">
+          <h3>Agents</h3><span id="agridsum" class="agsum"></span>
+          <div class="spacer"></div>
+          <button class="ghost" id="agridnew">+ new agent</button>
+        </div>
+        <div id="agrid"></div>
+      </div>
+    </div>
 
     <div class="view" id="v-set">
       <div id="settabs">
@@ -1964,6 +2018,7 @@ $$('.rb[data-page]').forEach(b=>b.onclick=()=>{
   if(b.dataset.page==='play'){ loadPlayground(); loadFiles(); }
   if(b.dataset.page==='set') loadSettings();
   if(b.dataset.page==='sess') loadSessions();
+  if(b.dataset.page==='agents') loadAgents();
   if(b.dataset.page==='memory'){ $('#msearch').focus(); openMemoryPage(); }
 });
 /* The right column's width is a function of BOTH panels, so one place computes
@@ -6118,6 +6173,8 @@ const agFmt = a =>
 async function loadAgents(){
   const d = await api('/api/agents').catch(() => ({ agents: [] }));
   agents = d.agents || [];
+  agMax = d.max || 8;
+  renderGrid();
   const list = $('#aglist');
   if(!list) return;
   $('#agcount').textContent = agents.length
@@ -6178,7 +6235,7 @@ async function agOpen(){
   box.scrollTop = box.scrollHeight;
 }
 
-async function agSpawn(){
+async function agSpawn(anchor){
   // Which servers are connected decides what can be offered, and scoping is
   // the whole cost argument - so the picker is the spawn dialog, not an
   // afterthought buried in settings.
@@ -6224,7 +6281,7 @@ async function agSpawn(){
     '<div class="sep"></div>' +
     '<div class="cadd"><button id="agcreate">start</button></div>';
   document.body.appendChild(m);
-  const r = $('#agnew').getBoundingClientRect();
+  const r = (anchor instanceof Element ? anchor : $('#agnew')).getBoundingClientRect();
   // Taller now it lists templates: keep it inside the window, scrolling if
   // it must, instead of opening downward off the bottom edge.
   m.style.maxHeight = (innerHeight - 16) + 'px';
@@ -6284,41 +6341,11 @@ async function agSpawn(){
    nothing, because only turns bill. Closing bluee does not despawn anything
    either: the agent stops, but its session is in the log and shows up in the
    Sessions page, so the work is picked up where it was left. */
+/* The clock: sleep / end timers and the spending cap for the selected agent -
+   the same menu its own window has (agTimersMenu). */
 function agClock(){
   const a = agents.find(x => x.id === agSel) || agents[0];
-  const m = document.createElement('div');
-  m.id = 'connmenu'; m.className = 'cmenu';
-  const opts = [['never', null], ['15 min', 15], ['1 hour', 60], ['4 hours', 240]];
-  m.innerHTML =
-    '<div class="hd">Idle timer' + (a ? ' · ' + esc(a.name) : '') + '</div>' +
-    '<div class="subhd">End this agent after it has been idle a while. ' +
-      'Default is never. Closing bluee never despawns one - it freezes, and its ' +
-      'session is in your history to resume.</div>' +
-    (a ? opts.map(([label, mins]) =>
-      '<div class="crow" data-m="' + (mins === null ? '' : mins) + '">' +
-        '<span class="k">' + ico('check','sm') + '</span>' +
-        '<span class="n">' + label + '</span>' +
-        '<span class="c">' +
-          ((a.despawn_after_mins || null) === mins ? 'current' : '') + '</span>' +
-      '</div>').join('')
-      : '<div class="agempty">No sub-agents yet.</div>');
-  document.body.appendChild(m);
-  const r = $('#agclock').getBoundingClientRect();
-  m.style.left = Math.max(8, Math.min(r.left - 180, innerWidth - m.offsetWidth - 8)) + 'px';
-  m.style.top  = Math.max(8, r.bottom + 6) + 'px';
-  m.querySelectorAll('.crow').forEach(row => {
-    row.onclick = async () => {
-      const v = row.dataset.m;
-      m.remove();
-      await api('/api/agents/despawn', { method:'POST',
-        headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ id: a.id, mins: v === '' ? null : +v }) }).catch(()=>{});
-      loadAgents();
-    };
-  });
-  setTimeout(() => document.addEventListener('click', function off(e){
-    if(!m.contains(e.target)){ m.remove(); document.removeEventListener('click', off); }
-  }), 0);
+  if(a) agTimersMenu($('#agclock'), a);
 }
 
 async function agSend(){
@@ -6334,6 +6361,76 @@ async function agSend(){
   loadAgents(); agOpen();
 }
 
+
+/* ---------- agents page: every sub-agent at a glance ----------
+   One card each: what it is, what it is doing THIS moment (the tool it is in,
+   or "needs you" with the question), what it has cost, and when it will sleep
+   or end. Driven by the same live feed as the panel, so nothing polls while a
+   turn runs; a slow tick only refreshes the idle countdowns. */
+let agMax = 8;
+const fmtMins = s => s < 90 ? Math.round(s) + 's' : s < 5400 ? Math.round(s / 60) + 'm' : (s / 3600).toFixed(1) + 'h';
+function agCard(a){
+  const idle = a.idle_secs || 0;
+  let when = '';
+  if(a.status === 'sleeping') when = a.end_after_mins != null ? 'ends in ' + fmtMins(Math.max(0, a.end_after_mins * 60 - idle)) : 'asleep';
+  else if(!['running','waiting'].includes(a.status) && !a.queued)
+    when = a.sleep_after_mins != null ? 'sleeps in ' + fmtMins(Math.max(0, a.sleep_after_mins * 60 - idle)) : 'never sleeps';
+  const now = a.status === 'waiting' ? '<span class="need">needs you:</span> ' + esc(a.question || '')
+    : a.status === 'running' ? '<span class="act">▸ ' + esc(a.activity || 'working') + '</span>' +
+        (a.queued ? ' · ' + a.queued + ' queued' : '')
+    : a.status === 'sleeping' ? 'asleep - a message wakes it'
+    : a.status === 'failed' ? '<span class="bad">' + esc(a.last.slice(0, 140)) + '</span>'
+    : a.last ? esc(a.last.replace(/\s+/g, ' ').slice(0, 140)) : '<span class="dim">no work yet</span>';
+  return '<div class="agcard ' + a.status + '" data-id="' + esc(a.id) + '">' +
+    '<div class="ah"><span class="dot"></span><b>' + esc(a.name) + '</b>' +
+      (a.template ? '<span class="tag">' + esc(a.template) + '</span>' : '') +
+      '<span class="st">' + a.status + '</span></div>' +
+    (a.purpose ? '<div class="pu">' + esc(a.purpose) + '</div>' : '') +
+    '<div class="now">' + now + '</div>' +
+    '<div class="meta">' +
+      (a.browser ? '<span>🌐 ' + esc(a.browser) + '</span>' : '') +
+      '<span>' + (a.servers.length ? esc(a.servers.join(', ')) : 'memory only') + '</span>' +
+      (a.model ? '<span>' + esc(a.model.split('/').pop()) + '</span>' : '') +
+    '</div>' +
+    '<div class="af"><span class="cost" title="' + (a.tokens || 0) + ' tokens">$' + (a.cost || 0).toFixed(4) +
+      (a.max_cost != null ? ' / ' + a.max_cost : '') + ' · ' + a.turns + ' turn' + (a.turns === 1 ? '' : 's') + '</span>' +
+      '<span class="when">' + when + '</span><span class="sp"></span>' +
+      '<button class="ibtn bare" data-a="open" title="Open its window">' + ico('popout','sm') + '</button>' +
+      '<button class="ibtn bare" data-a="sleep" title="Sleep now">' + ico('dot-o','sm') + '</button>' +
+      '<button class="ibtn bare" data-a="stop" title="End it (click twice)">' + ico('close','sm') + '</button>' +
+    '</div></div>';
+}
+function renderGrid(){
+  const g = $('#agrid'); if(!g) return;
+  const spent = agents.reduce((s, a) => s + (a.cost || 0), 0);
+  const busyN = agents.filter(a => a.status === 'running' || a.status === 'waiting').length;
+  $('#agridsum').textContent = agents.length
+    ? agents.length + ' of ' + agMax + ' · ' + busyN + ' working · $' + spent.toFixed(4) + ' spent' : '';
+  g.innerHTML = agents.length ? agents.map(agCard).join('')
+    : '<div class="agempty grid"><b>No sub-agents running.</b><br>Start one here, or ask bluee to - ' +
+      '"spawn a researcher to find…". Each gets its own window, tools and, if you like, its own browser.</div>';
+  g.querySelectorAll('.agcard').forEach(card => {
+    const id = card.dataset.id, a = agents.find(x => x.id === id);
+    card.querySelectorAll('button').forEach(b => b.onclick = async e => {
+      e.stopPropagation();
+      if(b.dataset.a === 'open') popOut('agent', { id, title: 'bluee · ' + a.name, w: 560, h: 720 });
+      if(b.dataset.a === 'sleep'){
+        const r = await agPost('/api/agents/sleep', { id });
+        if(r.error){ b.title = r.error; b.classList.add('err'); setTimeout(() => b.classList.remove('err'), 1500); }
+      }
+      if(b.dataset.a === 'stop'){
+        if(b.dataset.armed !== '1'){ b.dataset.armed = '1'; b.style.color = 'var(--bad)'; b.title = 'Click again to end it';
+          setTimeout(() => { b.dataset.armed = ''; b.style.color = ''; }, 3000); return; }
+        await agPost('/api/agents/stop', { id });
+      }
+      loadAgents();
+    });
+    card.ondblclick = () => popOut('agent', { id, title: 'bluee · ' + a.name, w: 560, h: 720 });
+  });
+}
+$('#agridnew').onclick = e => { e.stopPropagation(); agSpawn($('#agridnew')); };
+// Idle countdowns move without any event; refresh them while the page is open.
+setInterval(() => { if($('#v-agents').classList.contains('on')) loadAgents(); }, 15000);
 
 /* ---------- sub-agent windows ----------
    Every sub-agent gets its own window, opened the first time it is spawned
@@ -6412,8 +6509,8 @@ function agPost(path, body){
     body: JSON.stringify(body) }).catch(e => ({ error: String(e) }));
 }
 
-function agTimersMenu(anchor){
-  const a = agInfo; if(!a) return;
+function agTimersMenu(anchor, a = agInfo){
+  if(!a) return;
   document.getElementById('connmenu')?.remove();
   const m = document.createElement('div');
   m.id = 'connmenu'; m.className = 'cmenu';
@@ -6451,7 +6548,8 @@ function agTimersMenu(anchor){
       body[rw.dataset.k] = v;
       res = await agPost('/api/agents/timers', body);
     }
-    if(res.agent){ agInfo = res.agent; agHeader(); }
+    if(res.agent && agentMode){ agInfo = res.agent; agHeader(); }
+    if(!agentMode) loadAgents();
   });
   setTimeout(() => document.addEventListener('click', function off(e){
     if(!m.contains(e.target)){ m.remove(); document.removeEventListener('click', off); }

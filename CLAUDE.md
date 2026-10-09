@@ -2201,6 +2201,58 @@ code 1,736 by file, facts 3 → 4 with history, 1 marked past; console clean.
 The Graph page needed no code change: with the servers back it draws the full
 1,432 entities.
 
+**62. Sub-agents v2 - windows, two-way talk, pickers, templates, one browser
+per agent, and a grid.** Asked for as "spawn sub-agents like Claude Code, but
+with a GUI window each". Built in six stages, each checked before the next
+(`dev/plan-subagents.md` has the table and the check per stage).
+
+- **One worker for every agent** (`src/subagents.rs`): new, resumed and
+  woken-from-sleep agents all build lazily from the session id. A per-agent
+  broadcast feeds its window (`/ws/agent?id=`); a global one feeds the main
+  window (`/ws/agents`: spawned -> open a window, status, inbox, questions).
+- **Inbox, not polling.** `ask_agent` waits 45s inline; a job that misses it,
+  or `background: true`, is delivered to bluee's inbox when it lands - the
+  dropped oneshot receiver IS the routing signal. The UI then sends `{wake:
+  true}` on the chat socket; the turn's user message says plainly it was not
+  typed by Adithya. What Adithya says in an agent's window also reaches the
+  inbox (no wake). Children get `message_parent` and `ask_user` (pauses the
+  agent until he answers in its window, 30 min).
+- **Sleep 45m / end 2h of no work**, per agent; busy (running, queued, or
+  waiting on him) never counts. Ending keeps the session.
+- **Found on the way: resume dropped tool results.** A woken agent saw itself
+  say "teal" with no idea why, and denied being told. Replay now folds each
+  tool's result into the assistant text as `[tools I used: ...]` - no call ids,
+  so nothing for a provider to reject. Benefits Sessions resume too.
+- **`/` and `@` pickers -> `Picks`** (`Agent::apply_picks`): skills attached,
+  tools loaded, a picked server GRANTED to a sub-agent, and the model told he
+  chose them. Ordering trap: `syncSend` reads `picks` at startup, so it is
+  declared beside `attachments`, not with the picker code.
+- **Templates** (`agents/*.md`, `src/templates.rs`); **per-agent model**
+  (`ProviderChain::prefer_model`, chain behind it); **real cost** - OpenRouter
+  reports it when sent `usage: {include: true}`, on a final frame with EMPTY
+  choices (test covers it), so caps are dollars, not guesses; **own folder** -
+  `run_command` with no root runs in `playground/agents/<name>`.
+- **One browser per agent.** SnareVec had ONE queue: any browser's extension
+  took any command. Now each extension sends a client id + kind, the daemon
+  keeps a queue per browser, and `browser_*` take `browser`. Applied in the
+  SnareVec repo but NOT committed there (his uncommitted work shares those
+  files) - recorded in `mcps/patches/snarevec-multi-browser.patch`; needs a
+  daemon restart and an extension reload per browser. bluee pins a sub-agent's
+  snarevec calls to its browser and refuses another; when the extension is not
+  there, `src/webtools.rs` drives bluee's own copy (CDP, `data/browser-<kind>`)
+  by selector or visible text. Measured: Edge and Chrome agents browsing in
+  parallel, 10.2s; typed into Wikipedia's search and landed on the article.
+- **Agents page** (grid rail icon): live activity per card from `activity`,
+  set by the event forwarder.
+- **Two regressions my own checks caught:** `/api/browsers` cost 1.5s per call
+  when the SnareVec daemon was down (Windows refuses a closed local port
+  slowly) - now 300ms connect timeout + 15s cache; and the grid check failed
+  on agents the panel check left behind - it now starts from none.
+
+Checks: `dev/uisubwin.mjs` 20, `uipickers` 19, `uitemplates` 16, `uibrowsers`
+16, `uigrid` 12, `uiagents` (updated), SnareVec `tests/test_browser_actions.py`
+69. Shared CDP helpers moved to `dev/cdp.mjs`.
+
 ---
 
 ### 4h. Requested next, sized honestly (not yet built)

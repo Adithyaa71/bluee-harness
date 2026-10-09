@@ -601,6 +601,72 @@ at the start of something rather than background work.
 
 ---
 
+## Sub-agents — other bluees with their own window
+
+A sub-agent is another assistant bluee (or you) starts for one job. Each has
+its own conversation, its own tools, its own work folder, and **its own
+window**, which opens the first time it is spawned.
+
+**Starting one**
+- Ask bluee: *"spawn a researcher to find the best 27-inch monitors under 20k"*
+  or *"spawn two agents, one in Chrome and one in Edge, and compare prices"*.
+  Given a task, it works in the background and bluee is told the result when
+  it lands; you do not have to wait or ask again.
+- Or press **+** in the sub-agents panel, or **+ new agent** on the **Agents**
+  page (grid icon in the left rail). Pick a template, the tool servers it may
+  use, a browser, and optionally a model.
+
+**Talking to it.** Type in its window, exactly like the main chat. bluee sees
+that conversation too, and work bluee gives it shows up in the window, marked
+*from bluee*. When an agent needs a decision from you, a question card appears
+in its window and a note appears in the main chat. Answer in the card.
+
+**Closing the window never stops it.** Reopen it from the panel or the Agents
+page. What stops an agent:
+- **sleep** after 45 min with no work: unloaded from memory, history kept;
+  your next message wakes it as if nothing happened;
+- **end** after 2 h with no work: it stops and its window says so; the
+  conversation stays in Sessions and can be resumed;
+- the **×** in its window or on its card (click twice).
+
+"No work" means nothing running, nothing queued and no question waiting on you.
+An agent that is busy never sleeps. Change both times, and a spending cap, from
+the timer button in its window (`$0.0012 · sleeps 45m · ends 2h`).
+
+**Templates** live in `agents/` (researcher, shopper, coder, desktop). Each is
+a Markdown file: settings at the top, instructions below. See `agents/README.md`.
+Edit them by hand; they are re-read on every spawn.
+
+**Browsers.** Give an agent its own browser (`chrome`, `brave` or `edge`) and
+no other agent can use it, so three agents can browse at once without
+touching each other's tabs.
+- If the SnareVec extension is loaded in that browser, the agent drives **your
+  real browser**, signed in as you. After updating SnareVec, restart its
+  daemon and **reload the extension in each browser** (`chrome://extensions`,
+  `brave://extensions`, `edge://extensions`). Then `browser_status` lists every
+  connected browser.
+- If not, the agent uses **bluee's own copy** of that browser (separate,
+  signed-out profile in `data/browser-<kind>`), driven by clicking and typing on
+  visible text.
+
+**The Agents page** shows every agent on one screen: what it is doing at this
+moment (the tool it is in, or *needs you*), what it has cost, and when it will
+sleep or end. Double-click a card to open its window.
+
+## Composer: `/` and `@`
+
+In the main chat and in every agent window:
+- **`/`** lists slash commands (at the start of the main chat only) and your
+  **skills**;
+- **`@`** lists **tool servers**, single **tools**, and **browsers**.
+
+Keep typing to filter; arrows to move; **Tab** or **Enter** to pick. A pick
+becomes a coloured chip above the box (blue = skill, green = server/tool,
+orange = browser). Backspace on an empty box removes the last chip. Chips go
+with that one message: the skill is attached, the tools are loaded, and bluee
+is told you chose them. In an agent's window, `@server` also *gives* that
+agent the server.
+
 ## Screen vision
 
 Three-way toggle in the top bar. **Passive is the default.**
