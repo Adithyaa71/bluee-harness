@@ -3982,8 +3982,17 @@ async function loadPlayground(){
   // Reloading after a turn used to force the card list back on top of whatever
   // file you had open, which reads exactly like the file closing itself.
   const viewingFile=$('#pgview').classList.contains('on');
-  $('#aview').classList.remove('on');
-  if(!viewingFile) $('#playbody').style.display='';
+  /* The same was true of an open ARTIFACT: every refresh (one runs after each
+     turn) closed it, so "make the chart bigger" made the chart vanish. Now it
+     stays open, and reloads if bluee changed it during the turn. */
+  if($('#aview').classList.contains('on') && aCurrent){
+    const a=artifacts.find(x=>x.id===aCurrent);
+    if(a){
+      if(a.updated!==aCurrentUpdated){ aCurrentUpdated=a.updated; $('#aframe').src=$('#aframe').src; }
+    } else { $('#aview').classList.remove('on'); aCurrent=null; }
+  }
+  const viewingArtifact=$('#aview').classList.contains('on');
+  if(!viewingFile && !viewingArtifact) $('#playbody').style.display='';
   if(!list.length){
     $('#playbody').innerHTML=`<div class="empty">
       <h2>Playground</h2>
@@ -4017,8 +4026,11 @@ async function loadPlayground(){
     };
   });
 }
+// Which artifact is open, by id - names repeat across topics.
+let aCurrent=null, aCurrentUpdated=null;
 function openArtifact(id){
   const a=artifacts.find(x=>x.id===id); if(!a) return;
+  aCurrent=a.id; aCurrentUpdated=a.updated;
   $('#playbody').style.display='none';
   $('#aview').classList.add('on');
   $('#aname').textContent=a.name;
@@ -4027,11 +4039,13 @@ function openArtifact(id){
   $('#aframe').src=url;
   $('#aopen').onclick=()=>window.open(url,'_blank');
 }
-$('#aback').onclick=()=>{ $('#aview').classList.remove('on'); $('#playbody').style.display=''; };
+$('#aback').onclick=()=>{ $('#aview').classList.remove('on'); aCurrent=null; $('#playbody').style.display=''; };
 /* Artifacts pop out into a real window - drag, resize, maximise - so a chart
    you are working against can sit beside the chat instead of underneath it. */
 $('#apop').onclick=async()=>{
-  const a=artifacts.find(x=>x.name===$('#aname').textContent); if(!a) return;
+  // By id: matching on the name popped the wrong one out whenever two topics
+  // had an artifact with the same name.
+  const a=artifacts.find(x=>x.id===aCurrent); if(!a) return;
   // Its own OS window, so a live chart can sit on a second monitor while you
   // work in the main one.
   if(await popOut('artifact',{id:a.id,title:a.name,w:900,h:640})) return;

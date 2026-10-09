@@ -1091,7 +1091,24 @@ async fn serve_artifact(s: &Shared, id: &str, rel: &str) -> Response {
         "jpg" | "jpeg" => "image/jpeg",
         _ => "application/octet-stream",
     };
-    ([(header::CONTENT_TYPE, mime)], bytes).into_response()
+    /* Sandboxed by the SERVER, not only by the iframe. Inside the Playground
+       the iframe's sandbox already isolates an artifact - but "open in a new
+       tab" loaded it top-level on bluee's own origin, where its script could
+       call the /api routes and the shared terminal. An artifact is code the model wrote,
+       possibly after reading a web page; it must never get that. With this
+       header the browser gives it an opaque origin wherever it is opened,
+       while its own scripts, forms and links still work. */
+    (
+        [
+            (header::CONTENT_TYPE, mime),
+            (
+                header::CONTENT_SECURITY_POLICY,
+                "sandbox allow-scripts allow-forms allow-popups allow-modals allow-downloads",
+            ),
+        ],
+        bytes,
+    )
+        .into_response()
 }
 
 // ------------------------------------------------------------ terminal
