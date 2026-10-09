@@ -193,6 +193,21 @@ impl ProviderChain {
         Ok(Self { entries })
     }
 
+    /// Put `model` first, on the first provider's endpoint and key, keeping
+    /// the whole configured chain behind it as fallback. Used for a sub-agent
+    /// that should run on a different (often cheaper) model.
+    pub fn prefer_model(&mut self, model: &str) {
+        let mut conf = self.entries[0].0.clone();
+        conf.name = format!("{} ({model})", conf.name);
+        conf.model = model.to_string();
+        let client = OpenAiCompatible::new(&conf.base_url, &conf.api_key, &conf.model, conf.max_tokens)
+            .tuned(conf.temperature, conf.top_p, conf.timeout_secs)
+            .transport(conf.stream, conf.retries)
+            .reasoning(conf.effective_reasoning_budget())
+            .with_fallback(true);
+        self.entries.insert(0, (conf, client));
+    }
+
     /// Name+model of whichever provider is first in line.
     pub fn primary(&self) -> (String, String) {
         let (c, _) = &self.entries[0];

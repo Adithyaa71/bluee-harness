@@ -71,6 +71,10 @@ pub struct NativeTools {
     embedder: Option<TextEmbedding>,
     /// The conversation these tools serve, for `scope: "session"`.
     session: String,
+    /// A sub-agent's own work folder: (granted root id, sub-folder inside it).
+    /// Used when a call names no `root`, and `run_command` runs IN the
+    /// sub-folder - so two agents never write over each other's files.
+    home: Option<(String, String)>,
 }
 
 impl NativeTools {
@@ -82,7 +86,22 @@ impl NativeTools {
             cfg: cfg.clone(),
             embedder: None,
             session: String::new(),
+            home: None,
         })
+    }
+
+    /// Give these tools a default work folder (see `home`).
+    pub fn set_home(&mut self, root: &str, sub: &str) {
+        self.home = Some((root.to_string(), sub.trim_matches(['/', '\\']).to_string()));
+    }
+
+    /// The granted root a call means: its own `root`, else the home folder,
+    /// else the playground.
+    fn root_arg<'a>(&'a self, args: &'a serde_json::Value) -> &'a str {
+        args.get("root")
+            .and_then(|v| v.as_str())
+            .or(self.home.as_ref().map(|(r, _)| r.as_str()))
+            .unwrap_or("playground")
     }
 
     /// For skill auto-loading, which happens in the agent, not in a tool call.
@@ -620,7 +639,7 @@ impl NativeTools {
             }
 
             "list_files" => {
-                let id = args.get("root").and_then(|v| v.as_str()).unwrap_or("playground");
+                let id = self.root_arg(args);
                 match crate::roots::get(&self.cfg, id) {
                     Ok(r) => Ok(serde_json::json!({
                         "root": r.id, "label": r.label,
@@ -633,7 +652,7 @@ impl NativeTools {
             "read_file" => {
                 let path = args.get("path").and_then(|v| v.as_str())
                     .context("read_file requires `path`")?;
-                let id = args.get("root").and_then(|v| v.as_str()).unwrap_or("playground");
+                let id = self.root_arg(args);
                 match crate::roots::resolve(&self.cfg, id, path) {
                     Ok((r, full)) => match std::fs::read_to_string(&full) {
                         Ok(text) => Ok(serde_json::json!({
@@ -652,7 +671,7 @@ impl NativeTools {
             "delete_file" => {
                 let path = args.get("path").and_then(|v| v.as_str())
                     .context("delete_file requires `path`")?;
-                let id = args.get("root").and_then(|v| v.as_str()).unwrap_or("playground");
+                let id = self.root_arg(args);
                 match crate::roots::get(&self.cfg, id)
                     .and_then(|r| crate::artifacts::delete_path(&r.path, path).map(|x| (r, x)))
                 {
@@ -666,7 +685,7 @@ impl NativeTools {
             "run_command" => {
                 let command = args.get("command").and_then(|v| v.as_str())
                     .context("run_command requires `command`")?;
-                let id = args.get("root").and_then(|v| v.as_str()).unwrap_or("playground");
+                let id = self.root_arg(args);
                 let timeout = args.get("timeout_secs").and_then(|v| v.as_u64()).unwrap_or(120);
                 // No model-settable override, deliberately.
                 //
@@ -694,7 +713,17 @@ impl NativeTools {
                     Ok(r) => r,
                     Err(e) => return Ok(serde_json::json!({ "root": id, "error": e.to_string() })),
                 };
-                match crate::system::run(command, &root.path, timeout) {
+                // A sub-agent with no explicit root runs in its own sub-folder.
+                let mut cwd = root.path.clone();
+                if args.get("root").is_none() {
+                    if let Some((_, sub)) = &self.home {
+                        if !sub.is_empty() && !sub.contains("..") {
+                            cwd = cwd.join(sub);
+                            let _ = std::fs::create_dir_all(&cwd);
+                        }
+                    }
+                }
+                match crate::system::run(command, &cwd, timeout) {
                     Ok(out) => Ok(serde_json::to_value(out)?),
                     Err(e) => Ok(serde_json::json!({ "command": command, "error": e.to_string() })),
                 }
@@ -702,7 +731,7 @@ impl NativeTools {
 
             "open_path" => {
                 let rel = args.get("path").and_then(|v| v.as_str()).unwrap_or("");
-                let id = args.get("root").and_then(|v| v.as_str()).unwrap_or("playground");
+                let id = self.root_arg(args);
                 match crate::roots::resolve(&self.cfg, id, rel) {
                     Ok((r, full)) => match crate::system::open_path(&full) {
                         Ok(shown) => Ok(serde_json::json!({

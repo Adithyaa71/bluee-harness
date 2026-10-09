@@ -172,6 +172,9 @@ pub struct Agent {
     child: Option<crate::subagents::ChildLink>,
     /// Composer picks for the NEXT turn only; taken (and cleared) by it.
     picks: Picks,
+    /// Tokens and dollars this agent has spent since it was built, from the
+    /// provider's own usage reports. What sub-agent caps are checked against.
+    spent: crate::llm::Usage,
     /// Separate client: ACTIVE screen reads need a model that accepts images,
     /// which is rarely the same one doing the chatting.
     vision_client: crate::llm::OpenAiCompatible,
@@ -380,6 +383,7 @@ impl Agent {
             subagents: None,
             child: None,
             picks: Picks::default(),
+            spent: Default::default(),
             defer: crate::toolsearch::enabled(),
             core_servers: crate::toolsearch::core_servers(),
             loaded: Default::default(),
@@ -640,6 +644,30 @@ impl Agent {
     /// Composer picks for the next turn (see `Picks`).
     pub fn set_picks(&mut self, picks: Picks) {
         self.picks = picks;
+    }
+
+    /// Default work folder for file and command tools (a sub-agent's own).
+    pub fn set_home(&mut self, root: &str, sub: &str) {
+        self.native.set_home(root, sub);
+    }
+
+    /// What this agent has spent so far.
+    pub fn spent(&self) -> crate::llm::Usage {
+        self.spent
+    }
+
+    /// Answer with `model` first, on the same endpoint as the first provider,
+    /// with the configured chain behind it as fallback. Logged, because which
+    /// model answered is part of the record (§51).
+    pub fn prefer_model(&mut self, model: &str) {
+        if model.trim().is_empty() || model == self.model {
+            return;
+        }
+        self.chain.prefer_model(model);
+        let _ = self.log.append(EventKind::System {
+            note: format!("model for this agent: {model} (configured chain behind it as fallback)"),
+        });
+        self.model = model.to_string();
     }
 
     /// Apply this turn's picks: allow and load the picked servers and tools,
@@ -992,6 +1020,9 @@ impl Agent {
         msgs.push(Message::system(note));
         match self.chain.complete(&msgs, &[]).await {
             Ok((c, _)) => {
+                if let Some(u) = &c.usage {
+                    self.spent.add(u);
+                }
                 let text = c.content.unwrap_or_default();
                 if text.trim().is_empty() {
                     let message = empty_reply_message(c.finish_reason.as_deref(), c.reasoning_chars);
@@ -1295,6 +1326,9 @@ impl Agent {
             let completion = match self.chain.complete(&self.history, &self.tool_defs).await {
                 // The chain reports which provider actually answered.
                 Ok((c, model)) => {
+                    if let Some(u) = &c.usage {
+                        self.spent.add(u);
+                    }
                     if model != self.model {
                         /* WRITE IT DOWN. Updating `self.model` alone only
                            changed live memory - `session_start` still named the

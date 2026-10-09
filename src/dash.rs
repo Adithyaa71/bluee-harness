@@ -171,6 +171,8 @@ pub async fn serve_on(cfg: Config, std_listener: std::net::TcpListener) -> Resul
         .route("/api/agents/timers", post(agents_timers))
         .route("/api/agents/sleep", post(agents_sleep))
         .route("/api/agents/inbox", get(agents_inbox))
+        .route("/api/agents/caps", post(agents_caps))
+        .route("/api/agents/templates", get(agents_templates))
         .route("/ws/agent", get(agent_ws))
         .route("/ws/agents", get(agents_feed_ws))
         .route("/api/tools", get(tools))
@@ -2182,12 +2184,18 @@ async fn graph_for_session(
 
 #[derive(Deserialize)]
 struct SpawnBody {
+    #[serde(default)]
     name: String,
     #[serde(default)]
     purpose: String,
-    /// Required, and may be empty. See src/subagents.rs on why there is no
-    /// "every server" option.
-    servers: Vec<String>,
+    /// Required unless `template` is given, and may be empty. See
+    /// src/subagents.rs on why there is no "every server" option.
+    #[serde(default)]
+    servers: Option<Vec<String>>,
+    #[serde(default)]
+    template: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -2211,8 +2219,52 @@ async fn agents_spawn(
     State(s): State<Shared>,
     Json(b): Json<SpawnBody>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let info = s.subagents.spawn(&b.name, &b.purpose, b.servers).map_err(fail)?;
+    let mut spec = match b.template.as_deref().filter(|t| !t.trim().is_empty()) {
+        Some(t) => {
+            let t = crate::templates::get(&s.cfg.agents_dir, t).map_err(fail)?;
+            let mut spec = crate::subagents::Spec::from_template(&t, Some(&b.name), Some(&b.purpose));
+            if let Some(sv) = b.servers {
+                spec.servers = sv;
+            }
+            spec
+        }
+        None => {
+            let Some(servers) = b.servers else {
+                return Err(fail(anyhow::anyhow!("servers is required unless a template is given")));
+            };
+            let name = if b.name.trim().is_empty() { "agent" } else { b.name.trim() };
+            crate::subagents::Spec::new(name, &b.purpose, servers)
+        }
+    };
+    if let Some(m) = b.model.filter(|m| !m.trim().is_empty()) {
+        spec.model = Some(m);
+    }
+    let info = s.subagents.start(spec, String::new()).map_err(fail)?;
     Ok(Json(json!({ "ok": true, "agent": info })))
+}
+
+#[derive(Deserialize)]
+struct CapsBody {
+    id: String,
+    #[serde(default)]
+    max_turns: Option<u32>,
+    #[serde(default)]
+    max_cost: Option<f64>,
+}
+
+async fn agents_caps(
+    State(s): State<Shared>,
+    Json(b): Json<CapsBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let info = s.subagents.set_caps(&b.id, b.max_turns, b.max_cost).map_err(fail)?;
+    Ok(Json(json!({ "ok": true, "agent": info })))
+}
+
+async fn agents_templates(State(s): State<Shared>) -> Json<Value> {
+    Json(json!({
+        "dir": s.cfg.agents_dir.display().to_string(),
+        "templates": crate::templates::load_all(&s.cfg.agents_dir),
+    }))
 }
 
 async fn agents_ask(

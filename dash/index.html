@@ -1221,6 +1221,8 @@ input[type=checkbox]:disabled{opacity:.4;cursor:not-allowed}
 .msg.me.bluee .av{background:var(--accent-dim,var(--panel));color:var(--accent)}
 .from-tag{display:inline-block;font-size:11px;letter-spacing:.02em;color:var(--accent);
   border:1px solid var(--accent-dim,var(--line));border-radius:999px;padding:0 8px;margin-bottom:6px}
+.cmenu .crow.tpl.on{background:var(--accent-dim,var(--hover));box-shadow:inset 2px 0 0 var(--accent)}
+.cmenu .crow.tpl .c{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:220px}
 .note a.agq{color:var(--accent);text-decoration:none}
 .note a.agq:hover{text-decoration:underline}
 .qcard{border:1px solid var(--accent);border-radius:var(--r3);padding:var(--s3);
@@ -6178,8 +6180,18 @@ async function agSpawn(){
   // Which servers are connected decides what can be offered, and scoping is
   // the whole cost argument - so the picker is the spawn dialog, not an
   // afterthought buried in settings.
-  const mcp = await api('/api/mcp').catch(() => ({ servers: [] }));
+  const [mcp, tp] = await Promise.all([
+    api('/api/mcp').catch(() => ({ servers: [] })),
+    api('/api/agents/templates').catch(() => ({ templates: [] })),
+  ]);
   const live = (mcp.servers || []).filter(s => s.connected);
+  const tpls = tp.templates || [];
+  const tplRows = tpls.map(t =>
+    '<div class="crow tpl" data-t="' + esc(t.name) + '" title="' + esc(t.instructions.slice(0, 300)) + '">' +
+      '<span class="k">' + ico('spark','sm') + '</span>' +
+      '<span class="n">' + esc(t.name) + '</span>' +
+      '<span class="c">' + esc(t.description || (t.servers || []).join(', ')) + '</span>' +
+    '</div>').join('');
   const rows = live.map((s, i) =>
     '<div class="crow" data-s="' + esc(s.name) + '">' +
       '<span class="k">' + ico('plug','sm') + '</span>' +
@@ -6195,27 +6207,51 @@ async function agSpawn(){
       'for on each of its turns - give it only what the job needs.</div>' +
     '<div class="cadd"><input id="agname" placeholder="name" spellcheck="false">' +
       '<input id="agpurpose" placeholder="what it is for" spellcheck="false"></div>' +
+    (tplRows ? '<div class="hd">from a template (optional)</div><div class="scroll tpls">' + tplRows + '</div>' +
+      '<div class="sep"></div>' : '') +
+    '<div class="hd" id="agsrvhd">may reach</div>' +
     '<div class="scroll">' + (rows || '<div class="agempty">No servers connected.</div>') + '</div>' +
+    '<div class="cadd"><input id="agmodel" placeholder="model (optional, e.g. z-ai/glm-5.3-flash)" spellcheck="false"></div>' +
     '<div class="sep"></div>' +
     '<div class="cadd"><button id="agcreate">start</button></div>';
   document.body.appendChild(m);
   const r = $('#agnew').getBoundingClientRect();
+  // Taller now it lists templates: keep it inside the window, scrolling if
+  // it must, instead of opening downward off the bottom edge.
+  m.style.maxHeight = (innerHeight - 16) + 'px';
+  m.style.overflowY = 'auto';
   m.style.left = Math.max(8, Math.min(r.left - 200, innerWidth - m.offsetWidth - 8)) + 'px';
-  m.style.top  = Math.max(8, r.bottom + 6) + 'px';
+  m.style.top  = Math.max(8, Math.min(r.bottom + 6, innerHeight - m.offsetHeight - 8)) + 'px';
 
-  m.querySelectorAll('.crow').forEach(row => {
+  let tpl = null;
+  m.querySelectorAll('.crow:not(.tpl)').forEach(row => {
     row.onclick = () => row.querySelector('.sw').classList.toggle('on');
   });
+  // A template brings its own servers; ticking any here overrides them.
+  m.querySelectorAll('.crow.tpl').forEach(row => {
+    row.onclick = () => {
+      tpl = tpl === row.dataset.t ? null : row.dataset.t;
+      m.querySelectorAll('.crow.tpl').forEach(r => r.classList.toggle('on', r.dataset.t === tpl));
+      const t = tpls.find(x => x.name === tpl);
+      if(t && !$('#agname').value.trim()) $('#agname').placeholder = t.name;
+      $('#agsrvhd').textContent = tpl ? 'may reach (leave all off to use the template\'s)' : 'may reach';
+    };
+  });
   $('#agcreate').onclick = async () => {
-    const servers = [...m.querySelectorAll('.crow')]
+    const ticked = [...m.querySelectorAll('.crow:not(.tpl)')]
       .filter(r => r.querySelector('.sw').classList.contains('on'))
       .map(r => r.dataset.s);
-    const name = ($('#agname').value.trim() || 'agent');
+    const name = $('#agname').value.trim() || (tpl ? '' : 'agent');
     const purpose = $('#agpurpose').value.trim();
+    const model = $('#agmodel').value.trim();
+    const body = { name, purpose };
+    if(tpl){ body.template = tpl; if(ticked.length) body.servers = ticked; }
+    else body.servers = ticked;
+    if(model) body.model = model;
     m.remove();
     const res = await api('/api/agents', { method:'POST',
       headers:{'Content-Type':'application/json'},
-      body: JSON.stringify({ name, purpose, servers }) }).catch(e => ({ error:String(e) }));
+      body: JSON.stringify(body) }).catch(e => ({ error:String(e) }));
     if(res && res.agent) agSel = res.agent.id;
     loadAgents();
   };
@@ -6337,7 +6373,15 @@ function agHeader(){
       (a.tools ? ' · ' + a.tools + ' tools' : '')
     : '';
   hd.querySelector('.tm').textContent = a
-    ? 'sleeps ' + minsLabel(a.sleep_after_mins) + ' · ends ' + minsLabel(a.end_after_mins) : '';
+    ? '$' + (a.cost || 0).toFixed(a.cost >= 0.1 ? 2 : 4) +
+      (a.max_cost != null ? '/' + a.max_cost : '') +
+      ' · sleeps ' + minsLabel(a.sleep_after_mins) + ' · ends ' + minsLabel(a.end_after_mins) : '';
+  hd.querySelector('.tm').title = a
+    ? 'Spent $' + (a.cost || 0).toFixed(5) + ' and ' + (a.tokens || 0) + ' tokens over ' + a.turns +
+      ' turn(s)' + (a.max_turns != null ? ' (cap ' + a.max_turns + ' turns)' : '') +
+      (a.model ? '\nmodel: ' + a.model : '') + '\nfolder: ' + (a.folder || '') +
+      (a.template ? '\ntemplate: ' + a.template : '') + '\nclick: idle timers and caps'
+    : '';
   document.title = 'bluee · ' + (a ? a.name : soloId);
   $('#input').placeholder = agEnded
     ? 'This agent has ended.'
@@ -6366,17 +6410,28 @@ function agTimersMenu(anchor){
     '<div class="hd">sleep after</div>' +
     [15, 45, 120, null].map(v => row('sleep', v, a.sleep_after_mins)).join('') +
     '<div class="sep"></div><div class="hd">end after</div>' +
-    [60, 120, 360, null].map(v => row('end', v, a.end_after_mins)).join('');
+    [60, 120, 360, null].map(v => row('end', v, a.end_after_mins)).join('') +
+    '<div class="sep"></div><div class="hd">spending cap · spent $' + (a.cost || 0).toFixed(4) + '</div>' +
+    [0.1, 0.5, 2, null].map(v =>
+      '<div class="crow" data-k="max_cost" data-v="' + (v == null ? '' : v) + '">' +
+        '<span class="k">' + ico('check','sm') + '</span>' +
+        '<span class="n">' + (v == null ? 'no cap' : '$' + v) + '</span>' +
+        '<span class="c">' + (a.max_cost === v ? 'current' : '') + '</span></div>').join('');
   document.body.appendChild(m);
   const r = anchor.getBoundingClientRect();
   m.style.left = Math.max(8, Math.min(r.left - 160, innerWidth - m.offsetWidth - 8)) + 'px';
   m.style.top = Math.max(8, r.bottom + 6) + 'px';
   m.querySelectorAll('.crow').forEach(rw => rw.onclick = async () => {
     const v = rw.dataset.v === '' ? null : +rw.dataset.v;
-    const body = { id: a.id, sleep: a.sleep_after_mins, end: a.end_after_mins };
-    body[rw.dataset.k] = v;
     m.remove();
-    const res = await agPost('/api/agents/timers', body);
+    let res;
+    if(rw.dataset.k === 'max_cost'){
+      res = await agPost('/api/agents/caps', { id: a.id, max_turns: a.max_turns, max_cost: v });
+    } else {
+      const body = { id: a.id, sleep: a.sleep_after_mins, end: a.end_after_mins };
+      body[rw.dataset.k] = v;
+      res = await agPost('/api/agents/timers', body);
+    }
     if(res.agent){ agInfo = res.agent; agHeader(); }
   });
   setTimeout(() => document.addEventListener('click', function off(e){

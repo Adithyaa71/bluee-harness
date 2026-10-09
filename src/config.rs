@@ -24,6 +24,8 @@ pub struct Config {
     /// Model used for ACTIVE screen reads. Usually different from the chat
     /// model - most text models reject images outright.
     pub vision_model: String,
+    /// `agents/*.md` - sub-agent templates (§ src/templates.rs).
+    pub agents_dir: PathBuf,
 }
 
 impl Config {
@@ -81,6 +83,10 @@ impl Config {
                 std::env::var("HARNESS_LOOPS_DIR").unwrap_or_else(|_| "loops".into()),
             ),
             vision_model: std::env::var("LLM_VISION_MODEL").unwrap_or_default(),
+            // Sub-agent templates, beside skills and loops for the same reason.
+            agents_dir: PathBuf::from(
+                std::env::var("HARNESS_AGENTS_DIR").unwrap_or_else(|_| "agents".into()),
+            ),
         })
     }
 

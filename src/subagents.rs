@@ -126,6 +126,15 @@ pub struct AgentInfo {
     pub browser: Option<String>,
     pub model: Option<String>,
     pub template: Option<String>,
+    /// Its work folder, `root/sub`.
+    pub folder: String,
+    /// Spent so far, from the provider's usage reports. `cost` is US dollars
+    /// and stays 0 when the provider does not report money.
+    pub cost: f64,
+    pub tokens: u64,
+    /// Caps: once reached it refuses new work until raised. `None` = none.
+    pub max_turns: Option<u32>,
+    pub max_cost: Option<f64>,
     /// `Instant` means nothing outside this process; `idle_secs` is the
     /// serialised form.
     #[serde(skip)]
@@ -152,6 +161,12 @@ pub struct Spec {
     pub template: Option<String>,
     pub sleep_after_mins: Option<u64>,
     pub end_after_mins: Option<u64>,
+    /// Skills attached (and their tools loaded) when it starts.
+    pub skills: Vec<String>,
+    /// `root/sub` - default `playground/agents/<name>`.
+    pub folder: Option<String>,
+    pub max_turns: Option<u32>,
+    pub max_cost: Option<f64>,
 }
 
 impl Spec {
@@ -165,6 +180,48 @@ impl Spec {
             ..Default::default()
         }
     }
+
+    /// Everything a template says, under the name given (or the template's).
+    pub fn from_template(t: &crate::templates::Template, name: Option<&str>, purpose: Option<&str>) -> Self {
+        let mut s = Spec::new(
+            name.filter(|n| !n.trim().is_empty()).unwrap_or(&t.name),
+            purpose.filter(|p| !p.trim().is_empty()).unwrap_or(&t.description),
+            t.servers.clone(),
+        );
+        s.template = Some(t.name.clone());
+        s.instructions = (!t.instructions.is_empty()).then(|| t.instructions.clone());
+        s.model = t.model.clone();
+        s.browser = t.browser.clone();
+        s.skills = t.skills.clone();
+        s.folder = t.folder.clone();
+        s.max_turns = t.max_turns;
+        s.max_cost = t.max_cost;
+        if let Some(v) = t.sleep {
+            s.sleep_after_mins = v;
+        }
+        if let Some(v) = t.end {
+            s.end_after_mins = v;
+        }
+        s
+    }
+
+    /// Its work folder as (root, sub).
+    fn home(&self) -> (String, String) {
+        match &self.folder {
+            Some(f) => crate::templates::split_folder(f),
+            None => ("playground".into(), format!("agents/{}", slug(&self.name))),
+        }
+    }
+}
+
+/// A folder-safe version of an agent's name.
+fn slug(name: &str) -> String {
+    let s: String = name
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() { c.to_ascii_lowercase() } else { '-' })
+        .collect();
+    let s = s.trim_matches('-').to_string();
+    if s.is_empty() { "agent".into() } else { s }
 }
 
 /// Something an agent wants bluee to know. Delivered at bluee's next turn.
@@ -424,9 +481,32 @@ impl Worker {
             bus: self.bus.clone(),
             hub: self.hub.clone(),
         });
-        if let Some(extra) = &self.spec.instructions {
-            a.add_note(&format!("Your role as sub-agent `{}`:\n{extra}", self.spec.name));
+        if let Some(m) = &self.spec.model {
+            a.prefer_model(m);
         }
+        let (root, sub) = self.spec.home();
+        a.set_home(&root, &sub);
+        // Who it is and where it works. Re-stated on every (re)build, so an
+        // agent woken from sleep is still the same agent.
+        let mut role = format!(
+            "You are sub-agent `{}`, started by bluee (the main assistant) for Adithya. {}\n\
+             Your work folder is `{}` in granted folder `{root}`: file and command tools \
+             default to it, so keep your files there and leave other folders alone.",
+            self.spec.name,
+            if self.spec.purpose.is_empty() { String::new() } else { format!("Your job: {}.", self.spec.purpose) },
+            if sub.is_empty() { "its top level".to_string() } else { sub.clone() },
+        );
+        if let Some(b) = &self.spec.browser {
+            role.push_str(&format!(
+                "\nYour browser is `{b}`. Pass browser: \"{b}\" to the snarevec browser_* tools; \
+                 other agents use the other browsers, so never touch them."
+            ));
+        }
+        if let Some(extra) = &self.spec.instructions {
+            role.push_str("\n\n");
+            role.push_str(extra);
+        }
+        a.add_note(&role);
         {
             let mut i = self.info.lock().unwrap();
             i.session = a.session_id().to_string();
@@ -461,9 +541,33 @@ impl Worker {
             });
             let _ = self.bus.send(json!({ "type": "user", "from": job.from, "text": job.prompt }));
 
+            // Caps: checked before any money is spent on this job.
+            let over = {
+                let i = self.info.lock().unwrap();
+                if i.max_turns.is_some_and(|m| i.turns as u32 >= m) {
+                    Some(format!("turn cap reached ({} of {})", i.turns, i.max_turns.unwrap()))
+                } else if i.max_cost.is_some_and(|m| i.cost >= m) {
+                    Some(format!("spending cap reached (${:.4} of ${:.2})", i.cost, i.max_cost.unwrap()))
+                } else {
+                    None
+                }
+            };
+            if let Some(why) = over {
+                let msg = format!(
+                    "{why} - not running this. Adithya can raise the cap from this agent's window."
+                );
+                self.finish(&job, Err(msg.clone()));
+                self.deliver(job, Err(msg));
+                continue;
+            }
+
+            let mut fresh = false;
             if agent.is_none() {
                 match self.build().await {
-                    Ok(a) => agent = Some(a),
+                    Ok(a) => {
+                        agent = Some(a);
+                        fresh = true;
+                    }
                     Err(e) => {
                         let msg = format!("could not start: {e:#}");
                         self.finish(&job, Err(msg.clone()));
@@ -491,10 +595,26 @@ impl Worker {
                 From::Parent => format!("{PARENT_PREFIX}{}", job.prompt),
                 From::User => job.prompt.clone(),
             };
-            a.set_picks(job.picks.clone());
+            // The template's skills ride along on the first turn after a
+            // (re)build: attached once, and their tools stay loaded.
+            let mut picks = job.picks.clone();
+            if fresh {
+                for s in &self.spec.skills {
+                    if !picks.skills.contains(s) {
+                        picks.skills.push(s.clone());
+                    }
+                }
+            }
+            a.set_picks(picks);
+            let before = a.spent();
             let events = a.turn_with(&prompt, Some(&etx)).await;
             drop(etx);
             let _ = fwd.await;
+            let after = a.spent();
+            self.set(|i| {
+                i.tokens += (after.prompt + after.completion).saturating_sub(before.prompt + before.completion);
+                i.cost += after.cost.unwrap_or(0.0) - before.cost.unwrap_or(0.0);
+            });
 
             let mut reply = String::new();
             let mut failed = None;
@@ -656,6 +776,14 @@ impl SubAgents {
             browser: spec.browser.clone(),
             model: spec.model.clone(),
             template: spec.template.clone(),
+            folder: {
+                let (r, s) = spec.home();
+                if s.is_empty() { r } else { format!("{r}/{s}") }
+            },
+            cost: 0.0,
+            tokens: 0,
+            max_turns: spec.max_turns,
+            max_cost: spec.max_cost,
             idle_since: Some(Instant::now()),
         };
         let shared = Arc::new(Mutex::new(info.clone()));
@@ -754,6 +882,23 @@ impl SubAgents {
         i.end_after_mins = end;
         self.hub.publish(&i);
         Ok(i.clone())
+    }
+
+    /// Set the caps. `None` = no cap.
+    pub fn set_caps(&self, id: &str, max_turns: Option<u32>, max_cost: Option<f64>) -> Result<AgentInfo> {
+        let map = self.agents.lock().unwrap();
+        let Some(entry) = map.get(id) else { bail!("no sub-agent `{id}`") };
+        let mut i = entry.info.lock().unwrap();
+        i.max_turns = max_turns;
+        i.max_cost = max_cost;
+        self.hub.publish(&i);
+        Ok(i.clone())
+    }
+
+    /// Start one from a template in `agents/`.
+    pub fn spawn_template(&self, template: &str, name: Option<&str>, purpose: Option<&str>) -> Result<AgentInfo> {
+        let t = crate::templates::get(&self.cfg.agents_dir, template)?;
+        self.start(Spec::from_template(&t, name, purpose), String::new())
     }
 
     /// Put an idle agent to sleep now.
@@ -859,12 +1004,15 @@ impl SubAgents {
                         "servers": {
                             "type": "array", "items": { "type": "string" },
                             "description": "MCP servers it may use, e.g. [\"uacc\"]. Empty means native tools \
-                                and memory only. Required - an unscoped sub-agent pays for every tool schema on \
-                                every turn."
+                                and memory only. Required unless you use a template - an unscoped sub-agent \
+                                pays for every tool schema on every turn."
                         },
+                        "template": { "type": "string", "description": "A saved agent kind from agents/ (e.g. `researcher`): \
+                            brings its instructions, servers, skills, model, browser and caps. list_agents shows the templates." },
+                        "model": { "type": "string", "description": "Optional model id for this agent (e.g. a cheaper one for simple work)." },
                         "task": { "type": "string", "description": "Optional first job. Runs in the background; the answer comes to you when it lands." }
                     },
-                    "required": ["name", "purpose", "servers"]
+                    "required": ["name"]
                 }),
             },
             ToolDef {
@@ -919,12 +1067,33 @@ impl SubAgents {
         let s = |k: &str| args.get(k).and_then(|v| v.as_str()).unwrap_or("").to_string();
         match name {
             "spawn_agent" => {
-                let servers: Vec<String> = args
+                let servers: Option<Vec<String>> = args
                     .get("servers")
                     .and_then(|v| v.as_array())
-                    .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect())
-                    .unwrap_or_default();
-                let info = self.spawn(&s("name"), &s("purpose"), servers)?;
+                    .map(|a| a.iter().filter_map(|x| x.as_str().map(str::to_string)).collect());
+                let template = s("template");
+                let mut spec = if !template.trim().is_empty() {
+                    let t = crate::templates::get(&self.cfg.agents_dir, &template)?;
+                    Spec::from_template(&t, Some(&s("name")), Some(&s("purpose")))
+                } else {
+                    let Some(servers) = servers.clone() else {
+                        bail!(
+                            "`servers` is required unless you use a template - say which MCP servers \
+                             it may use ([] for none)"
+                        );
+                    };
+                    Spec::new(&s("name"), &s("purpose"), servers)
+                };
+                // Explicit arguments win over the template.
+                if !template.trim().is_empty() {
+                    if let Some(sv) = servers {
+                        spec.servers = sv;
+                    }
+                }
+                if !s("model").trim().is_empty() {
+                    spec.model = Some(s("model"));
+                }
+                let info = self.start(spec, String::new())?;
                 let task = s("task");
                 if !task.trim().is_empty() {
                     self.ask(&info.id, &task, From::Parent, 0).await?;
@@ -958,7 +1127,13 @@ impl SubAgents {
                     })),
                 }
             }
-            "list_agents" => Ok(json!({ "agents": self.list() })),
+            "list_agents" => Ok(json!({
+                "agents": self.list(),
+                "templates": crate::templates::load_all(&self.cfg.agents_dir)
+                    .into_iter()
+                    .map(|t| json!({ "name": t.name, "description": t.description, "servers": t.servers }))
+                    .collect::<Vec<_>>(),
+            })),
             "stop_agent" => {
                 let id = self.resolve(&s("id"));
                 self.stop(&id)?;
@@ -990,10 +1165,32 @@ mod tests {
     }
 
     #[test]
-    fn servers_is_required_on_spawn() {
+    fn servers_is_required_unless_a_template_says() {
+        // The cost lever only works if every sub-agent is scoped. The schema
+        // allows omitting `servers` for templates, so the description and
+        // `call` must both insist on it otherwise.
         let def = SubAgents::defs().into_iter().find(|d| d.name == "spawn_agent").unwrap();
-        let req = def.parameters["required"].as_array().unwrap();
-        assert!(req.iter().any(|v| v == "servers"), "servers must be required");
+        let d = def.parameters["properties"]["servers"]["description"].as_str().unwrap();
+        assert!(d.contains("Required unless you use a template"));
+        assert!(def.parameters["properties"].get("template").is_some());
+    }
+
+    #[test]
+    fn template_spec_takes_everything_and_names_its_folder() {
+        let t = crate::templates::parse(
+            std::path::Path::new("agents/shopper.md"),
+            "---\nservers: [snarevec]\nskills: [shop-add-to-cart]\nbrowser: edge\nsleep: never\nmax_cost: 0.1\n---\nStop at the cart.",
+        )
+        .unwrap();
+        let s = Spec::from_template(&t, Some("cart-1"), None);
+        assert_eq!(s.name, "cart-1");
+        assert_eq!(s.servers, ["snarevec"]);
+        assert_eq!(s.browser.as_deref(), Some("edge"));
+        assert_eq!(s.sleep_after_mins, None, "never");
+        assert_eq!(s.end_after_mins, Some(DEFAULT_END_MINS), "unset keeps the default");
+        assert_eq!(s.max_cost, Some(0.1));
+        assert_eq!(s.home(), ("playground".into(), "agents/cart-1".into()));
+        assert_eq!(slug("My Agent!"), "my-agent");
     }
 
     #[test]
@@ -1012,6 +1209,7 @@ mod tests {
             servers: vec![], status: Status::Ready, last: String::new(), turns: 0, tools: 0,
             queued: 0, question: None, sleep_after_mins: None, end_after_mins: None,
             idle_secs: 0, browser: None, model: None, template: None, idle_since: None,
+            folder: String::new(), cost: 0.0, tokens: 0, max_turns: None, max_cost: None,
         };
         assert!(!i.busy());
         i.queued = 1;

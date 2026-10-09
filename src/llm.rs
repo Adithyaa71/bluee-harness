@@ -88,6 +88,31 @@ pub struct Completion {
     pub finish_reason: Option<String>,
     /// Characters of hidden reasoning received. Measured, never shown.
     pub reasoning_chars: usize,
+    /// Tokens and money for this one request, when the provider reports them
+    /// (OpenRouter does when asked: `usage: {include: true}`).
+    pub usage: Option<Usage>,
+}
+
+/// What one request (or a running total of them) cost.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize, PartialEq)]
+pub struct Usage {
+    #[serde(default, alias = "prompt_tokens")]
+    pub prompt: u64,
+    #[serde(default, alias = "completion_tokens")]
+    pub completion: u64,
+    /// US dollars, as billed. `None` when the provider does not say.
+    #[serde(default)]
+    pub cost: Option<f64>,
+}
+
+impl Usage {
+    pub fn add(&mut self, other: &Usage) {
+        self.prompt += other.prompt;
+        self.completion += other.completion;
+        if let Some(c) = other.cost {
+            self.cost = Some(self.cost.unwrap_or(0.0) + c);
+        }
+    }
 }
 
 #[async_trait::async_trait]
@@ -233,6 +258,9 @@ struct ChatRequest<'a> {
     /// a strict OpenAI-compatible server never sees a field it does not know.
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning: Option<serde_json::Value>,
+    /// OpenRouter: report tokens and cost on the last frame. Only sent there.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    usage: Option<serde_json::Value>,
 }
 
 #[derive(Serialize)]
@@ -245,6 +273,8 @@ struct WireTool<'a> {
 #[derive(Deserialize)]
 struct ChatResponse {
     choices: Vec<Choice>,
+    #[serde(default)]
+    usage: Option<Usage>,
 }
 
 #[derive(Deserialize)]
@@ -344,6 +374,9 @@ impl Provider for OpenAiCompatible {
 struct StreamChunk {
     #[serde(default)]
     choices: Vec<StreamChoice>,
+    /// Arrives on the final frame, usually with no choices at all.
+    #[serde(default)]
+    usage: Option<Usage>,
 }
 
 #[derive(Deserialize)]
@@ -395,16 +428,18 @@ struct DeltaFn {
 /// extensions through these streams, and one unknown line must not lose a turn.
 #[cfg(test)]
 fn absorb(line: &str, content: &mut String, calls: &mut Vec<(String, String, String)>) {
-    absorb_full(line, content, calls, &mut None, &mut 0);
+    absorb_full(line, content, calls, &mut None, &mut 0, &mut None);
 }
 
-/// `absorb`, also keeping why the stream ended and how much it reasoned.
+/// `absorb`, also keeping why the stream ended, how much it reasoned, and
+/// what it cost.
 fn absorb_full(
     line: &str,
     content: &mut String,
     calls: &mut Vec<(String, String, String)>,
     finish: &mut Option<String>,
     reasoning: &mut usize,
+    usage: &mut Option<Usage>,
 ) {
     let Some(data) = line.trim().strip_prefix("data:") else {
         return;
@@ -416,6 +451,9 @@ fn absorb_full(
     let Ok(parsed) = serde_json::from_str::<StreamChunk>(data) else {
         return;
     };
+    if parsed.usage.is_some() {
+        *usage = parsed.usage;
+    }
     let Some(choice) = parsed.choices.into_iter().next() else {
         return;
     };
@@ -463,6 +501,7 @@ async fn read_stream(res: reqwest::Response) -> Result<Completion> {
     let mut calls: Vec<(String, String, String)> = Vec::new();
     let mut finish: Option<String> = None;
     let mut reasoning = 0usize;
+    let mut usage: Option<Usage> = None;
 
     let mut body = res.bytes_stream();
     let mut buf = String::new();
@@ -475,7 +514,7 @@ async fn read_stream(res: reqwest::Response) -> Result<Completion> {
         while let Some(nl) = buf.find('\n') {
             let line = buf[..nl].trim().to_string();
             buf.drain(..=nl);
-            absorb_full(&line, &mut content, &mut calls, &mut finish, &mut reasoning);
+            absorb_full(&line, &mut content, &mut calls, &mut finish, &mut reasoning, &mut usage);
         }
     }
 
@@ -498,6 +537,7 @@ async fn read_stream(res: reqwest::Response) -> Result<Completion> {
         tool_calls,
         finish_reason: finish,
         reasoning_chars: reasoning,
+        usage,
     })
 }
 
@@ -609,6 +649,10 @@ impl OpenAiCompatible {
             top_p: self.top_p,
             stream: if self.stream { Some(true) } else { None },
             reasoning: self.reasoning_budget.map(|n| serde_json::json!({ "max_tokens": n })),
+            usage: self
+                .base_url
+                .contains("openrouter")
+                .then(|| serde_json::json!({ "include": true })),
         };
 
         let res = self
@@ -649,6 +693,7 @@ impl OpenAiCompatible {
             tool_calls: msg.tool_calls.unwrap_or_default(),
             finish_reason: choice.finish_reason,
             reasoning_chars: 0,
+            usage: parsed.usage,
         })
     }
 
@@ -767,11 +812,35 @@ mod tests {
             r#"data: {"choices":[{"delta":{},"finish_reason":"length"}]}"#,
             "data: [DONE]",
         ] {
-            absorb_full(line, &mut content, &mut calls, &mut finish, &mut reasoning);
+            absorb_full(line, &mut content, &mut calls, &mut finish, &mut reasoning, &mut None);
         }
         assert!(content.is_empty());
         assert_eq!(finish.as_deref(), Some("length"));
         assert_eq!(reasoning, "Let me think about GPUs and VRAM".len());
+    }
+
+    #[test]
+    fn usage_on_the_last_frame_is_kept() {
+        // OpenRouter with `usage: {include: true}`: the cost arrives on a final
+        // frame whose choices are EMPTY - the early return for "no choice" must
+        // not swallow it.
+        let (mut content, mut calls) = (String::new(), Vec::new());
+        let (mut finish, mut reasoning, mut usage) = (None, 0usize, None);
+        for line in [
+            r#"data: {"choices":[{"delta":{"content":"hi"},"finish_reason":"stop"}]}"#,
+            r#"data: {"choices":[],"usage":{"prompt_tokens":1200,"completion_tokens":30,"total_tokens":1230,"cost":0.000195}}"#,
+            "data: [DONE]",
+        ] {
+            absorb_full(line, &mut content, &mut calls, &mut finish, &mut reasoning, &mut usage);
+        }
+        let u = usage.expect("usage frame");
+        assert_eq!((u.prompt, u.completion), (1200, 30));
+        assert_eq!(u.cost, Some(0.000195));
+        let mut total = Usage::default();
+        total.add(&u);
+        total.add(&u);
+        assert_eq!(total.prompt, 2400);
+        assert!((total.cost.unwrap() - 0.00039).abs() < 1e-12);
     }
 
     #[test]
