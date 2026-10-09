@@ -144,6 +144,9 @@ pub struct Agent {
     /// CLI and for loops: a scheduled job that can spawn agents unattended is
     /// a cost hazard, and nothing has asked for it.
     subagents: Option<Arc<crate::subagents::SubAgents>>,
+    /// Set when THIS agent is a sub-agent: its line to bluee and to Adithya
+    /// (`message_parent`, `ask_user`). Never both this and `subagents`.
+    child: Option<crate::subagents::ChildLink>,
     /// Separate client: ACTIVE screen reads need a model that accepts images,
     /// which is rarely the same one doing the chatting.
     vision_client: crate::llm::OpenAiCompatible,
@@ -266,20 +269,55 @@ impl Agent {
         // mismatch gets the whole request rejected. The tool detail is not lost
         // - it is all still in the event log, and reachable through
         // search_memory - it just does not go back into the prompt verbatim.
+        //
+        // What a tool RETURNED is folded in as plain text on the assistant's
+        // side, though - no ids, so nothing for the provider to reject. Without
+        // it a resumed agent sees itself say "teal" with no idea where that
+        // came from (found when a sub-agent woke from sleep and denied ever
+        // being told the answer its own ask_user call had received).
         if resume.is_some() {
             let mut replayed = 0usize;
+            let mut names: std::collections::HashMap<String, String> = Default::default();
+            let mut used: Vec<String> = Vec::new();
+            let flush = |used: &mut Vec<String>, text: Option<String>| -> Option<String> {
+                if used.is_empty() {
+                    return text;
+                }
+                let mut out = format!("[tools I used: {}]", used.join("; "));
+                used.clear();
+                if let Some(t) = text {
+                    out.push_str("\n\n");
+                    out.push_str(&t);
+                }
+                Some(out)
+            };
             for event in EventLog::read(log.path())? {
                 match event.kind {
                     EventKind::UserMessage { text } => {
+                        if let Some(t) = flush(&mut used, None) {
+                            history.push(Message::assistant(t));
+                        }
                         history.push(Message::user(text));
                         replayed += 1;
                     }
+                    EventKind::ToolCall { call_id, tool, .. } => {
+                        names.insert(call_id, tool);
+                    }
+                    EventKind::ToolResult { call_id, ok, result } => {
+                        let tool = names.get(&call_id).cloned().unwrap_or_else(|| "tool".into());
+                        let body: String = result.to_string().chars().take(600).collect();
+                        used.push(format!("{tool} -> {}{body}", if ok { "" } else { "FAILED " }));
+                    }
                     EventKind::AssistantMessage { text } if !text.is_empty() => {
-                        history.push(Message::assistant(text));
+                        let t = flush(&mut used, Some(text)).unwrap_or_default();
+                        history.push(Message::assistant(t));
                         replayed += 1;
                     }
                     _ => {}
                 }
+            }
+            if let Some(t) = flush(&mut used, None) {
+                history.push(Message::assistant(t));
             }
             eprintln!("[bluee] resumed session with {replayed} message(s) of history");
         }
@@ -315,6 +353,7 @@ impl Agent {
             // at runtime without restarting.
             allowed_servers: allow,
             subagents: None,
+            child: None,
             defer: crate::toolsearch::enabled(),
             core_servers: crate::toolsearch::core_servers(),
             loaded: Default::default(),
@@ -342,6 +381,19 @@ impl Agent {
     pub fn set_subagents(&mut self, subs: Arc<crate::subagents::SubAgents>) {
         self.subagents = Some(subs);
         self.rebuild_tools();
+    }
+
+    /// Make this agent a sub-agent. It gains `message_parent` and `ask_user`.
+    pub fn set_child(&mut self, link: crate::subagents::ChildLink) {
+        self.child = Some(link);
+        self.rebuild_tools();
+    }
+
+    /// Put a note into the conversation that stays there: logged as a System
+    /// event and kept in the prompt. Used for sub-agent updates and roles.
+    pub fn add_note(&mut self, text: &str) {
+        let _ = self.log.append(EventKind::System { note: text.to_string() });
+        self.history.push(Message::system(text.to_string()));
     }
 
     pub fn set_allowed_servers(&mut self, allow: Option<Vec<String>>) {
@@ -385,6 +437,9 @@ impl Agent {
         defs.extend(crate::facts::defs());
         if self.subagents.is_some() {
             defs.extend(crate::subagents::SubAgents::defs());
+        }
+        if self.child.is_some() {
+            defs.extend(crate::subagents::ChildLink::defs());
         }
         let allow = self.allowed_servers.clone();
         defs.extend(gui_defs_if_available(&self.registry, &allow));
@@ -1216,6 +1271,7 @@ impl Agent {
                     // answered "unknown tool `spawn_agent`" - so the panel
                     // could spawn agents and bluee itself never could (§61).
                     || crate::subagents::SubAgents::is_tool(&tc.function.name)
+                    || crate::subagents::ChildLink::handles(&tc.function.name)
                 {
                     // Both need the MCP registry, which NativeTools does not
                     // hold - so they are dispatched here rather than there.
@@ -1303,6 +1359,11 @@ impl Agent {
                         None => Err(anyhow::anyhow!(
                             "sub-agents are not available on this surface"
                         )),
+                    }
+                } else if crate::subagents::ChildLink::handles(&tool) {
+                    match &self.child {
+                        Some(link) => link.clone().call(&tool, &args).await,
+                        None => Err(anyhow::anyhow!("only a sub-agent can use `{tool}`")),
                     }
                 } else if server == "harness" {
                     self.native.call(&tool, &args)

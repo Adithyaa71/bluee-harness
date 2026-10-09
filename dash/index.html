@@ -1173,6 +1173,38 @@ input[type=checkbox]:disabled{opacity:.4;cursor:not-allowed}
 #app.solo.only-agents #rightcol{display:flex!important}
 #app.solo.only-agents #side,#app.solo.only-agents #agdrag{display:none!important}
 #app.solo.only-agents #agpane{display:flex;height:auto;flex:1}
+/* ?only=agent - one sub-agent's own chat window. The chat view and its
+   composer are reused, with a header naming the agent above them. */
+#app.solo.only-agent #composer{display:block!important}
+#app.solo.only-agent #welcome{display:none}
+#aghd{flex:none;display:flex;align-items:center;gap:var(--s2);padding:10px var(--s4);
+  border-bottom:1px solid var(--line);background:var(--panel);min-height:48px}
+#aghd .dot{width:9px;height:9px;border-radius:50%;background:var(--faint);flex:none}
+#aghd[data-st="running"] .dot{background:var(--accent);animation:pulse 1.4s ease-in-out infinite}
+#aghd[data-st="waiting"] .dot{background:var(--warn,#e0a040)}
+#aghd[data-st="ready"] .dot{background:var(--ok,#4caf7a)}
+#aghd[data-st="failed"] .dot{background:var(--bad)}
+#aghd[data-st="sleeping"] .dot,#aghd[data-st="ended"] .dot{background:transparent;border:1.5px solid var(--faint)}
+#aghd .nm{font-weight:600}
+#aghd .st{color:var(--faint);font-size:12px}
+#aghd .pu{color:var(--dim,var(--faint));font-size:12px;overflow:hidden;text-overflow:ellipsis;
+  white-space:nowrap;min-width:0;flex:1}
+#aghd .tm{font-size:12px;color:var(--faint);white-space:nowrap;width:auto;padding:0 8px;flex:none}
+#aghd .ibtn{flex:none}
+.msg.me.bluee .av{background:var(--accent-dim,var(--panel));color:var(--accent)}
+.from-tag{display:inline-block;font-size:11px;letter-spacing:.02em;color:var(--accent);
+  border:1px solid var(--accent-dim,var(--line));border-radius:999px;padding:0 8px;margin-bottom:6px}
+.note a.agq{color:var(--accent);text-decoration:none}
+.note a.agq:hover{text-decoration:underline}
+.qcard{border:1px solid var(--accent);border-radius:var(--r3);padding:var(--s3);
+  background:var(--accent-dim,transparent)}
+.qcard .q{margin:0 0 var(--s2)}
+.qcard .qrow{display:flex;gap:var(--s2)}
+.qcard input{flex:1;min-width:0}
+.qcard.done{border-color:var(--line);background:transparent}
+.qcard.done .qrow{display:none}
+#agended{margin:0 var(--s5) var(--s3);padding:var(--s2) var(--s3);border:1px solid var(--line);
+  border-radius:var(--r3);color:var(--faint);font-size:13px}
 
 /* Detached, a panel's close and pop-out buttons mean nothing - the window has
    its own titlebar, and popping out of a pop-out is not a thing. Worse than
@@ -1814,6 +1846,10 @@ function md(t){
    full bleed, and hide the shell around it. Same code, one surface. */
 const soloView = new URLSearchParams(location.search).get('only');
 const soloId = new URLSearchParams(location.search).get('id');
+/* ?only=agent&id=aN - this window IS one sub-agent's chat. The chat page is
+   reused whole: same messages, same composer, same pickers - only where a
+   message goes and where events come from change (§ agent window, below). */
+const agentMode = soloView==='agent' && !!soloId;
 function bootSolo(){
   if(!soloView) return false;
   document.body.classList.add('solo-body');
@@ -1856,6 +1892,9 @@ function bootSolo(){
       $('#aframe').src='/artifacts/'+encodeURIComponent(soloId)+'/';
       $('#aname').textContent=soloId;
     },80);
+  } else if(agentMode){
+    show('#v-chat');
+    setTimeout(bootAgentWindow, 60);
   } else if(soloView==='agents'){
     // A dragged-out agent opens straight onto itself. The pane is the same
     // code the docked one runs - it is moved by CSS, not reimplemented.
@@ -2113,6 +2152,7 @@ async function send(){
   $('#slash').style.display='none';
   busy=true; $('#send').disabled=true; $('#send').classList.add('busy'); thinking(true);
   liveBody=null; liveHtml='';
+  if(agentMode){ agentSay(full); return; }
   const sock=chatSocket();
   const fire=()=>sock.send(JSON.stringify({message:full}));
   if(sock.readyState===1) fire(); else sock.addEventListener('open',fire,{once:true});
@@ -2123,7 +2163,9 @@ async function send(){
 let chatWs=null, liveBody=null, liveHtml='';
 function finishTurn(){ busy=false; $('#send').disabled=false; $('#send').classList.remove('busy');
   // Safety net for the error/close paths, which never reach the done frame.
-  pgMirror=false; $('#pgsend').disabled=false; scrollDown(); }
+  pgMirror=false; $('#pgsend').disabled=false; scrollDown();
+  // Sub-agent results that landed mid-turn are delivered now.
+  if(!agentMode) setTimeout(agWake, 0); }
 function chatSocket(){
   if(chatWs && chatWs.readyState<=1) return chatWs;
   chatWs=new WebSocket('ws://'+location.host+'/ws/chat');
@@ -2141,6 +2183,20 @@ function chatSocket(){
       ping();
       finishTurn(); return;
     }
+    renderEvent(e);
+    if(pgMirror) pgEcho(e);
+    if($('#sp-tasks').classList.contains('on')) loadTasks();
+  };
+  chatWs.onerror=()=>{
+    if(busy){ thinking(false); if(!liveBody) liveBody=addMsg('ai','');
+      liveBody.innerHTML='<p style="color:var(--bad)">lost connection to bluee</p>'; finishTurn(); }
+  };
+  chatWs.onclose=()=>{ if(busy){ thinking(false); finishTurn(); } };
+  return chatWs;
+}
+/* One turn event -> the live assistant message. Shared by the main chat and
+   by sub-agent windows, so both draw tool calls and replies the same way. */
+function renderEvent(e){
     thinking(false);
     if(!liveBody){ liveBody=addMsg('ai',''); }
     if(e.type==='tool_call')
@@ -2163,15 +2219,6 @@ function chatSocket(){
     else if(e.type==='error')
       liveHtml+='<p class="errline">'+esc(e.message)+'</p>';
     liveBody.innerHTML=liveHtml; scrollDown();
-    if(pgMirror) pgEcho(e);
-    if($('#sp-tasks').classList.contains('on')) loadTasks();
-  };
-  chatWs.onerror=()=>{
-    if(busy){ thinking(false); if(!liveBody) liveBody=addMsg('ai','');
-      liveBody.innerHTML='<p style="color:var(--bad)">lost connection to bluee</p>'; finishTurn(); }
-  };
-  chatWs.onclose=()=>{ if(busy){ thinking(false); finishTurn(); } };
-  return chatWs;
 }
 $('#send').onclick=send;
 $('#input').addEventListener('keydown',e=>{
@@ -2712,7 +2759,9 @@ async function renderTranscript(id){
   const d=await api('/api/events?session='+encodeURIComponent(id)).catch(()=>({}));
   stream.innerHTML='';
   for(const e of (d.events||[])){
-    if(e.kind==='user_message') addMsg('me',md(e.text),e.text,e.ts);
+    if(e.kind==='user_message' && e.text.startsWith(PARENT_PREFIX))
+      fromBluee(addMsg('me',FROM_BLUEE+md(e.text.slice(PARENT_PREFIX.length)),e.text,e.ts));
+    else if(e.kind==='user_message') addMsg('me',md(e.text),e.text,e.ts);
     else if(e.kind==='assistant_message'&&e.text&&e.text.trim()) addMsg('ai',md(e.text),e.text,e.ts);
     /* A blank reply logged before the harness learned to explain them
        (session 20260829-101419-58c030b6). Say what it was rather than draw an
@@ -5887,12 +5936,13 @@ const agFmt = a =>
     ' title="' + esc(a.purpose || '') + '\n' +
       (a.servers.length ? a.servers.join(', ') : 'no MCP servers') +
       ' · ' + a.tools + ' tools' +
-      (a.despawn_after_mins ? '\nends after ' + a.despawn_after_mins + ' min idle' : '') + '">' +
+      '\nsleeps after ' + minsLabel(a.sleep_after_mins) + ' idle, ends after ' +
+      minsLabel(a.end_after_mins) + '\nclick to open its window">' +
     '<span class="dot"></span>' +
     '<span class="nm">' + esc(a.name) + '</span>' +
-    '<span class="meta">' + a.tools + 't' +
+    '<span class="meta">' + (a.status === 'sleeping' ? 'asleep' :
+        a.status === 'waiting' ? 'needs you' : a.tools + 't') +
       (a.turns ? ' · ' + a.turns : '') +
-      (a.despawn_after_mins ? ' · ' + a.despawn_after_mins + 'm' : '') +
     '</span>' +
   '</div>';
 
@@ -5914,7 +5964,13 @@ async function loadAgents(){
      the whole panel until there is an agent. */
   $('#agpane').classList.toggle('bare', agents.length === 0);
   list.querySelectorAll('.agrow').forEach(r => {
-    r.onclick = () => { agSel = r.dataset.id; loadAgents(); agOpen(); };
+    // A click opens the agent's own window - the place to talk to it. The
+    // docked transcript below follows the selection for a quick look.
+    r.onclick = () => {
+      agSel = r.dataset.id; loadAgents(); agOpen();
+      const a = agents.find(x => x.id === r.dataset.id);
+      popOut('agent', { id: r.dataset.id, title: 'bluee · ' + (a ? a.name : r.dataset.id), w: 560, h: 720 });
+    };
     agDragOut(r, r.dataset.id);
   });
   // Keep polling only while something is actually working.
@@ -6059,6 +6115,253 @@ async function agSend(){
   loadAgents(); agOpen();
 }
 
+
+/* ---------- sub-agent windows ----------
+   Every sub-agent gets its own window, opened the first time it is spawned
+   (by Adithya or by bluee). Closing the window never stops the agent - only
+   its idle timers or a stop do (§ src/subagents.rs, lifecycle).
+
+   The window is the chat page in agent mode: messages go to /api/agents/say,
+   and everything the agent does arrives over /ws/agent - including turns that
+   bluee gave it, so watching an agent work needs no polling. */
+const PARENT_PREFIX = '(from bluee, the main assistant) ';
+const FROM_BLUEE = '<span class="from-tag">from bluee</span>';
+// A job bluee gave the agent: bluee's avatar, not Adithya's.
+function fromBluee(body){
+  const m = body && body.closest('.msg'); if(!m) return;
+  m.classList.add('bluee'); m.querySelector('.av').textContent = 'b';
+}
+let agInfo = null, agFeed = null, agPendingLocal = null, agEnded = false, agSawUser = false;
+
+const minsLabel = m => m == null ? 'never'
+  : m % 60 === 0 ? (m / 60) + 'h' : m + 'm';
+
+function agHeader(){
+  let hd = $('#aghd');
+  if(!hd){
+    hd = document.createElement('div');
+    hd.id = 'aghd';
+    hd.innerHTML =
+      '<span class="dot"></span><span class="nm"></span><span class="st"></span>' +
+      '<span class="pu"></span>' +
+      '<button class="ibtn bare tm" id="agtm" title="When this agent sleeps and ends if given no work"></button>' +
+      '<button class="ibtn bare" id="agslp" title="Sleep now (wakes on the next message)">' + ico('dot-o','sm') + '</button>' +
+      '<button class="ibtn bare" id="agstop" title="End this agent - its conversation stays in Sessions">' + ico('close','sm') + '</button>';
+    $('#v-chat').prepend(hd);
+    $('#agtm').onclick = () => agTimersMenu($('#agtm'));
+    $('#agslp').onclick = () => agPost('/api/agents/sleep', { id: soloId });
+    $('#agstop').onclick = () => {
+      const b = $('#agstop');
+      if(b.dataset.armed !== '1'){        // two clicks, like every other stop
+        b.dataset.armed = '1'; b.title = 'Click again to end it';
+        b.style.color = 'var(--bad)';
+        setTimeout(() => { b.dataset.armed = ''; b.style.color = ''; }, 3000);
+        return;
+      }
+      agPost('/api/agents/stop', { id: soloId });
+    };
+  }
+  const a = agInfo;
+  const st = agEnded ? 'ended' : (a ? a.status : 'ended');
+  hd.dataset.st = st;
+  hd.querySelector('.nm').textContent = a ? a.name : soloId;
+  hd.querySelector('.st').textContent = st + (a && a.queued ? ' · ' + a.queued + ' queued' : '');
+  hd.querySelector('.pu').textContent = a
+    ? (a.purpose ? a.purpose + ' · ' : '') +
+      (a.servers.length ? a.servers.join(', ') : 'memory + native tools') +
+      (a.tools ? ' · ' + a.tools + ' tools' : '')
+    : '';
+  hd.querySelector('.tm').textContent = a
+    ? 'sleeps ' + minsLabel(a.sleep_after_mins) + ' · ends ' + minsLabel(a.end_after_mins) : '';
+  document.title = 'bluee · ' + (a ? a.name : soloId);
+  $('#input').placeholder = agEnded
+    ? 'This agent has ended.'
+    : 'Talk to ' + (a ? a.name : 'this agent') + '…  (bluee sees this conversation)';
+}
+
+function agPost(path, body){
+  return api(path, { method:'POST', headers:{'Content-Type':'application/json'},
+    body: JSON.stringify(body) }).catch(e => ({ error: String(e) }));
+}
+
+function agTimersMenu(anchor){
+  const a = agInfo; if(!a) return;
+  document.getElementById('connmenu')?.remove();
+  const m = document.createElement('div');
+  m.id = 'connmenu'; m.className = 'cmenu';
+  const row = (k, v, cur) =>
+    '<div class="crow" data-k="' + k + '" data-v="' + (v == null ? '' : v) + '">' +
+      '<span class="k">' + ico('check','sm') + '</span>' +
+      '<span class="n">' + minsLabel(v) + '</span>' +
+      '<span class="c">' + (cur === v ? 'current' : '') + '</span></div>';
+  m.innerHTML =
+    '<div class="hd">Idle timers · ' + esc(a.name) + '</div>' +
+    '<div class="subhd">Only counts time with no work. A running or queued job, or a ' +
+      'question waiting on you, never sleeps or ends - window open or not.</div>' +
+    '<div class="hd">sleep after</div>' +
+    [15, 45, 120, null].map(v => row('sleep', v, a.sleep_after_mins)).join('') +
+    '<div class="sep"></div><div class="hd">end after</div>' +
+    [60, 120, 360, null].map(v => row('end', v, a.end_after_mins)).join('');
+  document.body.appendChild(m);
+  const r = anchor.getBoundingClientRect();
+  m.style.left = Math.max(8, Math.min(r.left - 160, innerWidth - m.offsetWidth - 8)) + 'px';
+  m.style.top = Math.max(8, r.bottom + 6) + 'px';
+  m.querySelectorAll('.crow').forEach(rw => rw.onclick = async () => {
+    const v = rw.dataset.v === '' ? null : +rw.dataset.v;
+    const body = { id: a.id, sleep: a.sleep_after_mins, end: a.end_after_mins };
+    body[rw.dataset.k] = v;
+    m.remove();
+    const res = await agPost('/api/agents/timers', body);
+    if(res.agent){ agInfo = res.agent; agHeader(); }
+  });
+  setTimeout(() => document.addEventListener('click', function off(e){
+    if(!m.contains(e.target)){ m.remove(); document.removeEventListener('click', off); }
+  }), 0);
+}
+
+function agQuestion(text){
+  $('#welcome')?.remove();
+  const body = addMsg('ai',
+    '<div class="qcard"><p class="q"><b>Question for you:</b> ' + esc(text) + '</p>' +
+    '<div class="qrow"><input class="qin" placeholder="Your answer…" spellcheck="false">' +
+    '<button class="btn qgo">Answer</button></div></div>', text);
+  const card = body.querySelector('.qcard'), inp = card.querySelector('.qin');
+  const go = async () => {
+    const v = inp.value.trim(); if(!v) return;
+    const r = await agPost('/api/agents/answer', { id: soloId, text: v });
+    if(r.error){ inp.value = ''; inp.placeholder = r.error; return; }
+    card.classList.add('done');
+    card.insertAdjacentHTML('beforeend', '<p class="q" style="margin:6px 0 0">› ' + esc(v) + '</p>');
+  };
+  card.querySelector('.qgo').onclick = go;
+  inp.addEventListener('keydown', e => { if(e.key === 'Enter'){ e.preventDefault(); go(); } });
+  setTimeout(() => inp.focus(), 50);
+  thinking(false);
+}
+
+function agEnd(){
+  agEnded = true; busy = false; thinking(false);
+  agHeader();
+  if(!$('#agended')){
+    const n = document.createElement('div');
+    n.id = 'agended';
+    n.textContent = 'This agent has ended. Its conversation is kept in Sessions - resume it ' +
+      'from the sub-agents panel to carry on.';
+    $('#composer').before(n);
+  }
+  $('#input').disabled = true; $('#send').disabled = true;
+}
+
+function agentSay(text){
+  agPendingLocal = text;
+  agPost('/api/agents/say', { id: soloId, text }).then(r => {
+    if(r && r.error){
+      agPendingLocal = null;
+      renderEvent({ type:'error', message: r.error });
+      thinking(false); finishTurn();
+    }
+  });
+}
+
+function agConnect(){
+  agFeed = new WebSocket('ws://' + location.host + '/ws/agent?id=' + encodeURIComponent(soloId));
+  agFeed.onmessage = ev => {
+    let e; try{ e = JSON.parse(ev.data); }catch(_){ return; }
+    if(e.type === 'status'){
+      const was = agInfo && agInfo.status;
+      agInfo = e.agent; agHeader();
+      // A turn bluee (or the panel) started shows as working here too.
+      if(agInfo.status === 'running' && !busy){ busy = true; $('#send').classList.add('busy'); }
+      if(was === 'waiting' && agInfo.status === 'running') thinking(true);
+      return;
+    }
+    if(e.type === 'user'){
+      // Ours was drawn the moment it was sent; draw anyone else's now.
+      if(e.from === 'parent') fromBluee(addMsg('me', FROM_BLUEE + md(e.text), e.text));
+      else if(agPendingLocal !== e.text) addMsg('me', md(e.text), e.text);
+      agPendingLocal = null; agSawUser = true;
+      liveBody = null; liveHtml = '';
+      busy = true; $('#send').classList.add('busy'); thinking(true);
+      return;
+    }
+    if(e.type === 'question'){ agQuestion(e.text); return; }
+    // What it does after the answer belongs BELOW the question card, not in
+    // the bubble above it - start a fresh one.
+    if(e.type === 'answer'){ liveBody = null; liveHtml = ''; thinking(true); return; }
+    if(e.type === 'done'){
+      thinking(false);
+      if(!liveHtml && liveBody) liveBody.innerHTML = '<p style="color:var(--faint)">(no reply)</p>';
+      liveBody = null; liveHtml = '';
+      finishTurn(); syncSend();
+      /* A window opened after the turn began (bluee spawned it with a task)
+         never saw the turn's start. The log has it - redraw from that. */
+      if(!agSawUser && agInfo && agInfo.session) renderTranscript(agInfo.session);
+      agSawUser = false;
+      return;
+    }
+    if(e.type === 'ended'){ agEnd(); return; }
+    if(e.type === 'lagged'){ addNote('missed ' + e.missed + ' live events - reopen to see them all'); return; }
+    if(['tool_call','tool_result','reply','error'].includes(e.type)) renderEvent(e);
+  };
+  agFeed.onclose = () => { if(!agEnded) setTimeout(agConnect, 2000); };
+}
+
+async function bootAgentWindow(){
+  const d = await api('/api/agents').catch(() => ({ agents: [] }));
+  agInfo = (d.agents || []).find(a => a.id === soloId) || null;
+  agHeader();
+  stream.innerHTML = '';
+  if(agInfo && agInfo.session) await renderTranscript(agInfo.session);
+  else stream.innerHTML = '';
+  if(!agInfo){ agEnd(); return; }
+  if(!stream.children.length || stream.querySelector('.empty')){
+    stream.innerHTML = '';
+    addNote('Talk to <b>' + esc(agInfo.name) + '</b> here. bluee sees this conversation, ' +
+      'and work bluee gives it shows up here too.');
+  }
+  if(agInfo.question) agQuestion(agInfo.question);
+  agConnect();
+  $('#input').focus();
+}
+
+/* The main window listens to every agent: it opens a window for each new one,
+   refreshes the panel on any change, surfaces questions, and - when a result
+   bluee was waiting on lands - starts bluee's turn so it can carry on. */
+let agWakePending = false;
+function agentsFeed(){
+  if(soloView) return;
+  const ws = new WebSocket('ws://' + location.host + '/ws/agents');
+  ws.onmessage = ev => {
+    let e; try{ e = JSON.parse(ev.data); }catch(_){ return; }
+    if(e.type === 'spawned'){
+      popOut('agent', { id: e.agent.id, title: 'bluee · ' + e.agent.name, w: 560, h: 720 });
+      loadAgents();
+    } else if(e.type === 'agent' || e.type === 'agent_ended'){
+      clearTimeout(agentsFeed.t); agentsFeed.t = setTimeout(loadAgents, 250);
+    } else if(e.type === 'agent_question'){
+      const n = addNote('<b>' + esc(e.name || e.id) + '</b> asks you: ' + esc(e.text) +
+        ' &nbsp;<a href="#" class="agq">answer in its window</a>');
+      n.querySelector('.agq').onclick = ev2 => { ev2.preventDefault();
+        popOut('agent', { id: e.id, title: 'bluee · ' + (e.name || e.id), w: 560, h: 720 }); };
+    } else if(e.type === 'inbox' && e.note && e.note.wake){
+      agWakePending = true; agWake();
+    }
+  };
+  ws.onclose = () => setTimeout(agentsFeed, 3000);
+}
+/* Deliver results bluee was waiting on by starting its turn. Never on top of a
+   turn already running - that turn drains the inbox itself, and a second one
+   would be a turn about nothing. */
+function agWake(){
+  if(!agWakePending || busy) return;
+  agWakePending = false;
+  addNote('Sub-agent results arrived - bluee is picking them up.');
+  busy = true; $('#send').disabled = true; $('#send').classList.add('busy'); thinking(true);
+  liveBody = null; liveHtml = '';
+  const sock = chatSocket();
+  const fire = () => sock.send(JSON.stringify({ wake: true }));
+  if(sock.readyState === 1) fire(); else sock.addEventListener('open', fire, { once: true });
+}
 
 /* Drag a row out of the panel to give it its own window.
    Browser-tab behaviour, and the same rule: a drag that stays inside is a
@@ -6246,7 +6549,7 @@ api('/api/stats').then(st=>{
   if(Array.isArray(st.core_servers)) CORE_SERVERS=st.core_servers;
 }).catch(()=>{});
 if(!bootSolo()){
-  ping(); loadLog(); loadVision();
+  ping(); loadLog(); loadVision(); agentsFeed();
   setInterval(ping,20000); setInterval(loadVision,30000);
 }else{
   ping();

@@ -130,17 +130,20 @@ pub async fn serve_on(cfg: Config, std_listener: std::net::TcpListener) -> Resul
         });
     }
 
-    /* Despawn sweeper. Only touches agents that set their own timer - the
-       default is never, so an agent you forgot about is still there when you
-       come back. One minute is fine granularity for a timeout measured in
-       minutes, and it costs a lock on an empty map otherwise. */
+    /* Idle sweeper: sleep after `sleep_after_mins`, end after `end_after_mins`
+       (§ src/subagents.rs). Busy agents are never touched. 30s is fine
+       granularity for timeouts measured in minutes. */
     {
         let subs = state.subagents.clone();
         tokio::spawn(async move {
             loop {
-                tokio::time::sleep(std::time::Duration::from_secs(60)).await;
-                for id in subs.sweep() {
-                    println!("sub-agent {id}: idle past its timer, despawned");
+                tokio::time::sleep(std::time::Duration::from_secs(30)).await;
+                let (slept, ended) = subs.sweep();
+                for id in slept {
+                    println!("sub-agent {id}: idle, sleeping");
+                }
+                for id in ended {
+                    println!("sub-agent {id}: idle past its end timer, ended");
                 }
             }
         });
@@ -163,6 +166,13 @@ pub async fn serve_on(cfg: Config, std_listener: std::net::TcpListener) -> Resul
         .route("/api/agents/stop", post(agents_stop))
         .route("/api/agents/despawn", post(agents_despawn))
         .route("/api/agents/resume", post(agents_resume))
+        .route("/api/agents/say", post(agents_say))
+        .route("/api/agents/answer", post(agents_answer))
+        .route("/api/agents/timers", post(agents_timers))
+        .route("/api/agents/sleep", post(agents_sleep))
+        .route("/api/agents/inbox", get(agents_inbox))
+        .route("/ws/agent", get(agent_ws))
+        .route("/ws/agents", get(agents_feed_ws))
         .route("/api/tools", get(tools))
         .route("/api/session", get(current_session))
         .route("/api/tasks", get(tasks))
@@ -290,11 +300,26 @@ async fn chat_stream(mut socket: WebSocket, s: Shared) {
             }
             continue;
         };
-        let Some(text) = serde_json::from_str::<Value>(&raw)
-            .ok()
-            .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(str::to_string))
-        else {
-            continue;
+        let Ok(frame) = serde_json::from_str::<Value>(&raw) else { continue };
+        /* `wake`: the UI starting a turn by itself because a sub-agent result
+           bluee was waiting on has arrived. The message says plainly that
+           Adithya did not type it - the log must not put words in his mouth. */
+        let wake = frame.get("wake").and_then(|v| v.as_bool()).unwrap_or(false);
+        let text = if wake {
+            if s.subagents.hub().pending() == 0 {
+                let done = json!({ "type": "done" });
+                let _ = socket.send(WsMessage::Text(done.to_string().into())).await;
+                continue;
+            }
+            "(Automatic notice - not typed by Adithya.) Results from sub-agents you were waiting \
+             on have arrived; they are in the note above. Carry on with what you were doing and \
+             tell Adithya what came back."
+                .to_string()
+        } else {
+            match frame.get("message").and_then(|m| m.as_str()) {
+                Some(t) => t.to_string(),
+                None => continue,
+            }
         };
 
         // Slash commands are handled by the harness, not sent to the model:
@@ -340,6 +365,11 @@ async fn chat_stream(mut socket: WebSocket, s: Shared) {
             let ws = state.workspace.lock().await.clone();
             if let Ok(root) = crate::roots::get(&state.cfg, &ws) {
                 agent.set_allowed_servers(root.servers.clone());
+            }
+            // Whatever sub-agents reported since the last turn goes in first,
+            // and stays in the conversation (§ src/subagents.rs, inbox).
+            if let Some(note) = state.subagents.hub().drain() {
+                agent.add_note(&note);
             }
             agent.turn_with(&text, Some(&tx)).await;
             Some((
@@ -2187,7 +2217,12 @@ async fn agents_ask(
     // The panel waits a beat too: a quick answer should appear without the
     // UI having to poll for it.
     let wait = b.wait_seconds.unwrap_or(45).min(120) * 1000;
-    match s.subagents.ask(&b.id, &b.prompt, wait).await.map_err(fail)? {
+    match s
+        .subagents
+        .ask(&b.id, &b.prompt, crate::subagents::From::User, wait)
+        .await
+        .map_err(fail)?
+    {
         Some(reply) => Ok(Json(json!({ "ok": true, "reply": reply }))) ,
         None => Ok(Json(json!({ "ok": true, "still_working": true }))),
     }
@@ -2215,8 +2250,131 @@ async fn agents_despawn(
     State(s): State<Shared>,
     Json(b): Json<DespawnBody>,
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    s.subagents.set_despawn(&b.id, b.mins).map_err(fail)?;
+    // Kept for the old panel clock: it set the END timer.
+    let sleep = s.subagents.get(&b.id).and_then(|i| i.sleep_after_mins);
+    s.subagents.set_timers(&b.id, sleep, b.mins).map_err(fail)?;
     Ok(Json(json!({ "ok": true, "id": b.id, "mins": b.mins })))
+}
+
+#[derive(Deserialize)]
+struct SayBody {
+    id: String,
+    text: String,
+}
+
+/// Adithya talking to an agent from its window. Queued, never waited on: the
+/// reply streams back over /ws/agent, and bluee hears about it via the inbox.
+async fn agents_say(
+    State(s): State<Shared>,
+    Json(b): Json<SayBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    if b.text.trim().is_empty() {
+        return Err(fail(anyhow::anyhow!("nothing to say")));
+    }
+    s.subagents
+        .ask(&b.id, &b.text, crate::subagents::From::User, 0)
+        .await
+        .map_err(fail)?;
+    Ok(Json(json!({ "ok": true, "queued": true })))
+}
+
+/// Adithya answering an agent's `ask_user` question.
+async fn agents_answer(
+    State(s): State<Shared>,
+    Json(b): Json<SayBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    s.subagents.answer(&b.id, &b.text).map_err(fail)?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+#[derive(Deserialize)]
+struct TimersBody {
+    id: String,
+    /// Minutes idle before sleeping / ending. null = never.
+    #[serde(default)]
+    sleep: Option<u64>,
+    #[serde(default)]
+    end: Option<u64>,
+}
+
+async fn agents_timers(
+    State(s): State<Shared>,
+    Json(b): Json<TimersBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let info = s.subagents.set_timers(&b.id, b.sleep, b.end).map_err(fail)?;
+    Ok(Json(json!({ "ok": true, "agent": info })))
+}
+
+async fn agents_sleep(
+    State(s): State<Shared>,
+    Json(b): Json<StopBody>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    s.subagents.sleep(&b.id).map_err(fail)?;
+    Ok(Json(json!({ "ok": true })))
+}
+
+async fn agents_inbox(State(s): State<Shared>) -> Json<Value> {
+    Json(json!({ "pending": s.subagents.hub().pending() }))
+}
+
+#[derive(Deserialize)]
+struct AgentWsQuery {
+    id: String,
+}
+
+/// One agent's live feed: its status, what it is told, tool calls as they
+/// happen, its replies, questions for Adithya, and `ended`. History before
+/// connecting comes from /api/events with its session id.
+async fn agent_ws(
+    ws: WebSocketUpgrade,
+    Query(q): Query<AgentWsQuery>,
+    State(s): State<Shared>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| async move {
+        let mut socket = socket;
+        let first = match s.subagents.get(&q.id) {
+            Some(info) => json!({ "type": "status", "agent": info }),
+            None => json!({ "type": "ended" }),
+        };
+        if socket.send(WsMessage::Text(first.to_string().into())).await.is_err() {
+            return;
+        }
+        let Some(rx) = s.subagents.subscribe(&q.id) else { return };
+        forward_feed(socket, rx).await;
+    })
+}
+
+/// Everything about every agent, for the main window: spawns (open a window),
+/// status changes, inbox notes, questions, ends.
+async fn agents_feed_ws(ws: WebSocketUpgrade, State(s): State<Shared>) -> impl IntoResponse {
+    let rx = s.subagents.hub().events.subscribe();
+    ws.on_upgrade(move |socket| forward_feed(socket, rx))
+}
+
+async fn forward_feed(mut socket: WebSocket, mut rx: tokio::sync::broadcast::Receiver<Value>) {
+    use futures_util::StreamExt;
+    loop {
+        tokio::select! {
+            ev = rx.recv() => match ev {
+                Ok(v) => {
+                    let ended = v.get("type").and_then(|t| t.as_str()) == Some("ended");
+                    if socket.send(WsMessage::Text(v.to_string().into())).await.is_err() || ended {
+                        break;
+                    }
+                }
+                // Fell behind: say so rather than silently missing events.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
+                    let v = json!({ "type": "lagged", "missed": n });
+                    if socket.send(WsMessage::Text(v.to_string().into())).await.is_err() { break; }
+                }
+                Err(_) => break,
+            },
+            incoming = socket.next() => match incoming {
+                Some(Ok(WsMessage::Close(_))) | None | Some(Err(_)) => break,
+                _ => {}
+            },
+        }
+    }
 }
 
 #[derive(Deserialize)]
