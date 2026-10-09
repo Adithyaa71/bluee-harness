@@ -1229,6 +1229,10 @@ input[type=checkbox]:disabled{opacity:.4;cursor:not-allowed}
 .bdtools{display:flex;align-items:center;gap:var(--s3);margin-bottom:10px}
 .bdhint{font-size:12px;color:var(--faint)}
 #board{position:relative;min-height:300px}
+/* The scrollbar's space is reserved up front: otherwise it appears once the
+   board grows tall, narrows the board by its width, and tiles placed against
+   the wider measure end up past the right edge. */
+#playbody{scrollbar-gutter:stable}
 .tile{position:absolute;display:flex;flex-direction:column;background:var(--panel);
   border:1px solid var(--line);border-radius:var(--r3);overflow:hidden;
   box-shadow:0 2px 10px rgba(0,0,0,.25);transition:box-shadow var(--d-fast,.15s)}
@@ -1245,6 +1249,16 @@ input[type=checkbox]:disabled{opacity:.4;cursor:not-allowed}
   background:linear-gradient(135deg,transparent 50%,var(--faint) 50%,var(--faint) 58%,transparent 58%,
     transparent 70%,var(--faint) 70%,var(--faint) 78%,transparent 78%);opacity:.5}
 .tile:hover .rz{opacity:.9}
+.tile .ti{display:none}
+/* Shrunk to an icon: just the symbol and the name; click opens, drag moves. */
+.tile.mini{border-radius:14px}
+.tile.mini .th{height:100%;flex-direction:column;justify-content:center;gap:6px;padding:8px;
+  border:0;cursor:pointer;text-align:center}
+.tile.mini .ti{display:flex;width:36px;height:36px;border-radius:10px;align-items:center;justify-content:center;
+  background:color-mix(in srgb,var(--accent) 16%,transparent);color:var(--accent)}
+.tile.mini .tt{font-size:11.5px;font-weight:500;max-width:100%}
+.tile.mini .th .spacer,.tile.mini .th button,.tile.mini .tb,.tile.mini .rz{display:none}
+.tile.mini:hover{border-color:var(--accent)}
 body.tiledrag iframe{pointer-events:none}
 body.tiledrag{cursor:grabbing}
 
@@ -4234,6 +4248,16 @@ async function renderBoard(arts, planHtml){
   for(const [id, el] of boardEls){
     if(!boardTiles.some(t => t.id === id && !t.id.endsWith(':off'))){ el.remove(); boardEls.delete(id); }
   }
+  /* Pull anything past the right edge back inside - a tile placed while the
+     board was hidden (pinned from the file viewer) measured a width of 0,
+     and a narrower window does the same to an old layout. */
+  const BW = board.clientWidth;
+  if(BW > 300) for(const t of boardTiles){
+    if(t.min) { if(t.x + MINI_W > BW){ t.x = Math.max(0, BW - MINI_W); changed = true; } continue; }
+    if(t.w > BW){ t.w = Math.max(240, BW); changed = true; }
+    // Rounded DOWN: snapping to the nearest 10 could land a few px over.
+    if(t.x + t.w > BW){ t.x = Math.max(0, Math.floor((BW - t.w) / SNAP) * SNAP); changed = true; }
+  }
   for(const t of boardTiles){
     if(t.kind.endsWith('-off') || t.id.endsWith(':off')) continue;
     let el = boardEls.get(t.id);
@@ -4255,7 +4279,9 @@ function makeTile(t){
   const el = document.createElement('div');
   el.className = 'tile k-' + t.kind;
   el.dataset.id = t.id;
-  el.innerHTML = '<div class="th"><span class="tt"></span><span class="spacer"></span>' +
+  el.innerHTML = '<div class="th"><span class="ti">' + ico(t.kind === 'plan' ? 'check' : t.kind === 'file' ? 'file' : 'grid') +
+      '</span><span class="tt"></span><span class="spacer"></span>' +
+    '<button class="ibtn bare" data-a="min" title="Shrink to an icon (click the icon to open it again)">–</button>' +
     (t.kind !== 'plan' ? '<button class="ibtn bare" data-a="reload" title="Reload">' + ico('refresh','sm') + '</button>' : '') +
     '<button class="ibtn bare" data-a="pop" title="Open in its own window">' + ico('popout','sm') + '</button>' +
     '<button class="ibtn bare" data-a="off" title="Take off the board (the file stays)">' + ico('close','sm') + '</button></div>' +
@@ -4267,26 +4293,49 @@ function makeTile(t){
   tileDrag(el, t.id);
   return el;
 }
+/* A tile shrunk to an icon keeps its full size in w/h, so opening it again
+   puts it back exactly as it was. */
+const MINI_W = 112, MINI_H = 92;
+const tileW = t => t.min ? MINI_W : t.w, tileH = t => t.min ? MINI_H : t.h;
 function placeEl(el, t){
+  el.classList.toggle('mini', !!t.min);
+  el.title = t.min ? tileTitle(t) + ' - click to open' : '';
   el.style.left = t.x + 'px'; el.style.top = t.y + 'px';
-  el.style.width = t.w + 'px'; el.style.height = t.h + 'px';
+  el.style.width = tileW(t) + 'px'; el.style.height = tileH(t) + 'px';
 }
 function sizeBoard(){
   const b = $('#board'); if(!b) return;
-  const bottom = Math.max(0, ...boardTiles.filter(t => !t.id.endsWith(':off') && !t.kind.endsWith('-off')).map(t => t.y + t.h));
+  const bottom = Math.max(0, ...boardTiles.filter(t => !t.id.endsWith(':off') && !t.kind.endsWith('-off')).map(t => t.y + tileH(t)));
   b.style.height = (bottom + 40) + 'px';
 }
-let boardSaveT = null;
+let boardSaveT = null, boardPending = null;
 function saveBoard(){
   clearTimeout(boardSaveT);
-  const root = boardRoot, tiles = boardTiles.map(t => ({ ...t }));
-  boardSaveT = setTimeout(() => api('/api/board', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ root, tiles }) }).catch(() => {}), 400);
+  boardPending = JSON.stringify({ root: boardRoot, tiles: boardTiles.map(t => ({ ...t })) });
+  boardSaveT = setTimeout(() => {
+    const body = boardPending; boardPending = null;
+    api('/api/board', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body }).catch(() => {});
+  }, 400);
 }
+/* Closing or reloading within the 400ms debounce used to lose the last move
+   (caught by dev/uiboard.mjs reloading straight after a change). A pending
+   layout is sent on the way out; keepalive lets it outlive the page. */
+addEventListener('pagehide', () => {
+  if(!boardPending) return;
+  try { fetch('/api/board', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: boardPending, keepalive: true }); } catch(_) {}
+  boardPending = null;
+});
 
 function tileAction(id, act){
   const t = boardTiles.find(x => x.id === id); if(!t) return;
   if(act === 'reload'){ const f = boardEls.get(id)?.querySelector('iframe'); if(f) f.src = f.src; }
+  if(act === 'min' || act === 'open'){
+    t.min = act === 'min';
+    // Opening near the right edge must not push it off the board.
+    if(!t.min){ const W = $('#board').clientWidth; t.x = Math.max(0, Math.min(t.x, W - t.w)); }
+    placeEl(boardEls.get(id), t); sizeBoard(); saveBoard();
+  }
   if(act === 'pop'){
     if(t.kind === 'plan') popOut('plan', { id: boardRoot, title: 'Progress · ' + boardRoot, w: 760, h: 620 });
     else {
@@ -4320,10 +4369,12 @@ function tileDrag(el, id){
     // Kept inside the board's width: a tile pushed past the right edge hid
     // its own header buttons behind a sideways scrollbar.
     const W = el.parentNode.clientWidth;
+    let moved = false;
     const move = ev => {
       const dx = ev.clientX - x0, dy = ev.clientY - y0;
+      if(Math.hypot(dx, dy) > 4) moved = true;
       if(mode === 'move'){
-        t.x = Math.min(Math.max(0, snap(s.x + dx)), Math.max(0, W - t.w));
+        t.x = Math.min(Math.max(0, snap(s.x + dx)), Math.max(0, W - tileW(t)));
         t.y = Math.max(0, snap(s.y + dy));
       } else {
         t.w = Math.min(Math.max(240, snap(s.w + dx)), Math.max(240, W - t.x));
@@ -4334,6 +4385,9 @@ function tileDrag(el, id){
     const up = () => {
       removeEventListener('mousemove', move); removeEventListener('mouseup', up);
       document.body.classList.remove('tiledrag'); el.classList.remove('moving');
+      // A click (not a drag) on an icon opens it - the same distinction the
+      // graph makes between a pan and a pin.
+      if(!moved && t.min){ tileAction(id, 'open'); return; }
       saveBoard();
     };
     addEventListener('mousemove', move); addEventListener('mouseup', up);

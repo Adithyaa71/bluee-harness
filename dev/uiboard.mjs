@@ -77,6 +77,8 @@ await p.ev("document.querySelector('#pgpin').click(); return 1");
 await p.until("return document.querySelector('#pgpin').classList.contains('on')", 5000);
 await p.ev("document.querySelector('#pgback').click(); await loadPlayground(); return 1");
 check('pinned page is on the board', await p.until("return !!document.querySelector('.tile[data-id=\"file:web/page.html\"] iframe')", 5000));
+const fit = await p.ev("const t=document.querySelector('.tile[data-id=\"file:web/page.html\"]'); return {x:t.offsetLeft, w:t.offsetWidth, bw:document.querySelector('#board').clientWidth}");
+check('and fits inside the board', fit.x + fit.w <= fit.bw, JSON.stringify(fit));
 check('and the rest kept their places', (await tiles()).find(t => t.id === 'art:stats')?.x === art2.x);
 
 console.log('off and back on');
@@ -91,6 +93,23 @@ check('+ tile offers it back', offered.includes('artifact:stats'), offered.join(
 await p.ev("document.querySelector('#connmenu .crow[data-r=\"stats\"]').click(); return 1");
 check('and puts it back', await p.until("return !!document.querySelector('.tile[data-id=\"art:stats\"]')", 5000));
 
+console.log('shrink to an icon and back');
+const full = (await tiles()).find(t => t.id === 'art:stats');
+await p.ev("document.querySelector('.tile[data-id=\"art:stats\"] button[data-a=\"min\"]').click(); return 1");
+const mini = (await tiles()).find(t => t.id === 'art:stats');
+check('shrinks to a small icon', mini.w === 112 && mini.h === 92 && await p.ev("return document.querySelector('.tile[data-id=\"art:stats\"]').classList.contains('mini')"), `${mini.w}x${mini.h}`);
+await drag(await box('.tile[data-id="art:stats"] .tt'), 60, 40);
+check('the icon can be moved', (await tiles()).find(t => t.id === 'art:stats').x !== mini.x);
+check('and stays an icon after a drag', await p.ev("return document.querySelector('.tile[data-id=\"art:stats\"]').classList.contains('mini')"));
+await p.shot('board-2-icon');
+await sleep(600);
+check('icon state saved', boardFile().find(t => t.id === 'art:stats').min === true);
+const c = await box('.tile[data-id="art:stats"] .tt');
+await p.send('Input.dispatchMouseEvent', { type: 'mousePressed', x: c.x, y: c.y, button: 'left', clickCount: 1 });
+await p.send('Input.dispatchMouseEvent', { type: 'mouseReleased', x: c.x, y: c.y, button: 'left', clickCount: 1 });
+const back = (await tiles()).find(t => t.id === 'art:stats');
+check('a click opens it at its old size', back.w === full.w && back.h === full.h, `${back.w}x${back.h}`);
+
 console.log('pop out');
 await p.ev("document.querySelector('.tile.k-plan button[data-a=\"pop\"]').click(); return 1");
 const pw = await target(u => u.includes('only=plan'), 30);
@@ -100,6 +119,9 @@ if (pw) {
 } else check('progress pops out on its own', false, 'no window');
 
 console.log('layout survives a reload');
+// Move a tile and reload IMMEDIATELY - inside the save debounce - so the
+// pagehide flush is what has to keep it.
+await drag(await box('.tile[data-id="art:stats"] .tt'), 0, 40);
 const before = await tiles();
 await p.ev("location.reload(); return 1");
 await sleep(1500);
