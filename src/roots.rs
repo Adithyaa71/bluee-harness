@@ -249,9 +249,70 @@ pub fn resolve(cfg: &Config, root_id: &str, rel: &str) -> Result<(Root, PathBuf)
     }
 }
 
+/// `resolve` for a file that may not exist yet - one being written.
+///
+/// The same rule, checked differently: the path is cleaned and refused if it
+/// climbs out (`..`, absolute, a drive letter), and then the nearest folder
+/// that DOES exist is canonicalised and must be inside the root - which is
+/// what catches a symlinked folder pointing somewhere else. `.git` is refused
+/// outright: that is git's own database, never a place to write files into.
+pub fn resolve_new(cfg: &Config, root_id: &str, rel: &str) -> Result<(Root, PathBuf)> {
+    let root = get(cfg, root_id)?;
+    let cleaned = rel.replace('\\', "/");
+    let cleaned = cleaned.trim_start_matches('/').trim();
+    if cleaned.is_empty() {
+        bail!("give a file path inside `{}`", root.label);
+    }
+    if cleaned.contains(':') || cleaned.split('/').any(|p| p == "..") {
+        bail!("path must stay inside `{}`: {rel}", root.label);
+    }
+    if cleaned.split('/').any(|p| p.eq_ignore_ascii_case(".git")) {
+        bail!("`.git` is git's own folder - files are not written into it");
+    }
+    let full = root.path.join(cleaned);
+    let canon_root = root.path.canonicalize()?;
+    let mut probe = full.parent();
+    while let Some(p) = probe {
+        if p.exists() {
+            if !p.canonicalize()?.starts_with(&canon_root) {
+                bail!("that path resolves outside `{}`: {rel}", root.label);
+            }
+            break;
+        }
+        probe = p.parent();
+    }
+    if full.exists() {
+        let c = full.canonicalize()?;
+        if !c.starts_with(&canon_root) {
+            bail!("that path resolves outside `{}`: {rel}", root.label);
+        }
+        if c.is_dir() {
+            bail!("`{rel}` is a folder, not a file");
+        }
+    }
+    Ok((root, full))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn new_paths_stay_inside() {
+        let base = std::env::temp_dir().join(format!("roots-new-{}", uuid::Uuid::new_v4()));
+        let work = base.join("work");
+        std::fs::create_dir_all(work.join("src")).unwrap();
+        let cfg = cfg_in(&base);
+        let r = add(&cfg, work.to_str().unwrap(), None).unwrap();
+
+        let (_, p) = resolve_new(&cfg, &r.id, "src/new/deep/file.rs").unwrap();
+        assert!(p.ends_with("src/new/deep/file.rs") || p.ends_with(r"src\new\deep\file.rs"));
+        for bad in ["../escape.txt", "src/../../x", "C:/Windows/x.txt", ".git/config", "a/.GIT/x", ""] {
+            assert!(resolve_new(&cfg, &r.id, bad).is_err(), "{bad} must be refused");
+        }
+        assert!(resolve_new(&cfg, &r.id, "src").is_err(), "a folder is not a file");
+        std::fs::remove_dir_all(&base).ok();
+    }
 
     fn cfg_in(dir: &Path) -> Config {
         let mut c = Config::load().unwrap_or_else(|_| panic!("config"));

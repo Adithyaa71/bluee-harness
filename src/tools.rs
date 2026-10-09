@@ -95,6 +95,16 @@ impl NativeTools {
         self.home = Some((root.to_string(), sub.trim_matches(['/', '\\']).to_string()));
     }
 
+    /// A path as the call meant it. A sub-agent that names no `root` works in
+    /// its own sub-folder, so its relative paths start there - the same place
+    /// its commands run.
+    fn rel_path(&self, args: &serde_json::Value, path: &str) -> String {
+        match (&self.home, args.get("root")) {
+            (Some((_, sub)), None) if !sub.is_empty() => format!("{sub}/{}", path.trim_start_matches(['/', '\\'])),
+            _ => path.to_string(),
+        }
+    }
+
     /// The granted root a call means: its own `root`, else the home folder,
     /// else the playground.
     fn root_arg<'a>(&'a self, args: &'a serde_json::Value) -> &'a str {
@@ -163,6 +173,8 @@ impl NativeTools {
                 | "read_source"
                 | "list_files"
                 | "delete_file"
+                | "write_file"
+                | "edit_file"
                 | "list_folders"
                 | "read_file"
                 | "run_command"
@@ -356,6 +368,41 @@ impl NativeTools {
                         "root": { "type": "string", "description": "Granted folder id. Defaults to \"playground\"." }
                     },
                     "required": ["path"]
+                }),
+            },
+            ToolDef {
+                name: "write_file".into(),
+                description: "Create a file, or replace one, inside a granted folder. Missing parent \
+                    folders are made for you. Use it to write code, notes, pages - anything. For a \
+                    small change to an existing file, edit_file is cheaper and safer."
+                    .into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string", "description": "Path relative to the granted folder, e.g. `src/app.js`." },
+                        "content": { "type": "string", "description": "The whole new content of the file." },
+                        "root": { "type": "string", "description": "Granted folder id. Defaults to \"playground\" (or your own folder, if you are a sub-agent)." },
+                        "overwrite": { "type": "boolean", "description": "Replace an existing file (default true). false fails if it exists." }
+                    },
+                    "required": ["path", "content"]
+                }),
+            },
+            ToolDef {
+                name: "edit_file".into(),
+                description: "Change part of a file in a granted folder: replace an exact piece of text \
+                    with new text. `old` must appear exactly once (include enough surrounding lines to \
+                    make it unique) unless replace_all is true. Read the file first."
+                    .into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "path": { "type": "string" },
+                        "old": { "type": "string", "description": "Exact existing text, whitespace included." },
+                        "new": { "type": "string", "description": "What to put in its place." },
+                        "replace_all": { "type": "boolean" },
+                        "root": { "type": "string", "description": "Granted folder id. Defaults as for write_file." }
+                    },
+                    "required": ["path", "old", "new"]
                 }),
             },
             ToolDef {
@@ -653,7 +700,8 @@ impl NativeTools {
                 let path = args.get("path").and_then(|v| v.as_str())
                     .context("read_file requires `path`")?;
                 let id = self.root_arg(args);
-                match crate::roots::resolve(&self.cfg, id, path) {
+                let rel = self.rel_path(args, path);
+                match crate::roots::resolve(&self.cfg, id, &rel) {
                     Ok((r, full)) => match std::fs::read_to_string(&full) {
                         Ok(text) => Ok(serde_json::json!({
                             "root": r.id, "path": path,
@@ -680,6 +728,77 @@ impl NativeTools {
                     })),
                     Err(e) => Ok(serde_json::json!({ "path": path, "error": e.to_string() })),
                 }
+            }
+
+            "write_file" => {
+                let path = args.get("path").and_then(|v| v.as_str())
+                    .context("write_file requires `path`")?;
+                let content = args.get("content").and_then(|v| v.as_str())
+                    .context("write_file requires `content`")?;
+                let overwrite = args.get("overwrite").and_then(|v| v.as_bool()).unwrap_or(true);
+                let rel = self.rel_path(args, path);
+                let id = self.root_arg(args);
+                match crate::roots::resolve_new(&self.cfg, id, &rel) {
+                    Ok((r, full)) => {
+                        let existed = full.exists();
+                        if existed && !overwrite {
+                            return Ok(serde_json::json!({ "path": rel, "error": "already exists (overwrite was false)" }));
+                        }
+                        if let Some(dir) = full.parent() {
+                            std::fs::create_dir_all(dir)?;
+                        }
+                        std::fs::write(&full, content)?;
+                        Ok(serde_json::json!({
+                            "root": r.id, "path": rel,
+                            "created": !existed, "bytes": content.len(),
+                            "lines": content.lines().count(),
+                        }))
+                    }
+                    Err(e) => Ok(serde_json::json!({ "path": rel, "error": e.to_string() })),
+                }
+            }
+
+            "edit_file" => {
+                let path = args.get("path").and_then(|v| v.as_str())
+                    .context("edit_file requires `path`")?;
+                let old = args.get("old").and_then(|v| v.as_str()).context("edit_file requires `old`")?;
+                let new = args.get("new").and_then(|v| v.as_str()).context("edit_file requires `new`")?;
+                let all = args.get("replace_all").and_then(|v| v.as_bool()).unwrap_or(false);
+                let rel = self.rel_path(args, path);
+                let id = self.root_arg(args);
+                let (r, full) = match crate::roots::resolve_new(&self.cfg, id, &rel) {
+                    Ok(x) => x,
+                    Err(e) => return Ok(serde_json::json!({ "path": rel, "error": e.to_string() })),
+                };
+                let Ok(text) = std::fs::read_to_string(&full) else {
+                    return Ok(serde_json::json!({ "path": rel,
+                        "error": "no such text file - use write_file to create it" }));
+                };
+                if old.is_empty() {
+                    return Ok(serde_json::json!({ "path": rel, "error": "`old` is empty" }));
+                }
+                // Windows files often use CRLF while the model writes LF; try
+                // the CRLF spelling before calling it a miss.
+                let crlf = old.replace("\r\n", "\n").replace('\n', "\r\n");
+                let (old_used, new_used) = if text.contains(old) {
+                    (old.to_string(), new.to_string())
+                } else if text.contains(&crlf) {
+                    (crlf, new.replace("\r\n", "\n").replace('\n', "\r\n"))
+                } else {
+                    return Ok(serde_json::json!({ "path": rel,
+                        "error": "`old` was not found - read the file again and copy the text exactly" }));
+                };
+                let n = text.matches(old_used.as_str()).count();
+                if n > 1 && !all {
+                    return Ok(serde_json::json!({ "path": rel,
+                        "error": format!("`old` appears {n} times - add surrounding lines to make it unique, or set replace_all") }));
+                }
+                let updated = if all { text.replace(&old_used, &new_used) } else { text.replacen(&old_used, &new_used, 1) };
+                std::fs::write(&full, &updated)?;
+                Ok(serde_json::json!({
+                    "root": r.id, "path": rel, "replaced": if all { n } else { 1 },
+                    "lines": updated.lines().count(),
+                }))
             }
 
             "run_command" => {
