@@ -173,6 +173,7 @@ pub async fn serve_on(cfg: Config, std_listener: std::net::TcpListener) -> Resul
         .route("/api/agents/inbox", get(agents_inbox))
         .route("/api/agents/caps", post(agents_caps))
         .route("/api/agents/templates", get(agents_templates))
+        .route("/api/browsers", get(browsers_list))
         .route("/ws/agent", get(agent_ws))
         .route("/ws/agents", get(agents_feed_ws))
         .route("/api/tools", get(tools))
@@ -2196,6 +2197,8 @@ struct SpawnBody {
     template: Option<String>,
     #[serde(default)]
     model: Option<String>,
+    #[serde(default)]
+    browser: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -2239,6 +2242,9 @@ async fn agents_spawn(
     if let Some(m) = b.model.filter(|m| !m.trim().is_empty()) {
         spec.model = Some(m);
     }
+    if let Some(br) = b.browser.filter(|x| !x.trim().is_empty()) {
+        spec.browser = Some(br.trim().to_lowercase());
+    }
     let info = s.subagents.start(spec, String::new()).map_err(fail)?;
     Ok(Json(json!({ "ok": true, "agent": info })))
 }
@@ -2258,6 +2264,75 @@ async fn agents_caps(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     let info = s.subagents.set_caps(&b.id, b.max_turns, b.max_cost).map_err(fail)?;
     Ok(Json(json!({ "ok": true, "agent": info })))
+}
+
+/// The SnareVec daemon's own list of connected browsers, read with the same
+/// address and token its MCP server uses (~/.snarevec/config.json). Empty when
+/// the daemon is down - which is normal, it idles out.
+async fn snarevec_browsers() -> Vec<Value> {
+    let path = std::env::var("SNAREVEC_CONFIG")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            std::path::PathBuf::from(std::env::var("USERPROFILE").unwrap_or_default())
+                .join(".snarevec")
+                .join("config.json")
+        });
+    let Ok(raw) = std::fs::read_to_string(&path) else { return vec![] };
+    let raw = raw.trim_start_matches('\u{feff}');
+    let Ok(cfg) = serde_json::from_str::<Value>(raw) else { return vec![] };
+    let port = cfg.pointer("/settings/port").and_then(|v| v.as_u64()).unwrap_or(8756);
+    let token = cfg.pointer("/settings/token").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let Ok(client) = reqwest::Client::builder().timeout(std::time::Duration::from_millis(1500)).build() else {
+        return vec![];
+    };
+    let Ok(res) = client
+        .get(format!("http://127.0.0.1:{port}/browser/status"))
+        .header("X-Snarevec-Token", token)
+        .send()
+        .await
+    else {
+        return vec![];
+    };
+    let v: Value = res.json().await.unwrap_or(Value::Null);
+    v.get("browsers").and_then(|b| b.as_array()).cloned().unwrap_or_default()
+}
+
+/// Browsers an agent could own: Adithya's real ones connected through
+/// SnareVec, plus the kinds installed for bluee's own fallback (§ webtools).
+async fn browsers_list(State(s): State<Shared>) -> Json<Value> {
+    let owners: std::collections::HashMap<String, String> = s
+        .subagents
+        .list()
+        .into_iter()
+        .filter_map(|a| a.browser.clone().map(|b| (b, a.name)))
+        .collect();
+    let mut out: Vec<Value> = Vec::new();
+    let real = snarevec_browsers().await;
+    for b in &real {
+        let label = b.get("label").and_then(|v| v.as_str()).unwrap_or("?").to_string();
+        let tabs = b.get("tabs").and_then(|v| v.as_u64()).unwrap_or(0);
+        let on = b.get("active_url").and_then(|v| v.as_str()).unwrap_or("");
+        out.push(json!({
+            "id": label, "label": label, "source": "snarevec",
+            "owner": owners.get(&label),
+            "desc": format!("your real {label} · {tabs} tab(s){}{}",
+                if on.is_empty() { String::new() } else { format!(" · {}", on.chars().take(40).collect::<String>()) },
+                owners.get(&label).map(|o| format!(" · owned by {o}")).unwrap_or_default()),
+        }));
+    }
+    for (kind, path) in crate::webtools::installed() {
+        if real.iter().any(|b| b.get("kind").and_then(|k| k.as_str()) == Some(kind.as_str())) {
+            continue;
+        }
+        out.push(json!({
+            "id": kind, "label": kind, "source": "native",
+            "owner": owners.get(&kind),
+            "desc": format!("bluee's own {kind} (signed out){}",
+                owners.get(&kind).map(|o| format!(" · owned by {o}")).unwrap_or_default()),
+            "path": path.display().to_string(),
+        }));
+    }
+    Json(json!({ "browsers": out, "snarevec_connected": !real.is_empty() }))
 }
 
 async fn agents_templates(State(s): State<Shared>) -> Json<Value> {

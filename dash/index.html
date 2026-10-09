@@ -1221,7 +1221,9 @@ input[type=checkbox]:disabled{opacity:.4;cursor:not-allowed}
 .msg.me.bluee .av{background:var(--accent-dim,var(--panel));color:var(--accent)}
 .from-tag{display:inline-block;font-size:11px;letter-spacing:.02em;color:var(--accent);
   border:1px solid var(--accent-dim,var(--line));border-radius:999px;padding:0 8px;margin-bottom:6px}
-.cmenu .crow.tpl.on{background:var(--accent-dim,var(--hover));box-shadow:inset 2px 0 0 var(--accent)}
+.cmenu .crow.tpl.on,.cmenu .crow.brw.on{background:var(--accent-dim,var(--hover));box-shadow:inset 2px 0 0 var(--accent)}
+.cmenu .crow.brw.taken{opacity:.45;cursor:not-allowed}
+.cmenu .crow.brw .c{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:240px}
 .cmenu .crow.tpl .c{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:220px}
 .note a.agq{color:var(--accent);text-decoration:none}
 .note a.agq:hover{text-decoration:underline}
@@ -6180,10 +6182,16 @@ async function agSpawn(){
   // Which servers are connected decides what can be offered, and scoping is
   // the whole cost argument - so the picker is the spawn dialog, not an
   // afterthought buried in settings.
-  const [mcp, tp] = await Promise.all([
+  const [mcp, tp, br] = await Promise.all([
     api('/api/mcp').catch(() => ({ servers: [] })),
     api('/api/agents/templates').catch(() => ({ templates: [] })),
+    api('/api/browsers').catch(() => ({ browsers: [] })),
   ]);
+  const brRows = (br.browsers || []).map(b =>
+    '<div class="crow brw' + (b.owner ? ' taken' : '') + '" data-b="' + esc(b.id) + '" title="' + esc(b.desc) + '">' +
+      '<span class="k">' + ico('globe','sm') + '</span>' +
+      '<span class="n">' + esc(b.label) + '</span>' +
+      '<span class="c">' + esc(b.desc) + '</span></div>').join('');
   const live = (mcp.servers || []).filter(s => s.connected);
   const tpls = tp.templates || [];
   const tplRows = tpls.map(t =>
@@ -6211,6 +6219,7 @@ async function agSpawn(){
       '<div class="sep"></div>' : '') +
     '<div class="hd" id="agsrvhd">may reach</div>' +
     '<div class="scroll">' + (rows || '<div class="agempty">No servers connected.</div>') + '</div>' +
+    (brRows ? '<div class="sep"></div><div class="hd">its own browser (optional)</div>' + brRows : '') +
     '<div class="cadd"><input id="agmodel" placeholder="model (optional, e.g. z-ai/glm-5.3-flash)" spellcheck="false"></div>' +
     '<div class="sep"></div>' +
     '<div class="cadd"><button id="agcreate">start</button></div>';
@@ -6223,9 +6232,17 @@ async function agSpawn(){
   m.style.left = Math.max(8, Math.min(r.left - 200, innerWidth - m.offsetWidth - 8)) + 'px';
   m.style.top  = Math.max(8, Math.min(r.bottom + 6, innerHeight - m.offsetHeight - 8)) + 'px';
 
-  let tpl = null;
-  m.querySelectorAll('.crow:not(.tpl)').forEach(row => {
+  let tpl = null, brw = null;
+  m.querySelectorAll('.crow:not(.tpl):not(.brw)').forEach(row => {
     row.onclick = () => row.querySelector('.sw').classList.toggle('on');
+  });
+  // One browser per agent, and one agent per browser: a taken one is shown
+  // but cannot be picked.
+  m.querySelectorAll('.crow.brw:not(.taken)').forEach(row => {
+    row.onclick = () => {
+      brw = brw === row.dataset.b ? null : row.dataset.b;
+      m.querySelectorAll('.crow.brw').forEach(r => r.classList.toggle('on', r.dataset.b === brw));
+    };
   });
   // A template brings its own servers; ticking any here overrides them.
   m.querySelectorAll('.crow.tpl').forEach(row => {
@@ -6238,7 +6255,7 @@ async function agSpawn(){
     };
   });
   $('#agcreate').onclick = async () => {
-    const ticked = [...m.querySelectorAll('.crow:not(.tpl)')]
+    const ticked = [...m.querySelectorAll('.crow:not(.tpl):not(.brw)')]
       .filter(r => r.querySelector('.sw').classList.contains('on'))
       .map(r => r.dataset.s);
     const name = $('#agname').value.trim() || (tpl ? '' : 'agent');
@@ -6248,6 +6265,7 @@ async function agSpawn(){
     if(tpl){ body.template = tpl; if(ticked.length) body.servers = ticked; }
     else body.servers = ticked;
     if(model) body.model = model;
+    if(brw) body.browser = brw;
     m.remove();
     const res = await api('/api/agents', { method:'POST',
       headers:{'Content-Type':'application/json'},
@@ -6369,6 +6387,7 @@ function agHeader(){
   hd.querySelector('.st').textContent = st + (a && a.queued ? ' · ' + a.queued + ' queued' : '');
   hd.querySelector('.pu').textContent = a
     ? (a.purpose ? a.purpose + ' · ' : '') +
+      (a.browser ? '🌐 ' + a.browser + ' · ' : '') +
       (a.servers.length ? a.servers.join(', ') : 'memory + native tools') +
       (a.tools ? ' · ' + a.tools + ' tools' : '')
     : '';

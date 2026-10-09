@@ -1,0 +1,468 @@
+﻿# SnareVec: several browsers at once (bluee sub-agents v2, stage 5)
+#
+# Applied to the working tree at C:\Users\adity\Desktop\blueeClaw\git\broswer extension\snarevec\pro
+# and NOT committed there, because those files already carried uncommitted work
+# of Adithya's. The diffs below are only this change (taken against copies made
+# just before editing). Two small additions are not diffed here because their
+# files hold other uncommitted work:
+#   daemon/models.py   BrowserCommandRequest.browser: str = ""
+#                      BrowserPollRequest.client_id: str = "", kind: str = ""
+#   tests/test_browser_actions.py   test_multi_browser() (7 checks), called after test_queue()
+#
+# After applying: restart the daemon, and reload the extension in EACH browser
+# (chrome://extensions, brave://extensions, edge://extensions) so it starts
+# reporting which browser it is.
+
+diff --git "a/C:\\Users\\adity\\AppData\\Local\\Temp\\claude\\D--Conceptual-Project---clg\\a2c17807-4a94-4ef7-8209-260cd65432f6\\scratchpad\\snarevec-pre\\daemon\\browser.py" "b/C:\\Users\\adity\\Desktop\\blueeClaw\\git\\broswer extension\\snarevec\\pro\\daemon\\browser.py"
+index de01e1c..c66570d 100644
+--- "a/C:\\Users\\adity\\AppData\\Local\\Temp\\claude\\D--Conceptual-Project---clg\\a2c17807-4a94-4ef7-8209-260cd65432f6\\scratchpad\\snarevec-pre\\daemon\\browser.py"
++++ "b/C:\\Users\\adity\\Desktop\\blueeClaw\\git\\broswer extension\\snarevec\\pro\\daemon\\browser.py"	
+@@ -150,13 +150,48 @@ ALL_ACTIONS = frozenset({
+ # ------------------------------------------------------------------- state --
+ 
+ _LOCK = threading.RLock()
+-_PENDING: "queue.Queue[str]" = queue.Queue()
+ _COMMANDS: dict[str, dict] = {}          # id -> {cmd, event, result, claimed_at}
+-_LAST_POLL: float = 0.0
+-_TABS: list[dict] = []                   # last snapshot the extension sent
+-_ACTIVE_TAB_ID: Optional[int] = None
+ _CONFIRMS: dict[str, dict] = {}          # token -> {action, url, expires}
+-_EXT_VERSION: str = ""
++
++# ONE CLIENT PER CONNECTED BROWSER
++# --------------------------------
++# Each extension instance (Chrome, Brave, Edge, or two Chrome profiles) polls
++# with its own client id, and gets its own queue, tab snapshot and presence.
++# A command names the browser it is for; it is only ever handed to that one.
++# That is what lets several agents each drive their own browser at once
++# without one's clicks landing in another's tabs - with a single shared queue,
++# whichever browser polled first took the command.
++#
++# Tab ids are only unique WITHIN a browser, so a tab_id is always read
++# against the client the command was routed to.
++DEFAULT_CLIENT = "default"               # extensions too old to identify themselves
++
++
++class _Client:
++    __slots__ = ("id", "kind", "queue", "last_poll", "tabs", "active_tab_id", "ext_version")
++
++    def __init__(self, cid: str, kind: str):
++        self.id = cid
++        self.kind = kind or "chrome"
++        self.queue: "queue.Queue[str]" = queue.Queue()
++        self.last_poll = 0.0
++        self.tabs: list[dict] = []
++        self.active_tab_id: Optional[int] = None
++        self.ext_version = ""
++
++    def live(self) -> bool:
++        return (time.time() - self.last_poll) < PRESENCE_WINDOW_S
++
++
++_CLIENTS: dict[str, _Client] = {}
++
++
++def _norm_kind(kind: str) -> str:
++    k = (kind or "").strip().lower()
++    for known in ("chrome", "brave", "edge", "opera", "vivaldi", "arc", "chromium"):
++        if known in k:
++            return known
++    return k or "chrome"
+ 
+ # A confirmation is a promise the human just made about one specific action on
+ # one specific page. Anything longer than a couple of minutes is no longer that.
+@@ -356,46 +391,129 @@ def _spend_confirm(token: str, action: str, url: str) -> bool:
+ # --------------------------------------------------------------- presence --
+ 
+ def note_poll(tabs: list[dict] | None, active_tab_id: Optional[int],
+-              ext_version: str = "") -> None:
+-    """The extension checked in. Its tab snapshot rides along on the poll so the
++              ext_version: str = "", client_id: str = "", kind: str = "") -> _Client:
++    """A browser checked in. Its tab snapshot rides along on the poll so the
+     daemon can resolve a target URL without spending a whole round trip asking."""
+-    global _LAST_POLL, _TABS, _ACTIVE_TAB_ID, _EXT_VERSION
++    cid = (client_id or DEFAULT_CLIENT)[:64]
+     with _LOCK:
+-        _LAST_POLL = time.time()
++        c = _CLIENTS.get(cid)
++        if c is None:
++            c = _CLIENTS[cid] = _Client(cid, _norm_kind(kind))
++        elif kind:
++            c.kind = _norm_kind(kind)
++        c.last_poll = time.time()
+         if tabs is not None:
+-            _TABS = tabs
+-            _ACTIVE_TAB_ID = active_tab_id
++            c.tabs = tabs
++            c.active_tab_id = active_tab_id
+         if ext_version:
+-            _EXT_VERSION = ext_version
++            c.ext_version = ext_version
++        return c
+ 
+ 
+-def connected() -> bool:
++def _live() -> list[_Client]:
++    """Connected browsers, most recently active first."""
++    with _LOCK:
++        return sorted((c for c in _CLIENTS.values() if c.live()),
++                      key=lambda c: c.last_poll, reverse=True)
++
++
++def _labels() -> dict[str, str]:
++    """client id -> human label: the kind, numbered only when it repeats
++    ("chrome", "chrome#2"). Ordered by id so a label does not flip between
++    polls."""
+     with _LOCK:
+-        return (time.time() - _LAST_POLL) < PRESENCE_WINDOW_S
++        clients = sorted((c for c in _CLIENTS.values() if c.live()), key=lambda c: c.id)
++    seen: dict[str, int] = {}
++    out = {}
++    for c in clients:
++        seen[c.kind] = seen.get(c.kind, 0) + 1
++        out[c.id] = c.kind if seen[c.kind] == 1 else f"{c.kind}#{seen[c.kind]}"
++    return out
++
++
++def connected() -> bool:
++    return bool(_live())
++
++
++def pick(browser: str = "") -> _Client:
++    """The connected browser a command is for. Raises BrowserError, naming the
++    browsers that ARE connected, when there is no match - "not connected" alone
++    sends a person to the wrong window."""
++    live = _live()
++    if not live:
++        raise BrowserError(
++            "the SnareVec extension is not connected. Browser actions run inside "
++            "your real browser, so it must be open with the extension loaded "
++            "and browser actions enabled in ~/.snarevec/config.json. If it is "
++            "open, reload the extension from its extensions page."
++        )
++    want = (browser or "").strip().lower()
++    if not want:
++        return live[0]
++    labels = _labels()
++    for c in live:
++        if c.id.lower() == want or labels.get(c.id, "").lower() == want:
++            return c
++    kind = _norm_kind(want)
++    for c in live:
++        if c.kind == kind:
++            return c
++    have = ", ".join(labels[c.id] for c in live)
++    raise BrowserError(
++        f"no {browser} browser is connected. Connected right now: {have}. Open "
++        f"{browser} with the SnareVec extension loaded to use it."
++    )
+ 
+ 
+ def presence() -> dict:
++    """Status for /browser/status. The top-level fields describe the most
++    recently active browser, exactly as they did when there was only ever one;
++    `browsers` lists every one that is connected."""
++    live = _live()
++    labels = _labels()
+     with _LOCK:
+-        age = time.time() - _LAST_POLL if _LAST_POLL else -1.0
++        first = live[0] if live else None
++        newest = max((c.last_poll for c in _CLIENTS.values()), default=0.0)
++        age = time.time() - newest if newest else -1.0
+         return {
+-            "connected": connected(),
++            "connected": bool(live),
+             "last_poll_seconds_ago": round(age, 1) if age >= 0 else None,
+-            "extension_version": _EXT_VERSION,
+-            "tabs": list(_TABS),
+-            "active_tab_id": _ACTIVE_TAB_ID,
+-            "pending_commands": _PENDING.qsize(),
++            "extension_version": first.ext_version if first else "",
++            "tabs": list(first.tabs) if first else [],
++            "active_tab_id": first.active_tab_id if first else None,
++            "pending_commands": sum(c.queue.qsize() for c in _CLIENTS.values()),
++            "browsers": [
++                {
++                    "id": c.id,
++                    "label": labels.get(c.id, c.kind),
++                    "kind": c.kind,
++                    "tabs": len(c.tabs),
++                    "active_url": next((str(t.get("url") or "") for t in c.tabs
++                                        if t.get("id") == c.active_tab_id), ""),
++                    "last_poll_seconds_ago": round(time.time() - c.last_poll, 1),
++                    "pending_commands": c.queue.qsize(),
++                    "extension_version": c.ext_version,
++                }
++                for c in live
++            ],
+         }
+ 
+ 
+-def resolve_url(tab_id: Optional[int]) -> tuple[Optional[int], str]:
+-    """(tab_id, url) for the command's target, from the last poll snapshot.
++def resolve_url(tab_id: Optional[int], client: Optional[_Client] = None) -> tuple[Optional[int], str]:
++    """(tab_id, url) for the command's target, from that browser's last poll
++    snapshot.
+ 
+     Falls back to the active tab, which is what an agent means by "the page" in
+     the overwhelming majority of calls.
+     """
++    if client is None:
++        live = _live()
++        if not live:
++            return tab_id, ""
++        client = live[0]
+     with _LOCK:
+-        tabs = list(_TABS)
+-        active = _ACTIVE_TAB_ID
++        tabs = list(client.tabs)
++        active = client.active_tab_id
+     want = tab_id if tab_id is not None else active
+     for t in tabs:
+         if t.get("id") == want:
+@@ -406,18 +524,16 @@ def resolve_url(tab_id: Optional[int]) -> tuple[Optional[int], str]:
+ # --------------------------------------------------------------- the queue --
+ 
+ def submit(action: str, params: dict, tab_id: Optional[int],
+-           approved_url: str, timeout_s: float) -> Any:
+-    """Park a command for the extension and block until it answers.
++           approved_url: str, timeout_s: float,
++           client: Optional[_Client] = None) -> Any:
++    """Park a command for one browser's extension and block until it answers.
+ 
+     Raises BrowserError on timeout or on a failure reported by the extension.
+     """
+-    if not connected():
+-        raise BrowserError(
+-            "the SnareVec extension is not connected. Browser actions run inside "
+-            "your real Chrome, so Chrome must be open with the extension loaded "
+-            "and browser actions enabled in ~/.snarevec/config.json. If Chrome is "
+-            "open, reload the extension from chrome://extensions."
+-        )
++    if client is None:
++        client = pick("")
++    if not client.live():
++        raise BrowserError(f"the {client.kind} browser stopped polling - is it still open?")
+ 
+     cmd_id = secrets.token_hex(8)
+     done = threading.Event()
+@@ -429,10 +545,11 @@ def submit(action: str, params: dict, tab_id: Optional[int],
+         # The extension re-checks this before acting; see the TOCTOU note above.
+         "approved_url": approved_url,
+         "issued_at": time.time(),
++        "browser": client.kind,
+     }
+     with _LOCK:
+         _COMMANDS[cmd_id] = {"cmd": cmd, "event": done, "result": None, "claimed_at": 0.0}
+-    _PENDING.put(cmd_id)
++    client.queue.put(cmd_id)
+ 
+     if not done.wait(timeout=timeout_s):
+         with _LOCK:
+@@ -462,20 +579,25 @@ def submit(action: str, params: dict, tab_id: Optional[int],
+     return res.get("result")
+ 
+ 
+-def next_command(wait_s: float) -> Optional[dict]:
+-    """The extension's long poll. Returns one command, or None after `wait_s`.
++def next_command(wait_s: float, client_id: str = "") -> Optional[dict]:
++    """One browser's long poll. Returns one command for THAT browser, or None
++    after `wait_s`.
+ 
+     Returning None rather than holding forever is deliberate: an MV3 service
+     worker is killed when idle, and a bounded hold that the extension
+     immediately re-issues is what keeps it alive across the gap.
+     """
++    with _LOCK:
++        client = _CLIENTS.get(client_id or DEFAULT_CLIENT)
++    if client is None:
++        return None
+     deadline = time.time() + max(0.0, wait_s)
+     while True:
+         remaining = deadline - time.time()
+         if remaining <= 0:
+             return None
+         try:
+-            cmd_id = _PENDING.get(timeout=min(remaining, 1.0))
++            cmd_id = client.queue.get(timeout=min(remaining, 1.0))
+         except queue.Empty:
+             continue
+         with _LOCK:
+diff --git "a/C:\\Users\\adity\\AppData\\Local\\Temp\\claude\\D--Conceptual-Project---clg\\a2c17807-4a94-4ef7-8209-260cd65432f6\\scratchpad\\snarevec-pre\\daemon\\main.py" "b/C:\\Users\\adity\\Desktop\\blueeClaw\\git\\broswer extension\\snarevec\\pro\\daemon\\main.py"
+index cd36917..e792d23 100644
+--- "a/C:\\Users\\adity\\AppData\\Local\\Temp\\claude\\D--Conceptual-Project---clg\\a2c17807-4a94-4ef7-8209-260cd65432f6\\scratchpad\\snarevec-pre\\daemon\\main.py"
++++ "b/C:\\Users\\adity\\Desktop\\blueeClaw\\git\\broswer extension\\snarevec\\pro\\daemon\\main.py"	
+@@ -1092,7 +1092,13 @@ def browser_command(body: BrowserCommandRequest):
+     in the common case.
+     """
+     cfg = cfgmod.load()
+-    tab_id, current_url = browser_mod.resolve_url(body.tab_id)
++    # Which browser this is for. Several can be connected at once (Chrome,
++    # Brave, Edge...); each has its own queue and its own tab ids.
++    try:
++        client = browser_mod.pick(body.browser)
++    except browser_mod.BrowserError as e:
++        raise HTTPException(502, str(e))
++    tab_id, current_url = browser_mod.resolve_url(body.tab_id, client)
+     # navigate/new_tab are judged on where they are GOING; everything else on
+     # where the tab already is. See browser.policy_url.
+     url = browser_mod.policy_url(body.action, body.params, current_url)
+@@ -1134,10 +1140,11 @@ def browser_command(body: BrowserCommandRequest):
+     # deliberately change the page, so they carry no approved_url at all.
+     approved = "" if body.action in browser_mod.DESTINATION_ACTIONS else current_url
+     try:
+-        result = browser_mod.submit(body.action, params, tab_id, approved, timeout)
++        result = browser_mod.submit(body.action, params, tab_id, approved, timeout, client)
+     except browser_mod.BrowserError as e:
+         raise HTTPException(502, str(e))
+-    return {"ok": True, "action": body.action, "tab_id": tab_id, "result": result}
++    return {"ok": True, "action": body.action, "tab_id": tab_id, "result": result,
++            "browser": client.kind, "browser_id": client.id}
+ 
+ 
+ @app.post("/browser/poll")
+@@ -1150,13 +1157,15 @@ def browser_poll(body: BrowserPollRequest):
+     worker mid-request anyway, with the command lost in the gap.
+     """
+     cfg = cfgmod.load()
+-    browser_mod.note_poll(body.tabs, body.active_tab_id, body.extension_version)
++    client = browser_mod.note_poll(body.tabs, body.active_tab_id, body.extension_version,
++                                   body.client_id, body.kind)
+     if not cfg.browser.enabled:
+         # Told, not stalled — the extension backs off to a slow heartbeat rather
+         # than hammering a feature that is switched off.
+         return {"enabled": False, "command": None}
+     wait = max(1.0, min(float(body.wait_s or 25.0), 55.0))
+-    cmd = browser_mod.next_command(wait)
++    # Only ever this browser's own commands.
++    cmd = browser_mod.next_command(wait, client.id)
+     return {"enabled": True, "command": cmd}
+ 
+ 
+diff --git "a/C:\\Users\\adity\\AppData\\Local\\Temp\\claude\\D--Conceptual-Project---clg\\a2c17807-4a94-4ef7-8209-260cd65432f6\\scratchpad\\snarevec-pre\\extension\\background.js" "b/C:\\Users\\adity\\Desktop\\blueeClaw\\git\\broswer extension\\snarevec\\pro\\extension\\background.js"
+index 8539539..0fd04d4 100644
+--- "a/C:\\Users\\adity\\AppData\\Local\\Temp\\claude\\D--Conceptual-Project---clg\\a2c17807-4a94-4ef7-8209-260cd65432f6\\scratchpad\\snarevec-pre\\extension\\background.js"
++++ "b/C:\\Users\\adity\\Desktop\\blueeClaw\\git\\broswer extension\\snarevec\\pro\\extension\\background.js"	
+@@ -194,16 +194,52 @@ async function browserTabSnapshot() {
+   };
+ }
+ 
++/* WHICH BROWSER AM I
++   ------------------
++   Several browsers can run this extension at once - Chrome, Brave, Edge, two
++   Chrome profiles - and an agent may be told to use one of them. So each
++   install keeps a random client id (one per profile, surviving restarts) and
++   reports its browser kind; the daemon gives each its own command queue, and
++   a command is only ever handed to the browser it names. */
++let browserIdentity = null;
++async function whoAmI() {
++  if (browserIdentity) return browserIdentity;
++  let { snarevecClientId: id } = await chrome.storage.local.get("snarevecClientId");
++  if (!id) {
++    id = Array.from(crypto.getRandomValues(new Uint8Array(6)),
++      (b) => b.toString(16).padStart(2, "0")).join("");
++    await chrome.storage.local.set({ snarevecClientId: id });
++  }
++  let kind = "chromium";
++  try {
++    if (navigator.brave && (await navigator.brave.isBrave())) kind = "brave";
++  } catch (_) {}
++  if (kind === "chromium") {
++    const brands = ((navigator.userAgentData && navigator.userAgentData.brands) || [])
++      .map((b) => String(b.brand).toLowerCase());
++    const ua = navigator.userAgent || "";
++    if (brands.some((b) => b.includes("edge")) || /Edg\//.test(ua)) kind = "edge";
++    else if (brands.some((b) => b.includes("brave"))) kind = "brave";
++    else if (brands.some((b) => b.includes("opera")) || /OPR\//.test(ua)) kind = "opera";
++    else if (brands.some((b) => b.includes("vivaldi"))) kind = "vivaldi";
++    else if (brands.some((b) => b.includes("google chrome"))) kind = "chrome";
++  }
++  browserIdentity = { client_id: id, kind };
++  return browserIdentity;
++}
++
+ async function browserLoop() {
+   if (browserLoopRunning) return;
+   browserLoopRunning = true;
+   try {
++    const me = await whoAmI();
+     for (;;) {
+       let poll;
+       try {
+         const snap = await browserTabSnapshot();
+         poll = await daemon("POST", "/browser/poll", {
+           ...snap,
++          ...me,
+           extension_version: chrome.runtime.getManifest().version,
+           wait_s: BROWSER_POLL_HOLD_S,
+         });
+diff --git "a/C:\\Users\\adity\\AppData\\Local\\Temp\\claude\\D--Conceptual-Project---clg\\a2c17807-4a94-4ef7-8209-260cd65432f6\\scratchpad\\snarevec-pre\\mcp\\snarevec_mcp.py" "b/C:\\Users\\adity\\Desktop\\blueeClaw\\git\\broswer extension\\snarevec\\pro\\mcp\\snarevec_mcp.py"
+index 2dbe46d..c4fb0c1 100644
+--- "a/C:\\Users\\adity\\AppData\\Local\\Temp\\claude\\D--Conceptual-Project---clg\\a2c17807-4a94-4ef7-8209-260cd65432f6\\scratchpad\\snarevec-pre\\mcp\\snarevec_mcp.py"
++++ "b/C:\\Users\\adity\\Desktop\\blueeClaw\\git\\broswer extension\\snarevec\\pro\\mcp\\snarevec_mcp.py"	
+@@ -227,9 +227,16 @@ def daemon_call(method: str, path: str, payload: dict | None = None,
+ # Every tab-scoped tool takes the same optional tab_id, and it means the same
+ # thing everywhere. Spelling it out fifteen times is fifteen chances to describe
+ # it slightly differently, which is how a model ends up guessing.
++BROWSER_SCHEMA = {
++    "browser": {"type": "string",
++                "description": "Which connected browser: chrome, brave, edge (or a label from "
++                               "browser_status like chrome#2). Omit for the most recently used one. "
++                               "Tab ids belong to a browser, so use the same value you listed tabs with."},
++}
+ TAB_SCHEMA = {
+     "tab_id": {"type": "integer",
+                "description": "Which tab, from browser_list_tabs. Omit for the active tab."},
++    **BROWSER_SCHEMA,
+ }
+ # PRO-ONLY-END
+ 
+@@ -575,7 +582,7 @@ TOOLS = [
+             "List the open http(s) tabs with their ids, URLs and titles. Tab ids "
+             "are what every other browser_* tool means by tab_id."
+         ),
+-        "inputSchema": {"type": "object", "properties": {}},
++        "inputSchema": {"type": "object", "properties": dict(BROWSER_SCHEMA)},
+     },
+     {
+         "name": "browser_get_page_info",
+@@ -1567,10 +1574,17 @@ def tool_install_component(args: dict) -> str:
+ HTTP_TIMEOUT_BROWSER = 120.0   # covers a slow navigate plus the daemon's own wait
+ 
+ 
++# The `browser` argument of the call being handled. Set by the dispatcher for
++# every call; requests are handled one at a time on stdio, so one slot is safe.
++_CURRENT_BROWSER = ""
++
++
+ def _browser(action: str, params: dict, tab_id=None, confirm: str = "",
+              timeout_s: float | None = None) -> Any:
+     """One browser command. Raises DaemonError with the daemon's own sentence."""
+     body: dict[str, Any] = {"action": action, "params": params}
++    if _CURRENT_BROWSER:
++        body["browser"] = _CURRENT_BROWSER
+     if tab_id is not None:
+         body["tab_id"] = int(tab_id)
+     if confirm:
+@@ -1644,6 +1658,12 @@ def tool_browser_status(_args: dict) -> str:
+     if deny:
+         lines.append(f"  denied:    {', '.join(deny)}")
+     lines.append(f"  arbitrary JS allowed: {r.get('allow_js')}")
++    browsers = r.get("browsers") or []
++    if len(browsers) > 1 or (browsers and browsers[0].get("kind") != "chrome"):
++        lines.append(f"  browsers:  {len(browsers)} connected - pass browser: \"<label>\" to pick one")
++        for b in browsers:
++            lines.append(f"    {b.get('label')}: {b.get('tabs')} tab(s), on {(b.get('active_url') or '-')[:80]}")
++        lines.append("  (tabs below are the most recently active browser's)")
+     tabs = r.get("tabs") or []
+     lines.append(f"  open tabs: {len(tabs)}")
+     for t in tabs[:10]:
+@@ -1978,6 +1998,8 @@ def handle(msg: dict) -> None:
+         if handler is None:
+             error(req_id, E_INVALID_PARAMS, f"unknown tool '{name}'")
+             return
++        global _CURRENT_BROWSER
++        _CURRENT_BROWSER = str(args.get("browser") or "").strip()
+         try:
+             out = handler(args)
+         except ValueError as e:

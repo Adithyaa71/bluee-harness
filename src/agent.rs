@@ -468,8 +468,12 @@ impl Agent {
         if self.subagents.is_some() {
             defs.extend(crate::subagents::SubAgents::defs());
         }
-        if self.child.is_some() {
+        if let Some(link) = &self.child {
             defs.extend(crate::subagents::ChildLink::defs());
+            // An agent that owns a browser gets a fallback for it (§ webtools).
+            if let Some(b) = &link.browser {
+                defs.extend(crate::webtools::defs(b));
+            }
         }
         let allow = self.allowed_servers.clone();
         defs.extend(gui_defs_if_available(&self.registry, &allow));
@@ -1444,6 +1448,7 @@ impl Agent {
                     // could spawn agents and bluee itself never could (§61).
                     || crate::subagents::SubAgents::is_tool(&tc.function.name)
                     || crate::subagents::ChildLink::handles(&tc.function.name)
+                    || crate::webtools::handles(&tc.function.name)
                 {
                     // Both need the MCP registry, which NativeTools does not
                     // hold - so they are dispatched here rather than there.
@@ -1532,6 +1537,11 @@ impl Agent {
                             "sub-agents are not available on this surface"
                         )),
                     }
+                } else if crate::webtools::handles(&tool) {
+                    match self.child.as_ref().and_then(|l| l.browser.clone().map(|b| (b, l.data_dir.clone()))) {
+                        Some((kind, dir)) => crate::webtools::call(&dir, &kind, &tool, &args).await,
+                        None => Err(anyhow::anyhow!("only a sub-agent that owns a browser can use `{tool}`")),
+                    }
                 } else if crate::subagents::ChildLink::handles(&tool) {
                     match &self.child {
                         Some(link) => link.clone().call(&tool, &args).await,
@@ -1540,7 +1550,27 @@ impl Agent {
                 } else if server == "harness" {
                     self.native.call(&tool, &args)
                 } else {
-                    self.registry.call(&server, &tool, args.clone()).await
+                    // A sub-agent that owns a browser drives THAT browser and
+                    // no other: its snarevec browser_* calls are pinned, and
+                    // naming another browser is refused rather than obeyed.
+                    let pin = self.child.as_ref().and_then(|l| l.browser.clone());
+                    match pin.filter(|_| server == "snarevec" && tool.starts_with("browser_")) {
+                        Some(mine) => {
+                            let asked = args.get("browser").and_then(|v| v.as_str()).unwrap_or("").to_lowercase();
+                            if !asked.is_empty() && !asked.starts_with(&mine) {
+                                Err(anyhow::anyhow!(
+                                    "your browser is `{mine}`; `{asked}` belongs to someone else. Use browser: \"{mine}\"."
+                                ))
+                            } else {
+                                let mut a = args.clone();
+                                if asked.is_empty() {
+                                    a["browser"] = serde_json::json!(mine);
+                                }
+                                self.registry.call(&server, &tool, a).await
+                            }
+                        }
+                        None => self.registry.call(&server, &tool, args.clone()).await,
+                    }
                 };
 
                 // Post-hooks see the outcome and may add to it - this is how a

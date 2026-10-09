@@ -55,6 +55,30 @@ pub fn find_browser() -> Option<PathBuf> {
         .find(|p| p.exists())
 }
 
+/// A specific browser: `chrome`, `edge` or `brave`. Looked for on disk, not
+/// on PATH, for the same reason as `find_browser`.
+pub fn find_kind(kind: &str) -> Option<PathBuf> {
+    let local = std::env::var("LOCALAPPDATA").unwrap_or_default();
+    let paths: Vec<String> = match kind {
+        "chrome" => vec![
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe".into(),
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe".into(),
+            format!(r"{local}\Google\Chrome\Application\chrome.exe"),
+        ],
+        "edge" => vec![
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe".into(),
+            r"C:\Program Files\Microsoft\Edge\Application\msedge.exe".into(),
+        ],
+        "brave" => vec![
+            r"C:\Program Files\BraveSoftware\Brave-Browser\Application\brave.exe".into(),
+            r"C:\Program Files (x86)\BraveSoftware\Brave-Browser\Application\brave.exe".into(),
+            format!(r"{local}\BraveSoftware\Brave-Browser\Application\brave.exe"),
+        ],
+        _ => vec![],
+    };
+    paths.into_iter().map(PathBuf::from).find(|p| p.exists())
+}
+
 struct Live {
     /// `None` when we adopted a browser a previous run left behind rather than
     /// starting one ourselves - see `ensure`.
@@ -76,9 +100,23 @@ impl Drop for Live {
 pub struct Browser {
     live: Mutex<Option<Live>>,
     profile: PathBuf,
+    /// A specific binary (a sub-agent's own Chrome/Edge/Brave), or `None` for
+    /// whichever `find_browser` finds - the playground panel's case.
+    exe: Option<PathBuf>,
 }
 
 impl Browser {
+    /// A browser of one kind with its own profile, `data/browser-<kind>`, so
+    /// each sub-agent that owns a browser gets one nobody else drives.
+    pub fn for_kind(data_dir: &Path, kind: &str) -> Result<Self> {
+        let exe = find_kind(kind)
+            .ok_or_else(|| anyhow!("{kind} is not installed (looked in Program Files and LocalAppData)"))?;
+        let mut b = Self::new(data_dir);
+        b.profile = b.profile.with_file_name(format!("browser-{kind}"));
+        b.exe = Some(exe);
+        Ok(b)
+    }
+
     pub fn new(data_dir: &Path) -> Self {
         // MUST be absolute. `cfg.data_dir` defaults to the relative "data", and
         // Chrome on Windows silently declines a relative --user-data-dir: it
@@ -97,6 +135,7 @@ impl Browser {
         Self {
             live: Mutex::new(None),
             profile,
+            exe: None,
         }
     }
 
@@ -156,7 +195,7 @@ impl Browser {
             }
         }
 
-        let exe = find_browser().ok_or_else(|| {
+        let exe = self.exe.clone().or_else(find_browser).ok_or_else(|| {
             anyhow!("no Chrome or Edge found - looked in Program Files for chrome.exe and msedge.exe")
         })?;
         std::fs::create_dir_all(&self.profile).ok();
@@ -540,6 +579,32 @@ impl Browser {
                 me.cmd(&ws, "Page.reload", json!({})).await?;
                 tokio::time::sleep(Duration::from_millis(900)).await;
                 me.page_info(&ws).await
+            })
+        })
+        .await
+    }
+
+    /// Run a JavaScript expression in the page and return its value. Promises
+    /// are awaited. Used by the sub-agent web tools (§ src/webtools.rs).
+    pub async fn eval(&self, expr: &str) -> Result<Value> {
+        let e = expr.to_string();
+        self.on_first(move |me, ws| {
+            Box::pin(async move {
+                let v = me
+                    .cmd(
+                        &ws,
+                        "Runtime.evaluate",
+                        json!({ "expression": e, "returnByValue": true, "awaitPromise": true }),
+                    )
+                    .await?;
+                if let Some(ex) = v.get("exceptionDetails") {
+                    let m = ex
+                        .pointer("/exception/description")
+                        .and_then(|d| d.as_str())
+                        .unwrap_or("script threw");
+                    return Err(anyhow!("{}", m.lines().next().unwrap_or(m)));
+                }
+                Ok(v.pointer("/result/value").cloned().unwrap_or(Value::Null))
             })
         })
         .await

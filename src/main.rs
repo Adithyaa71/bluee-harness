@@ -21,6 +21,7 @@ mod skills;
 mod subagents;
 mod system;
 mod templates;
+mod webtools;
 mod tools;
 mod toolsearch;
 mod vision;

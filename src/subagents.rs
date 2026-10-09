@@ -305,7 +305,11 @@ fn clip(s: &str, n: usize) -> String {
 pub struct ChildLink {
     pub id: String,
     pub name: String,
+    /// The browser this agent owns (`chrome`, `brave`, `edge`). Every snarevec
+    /// browser_* call is pinned to it, and it gets the web_* fallback tools.
     pub browser: Option<String>,
+    /// Where its fallback browser keeps its profile.
+    pub data_dir: std::path::PathBuf,
     info: Arc<Mutex<AgentInfo>>,
     bus: broadcast::Sender<Value>,
     hub: Arc<Hub>,
@@ -477,6 +481,7 @@ impl Worker {
             id: self.id.clone(),
             name: self.spec.name.clone(),
             browser: self.spec.browser.clone(),
+            data_dir: self.cfg.data_dir.clone(),
             info: self.info.clone(),
             bus: self.bus.clone(),
             hub: self.hub.clone(),
@@ -498,8 +503,10 @@ impl Worker {
         );
         if let Some(b) = &self.spec.browser {
             role.push_str(&format!(
-                "\nYour browser is `{b}`. Pass browser: \"{b}\" to the snarevec browser_* tools; \
-                 other agents use the other browsers, so never touch them."
+                "\nYour browser is `{b}` and no other agent uses it. The snarevec browser_* tools are \
+                 pinned to it (Adithya's real {b}, signed in as him) - check browser_status first. If \
+                 his {b} is not connected there, use web_open / web_read / web_click / web_type \
+                 instead: bluee's own {b}, a separate signed-out profile."
             ));
         }
         if let Some(extra) = &self.spec.instructions {
@@ -750,6 +757,16 @@ impl SubAgents {
         }
         if spec.name.trim().is_empty() {
             bail!("a sub-agent needs a name");
+        }
+        // One agent per browser: two driving the same one is exactly the
+        // interference owning a browser exists to prevent.
+        if let Some(b) = &spec.browser {
+            if let Some(other) = map.values().find(|e| e.info.lock().unwrap().browser.as_deref() == Some(b.as_str())) {
+                bail!(
+                    "{b} is already owned by sub-agent `{}`. Give this one another browser, or stop that one.",
+                    other.info.lock().unwrap().name
+                );
+            }
         }
 
         let id = {
@@ -1010,6 +1027,7 @@ impl SubAgents {
                         "template": { "type": "string", "description": "A saved agent kind from agents/ (e.g. `researcher`): \
                             brings its instructions, servers, skills, model, browser and caps. list_agents shows the templates." },
                         "model": { "type": "string", "description": "Optional model id for this agent (e.g. a cheaper one for simple work)." },
+                        "browser": { "type": "string", "description": "Give it its own browser: chrome, brave or edge. One agent per browser, so several can browse at once without touching each other's tabs. Give it the snarevec server too to use Adithya's real, signed-in browser." },
                         "task": { "type": "string", "description": "Optional first job. Runs in the background; the answer comes to you when it lands." }
                     },
                     "required": ["name"]
@@ -1092,6 +1110,9 @@ impl SubAgents {
                 }
                 if !s("model").trim().is_empty() {
                     spec.model = Some(s("model"));
+                }
+                if !s("browser").trim().is_empty() {
+                    spec.browser = Some(s("browser").trim().to_lowercase());
                 }
                 let info = self.start(spec, String::new())?;
                 let task = s("task");
