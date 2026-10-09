@@ -1978,6 +1978,15 @@ function bootSolo(){
       $('#aframe').src='/artifacts/'+encodeURIComponent(soloId)+'/';
       $('#aname').textContent=soloId;
     },80);
+  } else if(soloView==='file' && soloId){
+    // A page from a granted folder, popped out: same viewer as an artifact.
+    show('#v-play');
+    setTimeout(()=>{
+      $('#playbody').style.display='none';
+      $('#aview').classList.add('on');
+      $('#aframe').src='/files/'+soloId;
+      $('#aname').textContent=decodeURIComponent(soloId.split('/').slice(1).join('/'));
+    },80);
   } else if(agentMode){
     show('#v-chat');
     setTimeout(bootAgentWindow, 60);
@@ -3970,7 +3979,10 @@ function collectProvs(){
 
 let artifacts=[], topicFilter=null;
 async function loadPlayground(){
-  const d=await api('/api/artifacts').catch(()=>({artifacts:[],topics:[]}));
+  // The selected folder's artifacts: the playground's own, or a repo's
+  // .bluee/artifacts when a granted folder is selected.
+  const q=(typeof fileRoot!=='undefined'&&fileRoot&&fileRoot!=='playground')?'?root='+encodeURIComponent(fileRoot):'';
+  const d=await api('/api/artifacts'+q).catch(()=>({artifacts:[],topics:[]}));
   artifacts=d.artifacts||[];
   const topics=d.topics||[];
   $('#topics').innerHTML =
@@ -4035,7 +4047,7 @@ function openArtifact(id){
   $('#aview').classList.add('on');
   $('#aname').textContent=a.name;
   $('#ameta').textContent=`${a.topic} · ${a.kind}`;
-  const url=`/artifacts/${encodeURIComponent(a.id)}/`;
+  const url=a.url||`/artifacts/${encodeURIComponent(a.id)}/`;
   $('#aframe').src=url;
   $('#aopen').onclick=()=>window.open(url,'_blank');
 }
@@ -4047,9 +4059,11 @@ $('#apop').onclick=async()=>{
   // had an artifact with the same name.
   const a=artifacts.find(x=>x.id===aCurrent); if(!a) return;
   // Its own OS window, so a live chart can sit on a second monitor while you
-  // work in the main one.
-  if(await popOut('artifact',{id:a.id,title:a.name,w:900,h:640})) return;
-  const url='/artifacts/'+encodeURIComponent(a.id)+'/';
+  // work in the main one. A repo's artifact is a file in that repo.
+  const url=a.url||'/artifacts/'+encodeURIComponent(a.id)+'/';
+  if(url.startsWith('/files/')){
+    if(await popOut('file',{id:url.slice('/files/'.length),title:a.name,w:900,h:640})) return;
+  } else if(await popOut('artifact',{id:a.id,title:a.name,w:900,h:640})) return;
   openWindow({ id:'artifact:'+a.id, title:a.name, subtitle:a.topic, w:900, h:620,
     html:'<iframe style="width:100%;height:100%;border:0;background:#0f1116" '+
          'sandbox="allow-scripts allow-forms allow-popups" src="'+url+'"></iframe>' });
@@ -4296,6 +4310,9 @@ $('#pgterm').onclick=()=>{
   },400);
 };
 $('#pgroot').onchange=e=>{ fileRoot=e.target.value; filePick=null; fileOpen={};
+  // The cards follow the folder: a repo shows its own .bluee artifacts.
+  topicFilter=null; aCurrent=null; $('#aview').classList.remove('on'); $('#pgview').classList.remove('on');
+  loadPlayground();
   // Each granted folder is a workspace: its terminals come back with it, and
   // its chosen MCP servers become the toolset.
   loadTabs(); if(!app.classList.contains('no-term')) openTerm(termActive);
@@ -4416,10 +4433,13 @@ $('#pgpop').onclick=async()=>{
   if(fileRoot==='playground'&&/\.html?$/i.test(filePick)){
     const id=filePick.split('/')[0];
     if(await popOut('artifact',{id,title:filePick,w:900,h:640})) return;
+  } else if(/\.html?$/i.test(filePick)){
+    // A page in a repo gets its own OS window too - second monitor material.
+    if(await popOut('file',{id:fileUrl(filePick).slice('/files/'.length),title:filePick,w:900,h:640})) return;
   }
   const html=/\.html?$/i.test(filePick)
     ? '<iframe style="width:100%;height:100%;border:0;background:#0f1116" '+
-      'sandbox="allow-scripts allow-forms allow-popups" src="'+artifactUrl(filePick)+'"></iframe>'
+      'sandbox="allow-scripts allow-forms allow-popups" src="'+fileUrl(filePick)+'"></iframe>'
     : '<pre style="margin:0;padding:14px 16px;font-family:var(--mono);font-size:var(--t-xs);'+
       'line-height:1.6;color:#c9d2de;white-space:pre">'+esc($('#pgcode').textContent)+'</pre>';
   openWindow({ id:'file:'+filePick, title:filePick.split('/').pop(), subtitle:filePick,
@@ -5756,16 +5776,21 @@ function artifactUrl(path){
   return '/artifacts/' + path.split('/').map(encodeURIComponent).join('/');
 }
 
-/* Only the playground folder is served over HTTP. A granted project folder is
-   read through the API instead, so its HTML shows as source rather than being
-   silently served to the browser - which would be a quiet way to expose a
-   folder you granted for reading. */
-const canRender = () => fileRoot === 'playground';
+/* Every granted folder renders its HTML live now, not just the playground.
+   The old rule - show a repo's pages only as source - was there so granting a
+   folder could not quietly hand its pages bluee's API. The server now
+   sandboxes every page it serves (opaque origin, no API, no terminal), which
+   is the actual protection, so the restriction only cost the preview. */
+const canRender = () => true;
+function fileUrl(path){
+  if (fileRoot === 'playground') return artifactUrl(path);
+  return '/files/' + encodeURIComponent(fileRoot) + '/' + path.split('/').map(encodeURIComponent).join('/');
+}
 
 function showRendered(path){
   $('#pgcodewrap').classList.remove('on');
   $('#pgframe').style.display = '';
-  $('#pgframe').src = artifactUrl(path);
+  $('#pgframe').src = fileUrl(path);
   $('#pgmeta').textContent = 'rendered';
 }
 

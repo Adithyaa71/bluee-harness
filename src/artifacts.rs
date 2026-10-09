@@ -44,6 +44,13 @@ impl ArtifactStore {
         Ok(Self { root })
     }
 
+    /// A store in any folder - a repo's own `.bluee/artifacts`, so a project's
+    /// artifacts travel with the project.
+    pub fn at(dir: &Path) -> Result<Self> {
+        std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+        Ok(Self { root: dir.to_path_buf() })
+    }
+
     pub fn root(&self) -> &Path {
         &self.root
     }

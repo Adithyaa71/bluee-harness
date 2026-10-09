@@ -95,6 +95,21 @@ impl NativeTools {
         self.home = Some((root.to_string(), sub.trim_matches(['/', '\\']).to_string()));
     }
 
+    /// Where artifacts go for this call: the playground, or - with `root` set
+    /// to a granted folder - that repo's own `.bluee/artifacts`, so a
+    /// project's artifacts travel with it. Returns the store and the URL
+    /// prefix its files are served under.
+    fn artifact_store(&self, args: &serde_json::Value) -> Result<(ArtifactStore, String)> {
+        match args.get("root").and_then(|v| v.as_str()).filter(|r| *r != "playground" && !r.is_empty()) {
+            Some(id) => {
+                let r = crate::roots::get(&self.cfg, id)?;
+                let store = ArtifactStore::at(&r.path.join(".bluee").join("artifacts"))?;
+                Ok((store, format!("/files/{}/.bluee/artifacts/", r.id)))
+            }
+            None => Ok((ArtifactStore::open(&self.cfg.data_dir)?, "/artifacts/".into())),
+        }
+    }
+
     /// A path as the call meant it. A sub-agent that names no `root` works in
     /// its own sub-folder, so its relative paths start there - the same place
     /// its commands run.
@@ -225,6 +240,7 @@ impl NativeTools {
                     "properties": {
                         "name":  { "type": "string", "description": "Short human name, e.g. 'Candle chart'." },
                         "topic": { "type": "string", "description": "Work profile it belongs to, e.g. 'trading'. Reuse the user's own word for it." },
+                        "root": { "type": "string", "description": "A granted folder id to keep it IN that project (its .bluee/artifacts) - use it when the work is about that repo. Omit for the playground." },
                         "kind":  { "type": "string", "enum": ["html","markdown","json","text"], "description": "Default html." },
                         "content": { "type": "string", "description": "The complete file contents." },
                         "description": { "type": "string", "description": "One line on what it does." }
@@ -239,7 +255,8 @@ impl NativeTools {
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "topic": { "type": "string", "description": "Optional filter. Omit to see everything and all topics." }
+                        "topic": { "type": "string", "description": "Optional filter. Omit to see everything and all topics." },
+                        "root": { "type": "string", "description": "A granted folder id to list that project's artifacts instead of the playground's." }
                     }
                 }),
             },
@@ -534,20 +551,23 @@ impl NativeTools {
                 let kind = args.get("kind").and_then(|v| v.as_str()).unwrap_or("html");
                 let desc = args.get("description").and_then(|v| v.as_str()).unwrap_or("");
 
-                let a = self.artifacts.put(name, topic, kind, content, desc)?;
+                let (store, prefix) = self.artifact_store(args)?;
+                let a = store.put(name, topic, kind, content, desc)?;
                 Ok(serde_json::json!({
                     "ok": true, "id": a.id, "name": a.name, "topic": a.topic,
-                    "url": format!("/artifacts/{}/", a.id),
-                    "note": "Visible in the Playground now. Tell the user it is there."
+                    "url": format!("{prefix}{}/{}", a.id, a.entry),
+                    "note": "Visible in the Playground now (select that folder to see a repo's \
+                             artifacts). Tell the user it is there."
                 }))
             }
 
             "list_artifacts" => {
                 let topic = args.get("topic").and_then(|v| v.as_str());
-                let list = self.artifacts.list(topic)?;
+                let (store, _) = self.artifact_store(args)?;
+                let list = store.list(topic)?;
                 Ok(serde_json::json!({
                     "count": list.len(),
-                    "topics": self.artifacts.topics()?
+                    "topics": store.topics()?
                         .into_iter().map(|(t,n)| serde_json::json!({"topic":t,"artifacts":n}))
                         .collect::<Vec<_>>(),
                     "artifacts": list.iter().map(|a| serde_json::json!({

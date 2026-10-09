@@ -196,6 +196,7 @@ pub async fn serve_on(cfg: Config, std_listener: std::net::TcpListener) -> Resul
         .route("/api/browser", get(browser_state).post(browser_act))
         .route("/artifacts/{id}/", get(artifact_root))
         .route("/artifacts/{id}/{*path}", get(artifact_file))
+        .route("/files/{root}/{*path}", get(root_file))
         .route("/api/chat", post(chat))
         .route("/ws/chat", get(chat_ws))
         .route("/api/persona", get(get_persona).post(save_persona))
@@ -1039,15 +1040,67 @@ async fn delete_skill(
 
 // ----------------------------------------------------------- playground
 
-async fn list_artifacts(State(s): State<Shared>) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
-    let store = ArtifactStore::open(&s.cfg.data_dir).map_err(fail)?;
+#[derive(Deserialize)]
+struct ArtifactsQuery {
+    #[serde(default)]
+    root: Option<String>,
+}
+
+/// The playground's artifacts, or - with `?root=` - a repo's own, from its
+/// `.bluee/artifacts`. Each carries the `url` it is served at.
+async fn list_artifacts(
+    State(s): State<Shared>,
+    Query(q): Query<ArtifactsQuery>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let (store, prefix) = match q.root.as_deref().filter(|r| *r != "playground" && !r.is_empty()) {
+        Some(id) => {
+            let r = crate::roots::get(&s.cfg, id).map_err(fail)?;
+            let dir = r.path.join(".bluee").join("artifacts");
+            if !dir.exists() {
+                // Do not create .bluee in a repo just because someone looked.
+                return Ok(Json(json!({ "topics": [], "artifacts": [], "root": id })));
+            }
+            (ArtifactStore::at(&dir).map_err(fail)?, format!("/files/{}/.bluee/artifacts/", r.id))
+        }
+        None => (ArtifactStore::open(&s.cfg.data_dir).map_err(fail)?, "/artifacts/".to_string()),
+    };
     let all = store.list(None).map_err(fail)?;
     let topics = store.topics().map_err(fail)?;
+    let arts: Vec<Value> = all
+        .iter()
+        .map(|a| {
+            let mut v = serde_json::to_value(a).unwrap_or(Value::Null);
+            v["url"] = json!(if prefix == "/artifacts/" {
+                format!("/artifacts/{}/", a.id)
+            } else {
+                format!("{prefix}{}/{}", a.id, a.entry)
+            });
+            v
+        })
+        .collect();
     Ok(Json(json!({
         "topics": topics.into_iter()
             .map(|(t, n)| json!({ "topic": t, "count": n })).collect::<Vec<_>>(),
-        "artifacts": all,
+        "artifacts": arts,
+        "root": q.root,
     })))
+}
+
+/// A file inside a granted folder, served so its HTML runs as a page - the
+/// way the Playground runs artifacts. Sandboxed by the server exactly like an
+/// artifact (opaque origin, no reach into bluee), so granting a folder never
+/// hands its pages bluee's API. Bounded by `roots::resolve`.
+async fn root_file(
+    State(s): State<Shared>,
+    axum::extract::Path((root, rel)): axum::extract::Path<(String, String)>,
+) -> Response {
+    match crate::roots::resolve(&s.cfg, &root, &rel) {
+        Ok((_, full)) => {
+            let full = if full.is_dir() { full.join("index.html") } else { full };
+            sandboxed_file(&full, &rel)
+        }
+        Err(e) => (StatusCode::NOT_FOUND, e.to_string()).into_response(),
+    }
 }
 
 async fn artifact_root(
@@ -1077,18 +1130,31 @@ async fn serve_artifact(s: &Shared, id: &str, rel: &str) -> Response {
         Ok(p) => p,
         Err(e) => return (StatusCode::BAD_REQUEST, e.to_string()).into_response(),
     };
-    let Ok(bytes) = std::fs::read(&path) else {
-        return (StatusCode::NOT_FOUND, format!("no such artifact file: {rel}")).into_response();
+    sandboxed_file(&path, rel)
+}
+
+/// Serve one file with its type and the sandbox policy. Shared by artifacts
+/// and by files in granted folders - one rule for every page the model or a
+/// repo supplies.
+fn sandboxed_file(path: &std::path::Path, rel: &str) -> Response {
+    let Ok(bytes) = std::fs::read(path) else {
+        return (StatusCode::NOT_FOUND, format!("no such file: {rel}")).into_response();
     };
     let mime = match path.extension().and_then(|e| e.to_str()).unwrap_or("") {
         "html" | "htm" => "text/html; charset=utf-8",
         "css" => "text/css; charset=utf-8",
-        "js" => "application/javascript; charset=utf-8",
-        "json" => "application/json; charset=utf-8",
-        "md" | "txt" => "text/plain; charset=utf-8",
+        "js" | "mjs" => "application/javascript; charset=utf-8",
+        "json" | "map" => "application/json; charset=utf-8",
+        "md" | "txt" | "csv" => "text/plain; charset=utf-8",
         "svg" => "image/svg+xml",
         "png" => "image/png",
         "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "webp" => "image/webp",
+        "ico" => "image/x-icon",
+        "woff2" => "font/woff2",
+        "woff" => "font/woff",
+        "wasm" => "application/wasm",
         _ => "application/octet-stream",
     };
     /* Sandboxed by the SERVER, not only by the iframe. Inside the Playground
