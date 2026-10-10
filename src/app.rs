@@ -105,6 +105,16 @@ pub fn run(cfg: Config) -> Result<()> {
             }
             Ok(())
         })
+        /* Closing the MAIN window quits bluee, pop-outs included. Before, any
+           pop-out still open somewhere (an agent's window, a tile on another
+           monitor) kept the process alive with no visible sign - so "closed
+           it" left harness.exe running, the next rebuild failed with "Access
+           is denied", and a relaunch started a second copy beside it. */
+        .on_window_event(|window, event| {
+            if window.label() == "main" && matches!(event, tauri::WindowEvent::Destroyed) {
+                window.app_handle().exit(0);
+            }
+        })
         .run(tauri::generate_context!())
         .context("running the desktop window")?;
 
