@@ -158,6 +158,7 @@ pub async fn serve_on(cfg: Config, std_listener: std::net::TcpListener) -> Resul
         .route("/vendor/openui/openui-bundle.min.js", get(|| asset_bytes("application/javascript; charset=utf-8", include_bytes!("../dash/vendor/openui/openui-bundle.min.js"))))
         .route("/vendor/openui/openui-styles.css", get(|| asset_bytes("text/css; charset=utf-8", include_bytes!("../dash/vendor/openui/openui-styles.css"))))
         .route("/canvas", get(canvas_page))
+        .route("/api/ui", get(ui_get).post(ui_set))
         .route("/api/stats", get(stats))
         .route("/api/sessions", get(sessions))
         .route("/api/events", get(events))
@@ -269,6 +270,44 @@ async fn asset_bytes(mime: &'static str, body: &'static [u8]) -> Response {
         body,
     )
         .into_response()
+}
+
+/// Shell preferences - zoom, whether the rail and the top bar are shown - in
+/// `data/ui.json`. Kept by the server, not in the page's localStorage: the
+/// desktop app serves on a new port every launch, so the page's origin (and
+/// with it localStorage) changes every time and anything saved there is lost.
+async fn ui_get(State(s): State<Shared>) -> Json<Value> {
+    let mut v = std::fs::read_to_string(s.cfg.data_dir.join("ui.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(t.trim_start_matches('\u{feff}')).ok())
+        .unwrap_or_else(|| json!({}));
+    v["native_zoom"] = json!(crate::app::handle().is_some());
+    Json(v)
+}
+
+async fn ui_set(
+    State(s): State<Shared>,
+    Json(b): Json<Value>,
+) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
+    let f = s.cfg.data_dir.join("ui.json");
+    let mut v = std::fs::read_to_string(&f)
+        .ok()
+        .and_then(|t| serde_json::from_str::<Value>(t.trim_start_matches('\u{feff}')).ok())
+        .unwrap_or_else(|| json!({}));
+    for k in ["zoom", "rail", "topbar"] {
+        if let Some(x) = b.get(k) {
+            v[k] = x.clone();
+        }
+    }
+    let mut native = false;
+    if let Some(z) = b.get("zoom").and_then(|z| z.as_f64()) {
+        let z = z.clamp(0.5, 2.5);
+        v["zoom"] = json!(z);
+        native = crate::app::set_zoom_all(z);
+    }
+    std::fs::write(&f, serde_json::to_string_pretty(&v).unwrap_or_default()).map_err(fail)?;
+    v["native_zoom"] = json!(native || crate::app::handle().is_some());
+    Ok(Json(v))
 }
 
 /// The canvas host page. Sandboxed exactly like an artifact: an opaque origin,

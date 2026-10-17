@@ -151,9 +151,10 @@ input[type=checkbox]:disabled{opacity:.4;cursor:not-allowed}
    `<length>` because solo mode sets --side to 100%. */
 @property --side{syntax:'<length-percentage>';inherits:true;initial-value:320px}
 @property --term{syntax:'<length-percentage>';inherits:true;initial-value:0px}
+@property --rail{syntax:'<length>';inherits:true;initial-value:56px}
 
 #app{display:grid;height:100vh;
-  grid-template-columns:56px 1fr var(--side,320px);
+  grid-template-columns:var(--rail,56px) 1fr var(--side,320px);
   grid-template-rows:1fr var(--term,0px);
   grid-template-areas:"rail main side" "rail term term";
   /* Opening a panel or the shell was the biggest snap left in the app: the
@@ -167,7 +168,13 @@ input[type=checkbox]:disabled{opacity:.4;cursor:not-allowed}
      --d-slow because this is layout travelling a long way, not a colour swap;
      the scale in :root exists so that judgement is made once. */
   transition:--side var(--d-slow) var(--e-out),
-             --term var(--d-slow) var(--e-out)}
+             --term var(--d-slow) var(--e-out),
+             --rail var(--d-slow) var(--e-out)}
+/* The rail slides away (Ctrl+B): its track animates to 0, overflow hides it. */
+#app.no-rail{--rail:0px}
+#rail{overflow:hidden;min-width:0}
+/* A box cannot be narrower than its own border: the hidden rail measured 1px. */
+#app.no-rail #rail{border-right-width:0}
 /* A pop-out is BORN at its final size. Animating it means the window paints
    an empty column first and slides its own content in, which reads as a
    loading failure - the exact thing that was wrong with pop-outs already. */
@@ -205,7 +212,7 @@ input[type=checkbox]:disabled{opacity:.4;cursor:not-allowed}
      they opened as empty black rectangles. Measured in the real WebView2
      window: `#rightcol` came back 0x0, `display:none`, with no console error
      and the page otherwise fully loaded. */
-  #app:not(.solo){grid-template-columns:56px 1fr 0!important}
+  #app:not(.solo){grid-template-columns:var(--rail,56px) 1fr 0!important}
   #app:not(.solo) #rightcol{display:none}
 }
 #app.no-term{--term:0px}
@@ -240,6 +247,34 @@ input[type=checkbox]:disabled{opacity:.4;cursor:not-allowed}
   border-bottom:1px solid var(--line);background:var(--panel);flex:none}
 #topbar .name{font-weight:600}
 #topbar .meta{color:var(--faint);font-size:var(--t-xs);font-family:var(--mono)}
+/* A plainer bar: the model and session id are in the title's tooltip, not on
+   the bar; vision is one quiet button. The bar can hide (Ctrl+Shift+B). */
+#topbar{transition:height var(--d-slow) var(--e-out),border-color var(--d-slow) var(--e-out)}
+#topbar #tmeta{display:none}
+#app.no-top #topbar{height:0;border-bottom-width:0;overflow:hidden;padding-top:0;padding-bottom:0}
+.visw{position:relative}
+.visbtn{display:inline-flex;align-items:center;gap:6px;white-space:nowrap}
+.visbtn .vd{width:7px;height:7px;border-radius:50%;background:var(--faint)}
+.visbtn.passive .vd{background:var(--ok,#4caf7a)}
+.visbtn.active .vd{background:var(--accent)}
+.visw #vis{display:none;position:absolute;right:0;top:calc(100% + 6px);z-index:60;
+  box-shadow:0 8px 24px rgba(0,0,0,.4)}
+.visw.open #vis{display:flex}
+.edgetab{position:fixed;z-index:70;display:none;align-items:center;justify-content:center;
+  border:1px solid var(--line);background:var(--panel);color:var(--faint);cursor:pointer;
+  transition:color var(--d-fast),border-color var(--d-fast),width var(--d-fast),height var(--d-fast)}
+.edgetab:hover{color:var(--accent);border-color:var(--accent)}
+#railtab{left:0;top:50%;transform:translateY(-50%);width:14px;height:48px;border-left:0;border-radius:0 10px 10px 0}
+#railtab:hover{width:20px}
+#toptab{top:0;left:50%;transform:translateX(-50%);width:48px;height:14px;border-top:0;border-radius:0 0 10px 10px}
+#toptab:hover{height:20px}
+#app.no-rail #railtab{display:flex}
+#app.no-top #toptab{display:flex}
+#app.solo .edgetab{display:none!important}
+#zoomtoast{position:fixed;left:50%;top:14px;transform:translateX(-50%);z-index:400;padding:6px 14px;
+  border-radius:999px;background:var(--panel);border:1px solid var(--line);font-size:13px;
+  font-family:var(--mono);opacity:0;pointer-events:none;transition:opacity var(--d-fast)}
+#zoomtoast.on{opacity:1}
 #ttitle{font-size:var(--t-sm);color:var(--dim);max-width:280px;overflow:hidden;
   white-space:nowrap;text-overflow:ellipsis;cursor:text;padding:3px 7px;
   border-radius:var(--r1);border:1px solid transparent}
@@ -1706,7 +1741,12 @@ body.dragging{cursor:grabbing;user-select:none}
     <button class="rb" data-toggle="agents" data-tip="Sub-agents"><svg class="i"><use href="#i-spark"/></svg></button>
     <div class="rail-sp"></div>
     <div class="dot" id="live" title="server"></div>
+    <button class="rb" id="railhide" data-tip="Hide sidebar (Ctrl+B)"><svg class="i"><use href="#i-chev-l"/></svg></button>
   </div>
+  <!-- Edge tabs that bring the rail / top bar back when they are hidden. -->
+  <button id="railtab" class="edgetab" title="Show sidebar (Ctrl+B)"><svg class="i sm"><use href="#i-chev-r"/></svg></button>
+  <button id="toptab" class="edgetab" title="Show top bar (Ctrl+Shift+B)"><svg class="i sm"><use href="#i-chev-d"/></svg></button>
+  <div id="zoomtoast"></div>
 
   <div id="main">
     <div id="topbar">
@@ -1717,18 +1757,25 @@ body.dragging{cursor:grabbing;user-select:none}
       <div class="spacer"></div>
       <!-- Shown only when THIS session has canvases (§ canvas). -->
       <button class="ghost cvbtn" id="cvbtn" style="display:none" title="Canvases made in this session"></button>
-      <div id="vis" title="Screen vision (§6)">
-        <button data-v="off">off</button>
-        <button data-v="passive">passive</button>
-        <button data-v="active">active</button>
+      <!-- Screen vision folds into one quiet button; the three modes open
+           under it. A plain bar, like Claude Code's, rather than a row of
+           controls you rarely touch. -->
+      <div class="visw">
+        <button class="ghost visbtn" id="visbtn" title="Screen vision (§6)"></button>
+        <div id="vis" title="Screen vision (§6)">
+          <button data-v="off">off</button>
+          <button data-v="passive">passive</button>
+          <button data-v="active">active</button>
+        </div>
       </div>
       <div class="ctx" id="ctxmeter" style="display:none"></div>
-      <button class="ghost" id="newchat">new chat</button>
+      <button class="ibtn" id="newchat" title="New chat"><svg class="i"><use href="#i-plus"/></svg></button>
       <!-- `.ibtn`, not `.ghost`. It is an icon button, and it was the only
            icon-only `.ghost` in the app: a text button's 5px/10px padding
            around a 16px glyph, so it sat wider and at a different corner from
            every other icon button on screen. Same §38 mistake, new place. -->
       <button class="ibtn on" data-toggle="side" title="Log &amp; tasks"><svg class="i"><use href="#i-panel"/></svg></button>
+      <button class="ibtn bare" id="tophide" title="Hide the top bar (Ctrl+Shift+B)"><svg class="i sm" style="transform:rotate(180deg)"><use href="#i-chev-d"/></svg></button>
     </div>
 
     <div class="view on" id="v-chat">
@@ -6901,6 +6948,86 @@ async function agSend(){
   loadAgents(); agOpen();
 }
 
+
+/* ---------- a calmer shell: hide the rail / top bar, zoom everything ----------
+   Ctrl+B hides the rail, Ctrl+Shift+B the top bar; an edge tab brings either
+   back. Ctrl/Cmd + = / - / 0 (and Ctrl + wheel) zoom the whole UI. All three
+   are kept by the server in data/ui.json, not localStorage: the desktop app
+   gets a new port - so a new origin and an empty localStorage - every launch.
+   In the desktop app zoom is the webview's own (every window together); in a
+   plain browser the page falls back to CSS zoom. */
+let uiPrefs = { zoom: 1, rail: true, topbar: true }, nativeZoom = false;
+function uiSave(patch){
+  Object.assign(uiPrefs, patch);
+  return api('/api/ui', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(patch) }).then(r => { if(r && 'native_zoom' in r) nativeZoom = !!r.native_zoom; return r; }).catch(() => null);
+}
+function setRail(show, save){
+  app.classList.toggle('no-rail', !show);
+  if(save) uiSave({ rail: show });
+  // Anything sized from its host redraws after the slide (§45).
+  setTimeout(() => { try { if($('#v-graph').classList.contains('on')) drawGraph(); fit && fit.fit(); } catch(_) {} }, 320);
+}
+function setTop(show, save){
+  app.classList.toggle('no-top', !show);
+  if(save) uiSave({ topbar: show });
+}
+let zoomT = null;
+function applyZoom(z, save){
+  z = Math.round(Math.min(2.5, Math.max(0.5, z)) * 10) / 10;
+  uiPrefs.zoom = z;
+  if(!nativeZoom) document.documentElement.style.zoom = z === 1 ? '' : String(z);
+  const t = $('#zoomtoast'); t.textContent = Math.round(z * 100) + '%'; t.classList.add('on');
+  clearTimeout(zoomT); zoomT = setTimeout(() => t.classList.remove('on'), 900);
+  if(save) uiSave({ zoom: z });
+}
+$('#railhide').onclick = () => setRail(false, true);
+$('#railtab').onclick = () => setRail(true, true);
+$('#tophide').onclick = () => setTop(false, true);
+$('#toptab').onclick = () => setTop(true, true);
+addEventListener('keydown', e => {
+  const mod = e.ctrlKey || e.metaKey;
+  if(!mod) return;
+  const k = e.key;
+  if(k === '=' || k === '+'){ e.preventDefault(); applyZoom(uiPrefs.zoom + 0.1, true); }
+  else if(k === '-' || k === '_'){ e.preventDefault(); applyZoom(uiPrefs.zoom - 0.1, true); }
+  else if(k === '0'){ e.preventDefault(); applyZoom(1, true); }
+  else if(!soloView && (k === 'b' || k === 'B') && !e.altKey){
+    e.preventDefault();
+    if(e.shiftKey) setTop(app.classList.contains('no-top'), true);
+    else setRail(app.classList.contains('no-rail'), true);
+  }
+});
+addEventListener('wheel', e => {
+  if(!(e.ctrlKey || e.metaKey)) return;
+  e.preventDefault();
+  applyZoom(uiPrefs.zoom + (e.deltaY < 0 ? 0.1 : -0.1), true);
+}, { passive: false });
+api('/api/ui').then(p => {
+  if(!p || p.failed) return;
+  nativeZoom = !!p.native_zoom;
+  uiPrefs = { zoom: +p.zoom || 1, rail: p.rail !== false, topbar: p.topbar !== false };
+  if(!soloView){ setRail(uiPrefs.rail, false); setTop(uiPrefs.topbar, false); }
+  if(!nativeZoom && uiPrefs.zoom !== 1) document.documentElement.style.zoom = String(uiPrefs.zoom);
+}).catch(() => {});
+
+// Screen vision as one quiet button; the three modes open under it.
+(function(){
+  const w = $('.visw'), b = $('#visbtn');
+  const paint = () => {
+    const on = $('#vis button.on'); const m = on ? on.dataset.v : 'passive';
+    b.className = 'ghost visbtn ' + m;
+    b.innerHTML = '<span class="vd"></span>vision: ' + m;
+  };
+  b.onclick = e => { e.stopPropagation(); w.classList.toggle('open'); };
+  $('#vis').addEventListener('click', () => setTimeout(() => { w.classList.remove('open'); paint(); }, 0));
+  document.addEventListener('click', e => { if(!w.contains(e.target)) w.classList.remove('open'); });
+  new MutationObserver(paint).observe($('#vis'), { subtree: true, attributes: true, attributeFilter: ['class'] });
+  paint();
+})();
+// The model and session id moved off the bar into the title's tooltip.
+new MutationObserver(() => { $('#ttitle').title = 'Click to rename this session\n' + $('#tmeta').textContent; })
+  .observe($('#tmeta'), { childList: true, characterData: true, subtree: true });
 
 /* ---------- canvases (OpenUI, § canvas) ----------
    With the Visual switch on, a reply may carry ONE ```openui fenced block. It

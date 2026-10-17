@@ -26,6 +26,31 @@ pub fn handle() -> Option<&'static tauri::AppHandle> {
     APP.get()
 }
 
+/// The whole-UI zoom (Ctrl/Cmd + / - / 0), as f64 bits. One value for every
+/// window, so a pop-out opens at the same scale as the window it came from.
+static ZOOM: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0x3FF0_0000_0000_0000); // 1.0
+
+pub fn zoom() -> f64 {
+    f64::from_bits(ZOOM.load(std::sync::atomic::Ordering::Relaxed))
+}
+
+/// Set the zoom on every open window - the webview's own zoom, exactly what a
+/// browser's Ctrl + does, so layout and pointer maths stay consistent.
+/// Returns false when not running as the desktop app (the page then scales
+/// itself with CSS).
+pub fn set_zoom_all(scale: f64) -> bool {
+    let scale = scale.clamp(0.5, 2.5);
+    ZOOM.store(scale.to_bits(), std::sync::atomic::Ordering::Relaxed);
+    let Some(app) = handle() else { return false };
+    let app2 = app.clone();
+    let _ = app.run_on_main_thread(move || {
+        for (_, w) in app2.webview_windows() {
+            let _ = w.set_zoom(scale);
+        }
+    });
+    true
+}
+
 /// Open a real OS window showing one view of the dashboard.
 ///
 /// Built on the main thread because window creation must happen there; calling
@@ -53,7 +78,10 @@ pub fn open_view(url: String, label: String, title: String, w: f64, h: f64) -> R
                     .map_err(|e| format!("{e}"))
             });
         match built {
-            Ok(win) => { let _ = win.set_focus(); }
+            Ok(win) => {
+                let _ = win.set_zoom(zoom());
+                let _ = win.set_focus();
+            }
             Err(e) => eprintln!("[bluee] could not open window `{label}`: {e}"),
         }
     })
@@ -73,6 +101,14 @@ pub fn run(cfg: Config) -> Result<()> {
         .context("setting non-blocking")?;
     let port = listener.local_addr()?.port();
     let url = format!("http://127.0.0.1:{port}");
+    // The zoom you left it at - saved by the UI in data/ui.json.
+    let saved_zoom = std::fs::read_to_string(cfg.data_dir.join("ui.json"))
+        .ok()
+        .and_then(|t| serde_json::from_str::<serde_json::Value>(t.trim_start_matches('\u{feff}')).ok())
+        .and_then(|v| v.get("zoom").and_then(|z| z.as_f64()))
+        .unwrap_or(1.0)
+        .clamp(0.5, 2.5);
+    ZOOM.store(saved_zoom.to_bits(), std::sync::atomic::Ordering::Relaxed);
     println!("bluee: serving on {url} (loopback only)");
 
     // The server runs on its own tokio runtime in a background thread; Tauri
@@ -101,6 +137,7 @@ pub fn run(cfg: Config) -> Result<()> {
                 .min_inner_size(900.0, 600.0)
                 .build()?;
             if let Some(w) = app.get_webview_window("main") {
+                let _ = w.set_zoom(zoom());
                 let _ = w.set_focus();
             }
             Ok(())

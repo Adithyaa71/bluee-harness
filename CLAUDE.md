@@ -2288,6 +2288,40 @@ Checks: `uiplaybugs` 8, `livewrite` 3, `uirepoview` 11, `uiplan` 9, `uiboard`
 17, plus `uisubwin`/`uiagents` re-run as regressions (two stale expectations
 updated).
 
+**64. Visual canvases (OpenUI) and a calmer shell** (`dev/plan-canvas.md`).
+
+*Canvases.* `@openuidev/browser-bundle` 0.2.1 is vendored under
+`dash/vendor/openui` (3.5 MB, offline) with the component kit's own prompt
+generated from it (`library.prompt()`, 26,674 chars, ~6.7k tokens - paid per
+request only while Visual is on). The model writes ONE ```openui block inside
+a normal reply (the wrapper overrides the kit prompt's "entire response must
+be openui-lang"). It runs in `/canvas`, served with a sandbox CSP like
+artifacts, and talks to the page only by postMessage; a pop-out's clicks come
+home over a BroadcastChannel. Per session by construction: canvases are parsed
+out of that session's own messages, nothing stored elsewhere. The switch is
+sent with each message (chat frame `visual`, agent `say` body), remembered per
+session id.
+
+*Found by measuring:* `#v-chat` keeps an identity transform from its entry
+animation, which trapped the "full screen" pane at 1048x759 in a 1424x805
+window - dropped while full. OpenUI follows the system theme and needs its own
+background (light text on white was unreadable). `onError` fires with an EMPTY
+list when all is well. `@ToAssistant` arrives as `continue_conversation` with
+the text in `humanFriendlyMessage`, not `params`. The canvas is an
+out-of-process frame, so checks attach to it as its own CDP target.
+
+*Shell.* Rail (`--rail`, registered like `--side`) and top bar slide away
+(Ctrl+B / Ctrl+Shift+B, edge tabs back); Ctrl/Cmd + = - 0 zoom. **These live in
+`data/ui.json` via `/api/ui`, not localStorage** - the desktop app binds a new
+port every launch, so its origin and localStorage change every time (this also
+means every earlier localStorage-kept setting resets per launch: worth moving
+the rest over). Desktop zoom is the webview's own `set_zoom`, applied to every
+window and to new pop-outs; a plain browser falls back to CSS zoom. A hidden
+box still measured 1px - its own border.
+
+Checks: `dev/uicanvas.mjs` 28 (+1 live turn: the model drew a chart with a
+button), `dev/uishell.mjs` 18; `uiagents`, `uiclose` re-run clean.
+
 ---
 
 ### 4h. Requested next, sized honestly (not yet built)

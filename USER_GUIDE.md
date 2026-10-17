@@ -684,6 +684,45 @@ touching each other's tabs.
 moment (the tool it is in, or *needs you*), what it has cost, and when it will
 sleep or end. Double-click a card to open its window.
 
+## Visual answers: live canvases
+
+Press **Visual** next to the message box (or type `/visual`). While it's on,
+bluee can answer with a **live canvas**: charts, tables, cards, lists, forms,
+buttons. A canvas shows up as a card in its reply and opens in a pane beside
+the chat:
+- **pop out** gives it its own window (another monitor);
+- **full screen** fills the whole window (Esc to leave);
+- **close** puts it away; click the card to open it again.
+
+Buttons and forms in a canvas talk back: pressing one sends bluee the next
+message, as if you'd typed it.
+
+**Per session.** The switch is remembered for each conversation (a new chat
+starts with it off), and canvases belong to the conversation that made them.
+A session with canvases shows **Canvas (N)** in the top bar to browse them;
+a session without any shows nothing. Agent windows have the same switch, pane
+and button.
+
+**Cost.** While Visual is on, each request carries the canvas kit's
+instructions, about **6,700 tokens** (roughly a tenth of a cent on GLM-5.3-Flash).
+A message where bluee uses tools makes several requests. Leave it off when
+you don't need pictures.
+
+Canvases are drawn by [OpenUI](https://github.com/thesysdev/openui), bundled
+into bluee so it works offline, and run sandboxed: a canvas can't touch
+bluee's data, memory or terminal.
+
+## A quieter window
+
+- **Ctrl+B** hides the left sidebar; **Ctrl+Shift+B** hides the top bar. A small
+  tab at the edge brings either back.
+- **Ctrl/Cmd + =** and **−** zoom the whole interface, **Ctrl/Cmd + 0** resets
+  (Ctrl + mouse wheel works too). In the desktop app every window zooms
+  together, pop-outs included.
+- All three are remembered between launches.
+- The top bar is plainer: the model and session id are in the title's tooltip,
+  screen vision is one button, and **+** starts a new chat.
+
 ## Composer: `/` and `@`
 
 In the main chat and in every agent window:
