@@ -1225,6 +1225,46 @@ input[type=checkbox]:disabled{opacity:.4;cursor:not-allowed}
 .cmenu .crow.brw.taken{opacity:.45;cursor:not-allowed}
 .cmenu .crow.brw .c{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:240px}
 .cmenu .crow.tpl .c{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:220px}
+/* ---------- canvases (§ canvas) ---------- */
+.cvcard{display:flex;align-items:center;gap:12px;margin:10px 0;padding:10px 10px 10px 12px;max-width:440px;
+  border:1px solid var(--line);border-radius:var(--r3);background:var(--panel);cursor:pointer;
+  transition:border-color var(--d-fast,.15s),background var(--d-fast,.15s)}
+.cvcard:hover,.cvcard.on{border-color:var(--accent)}
+.cvcard .cvi{width:34px;height:34px;flex:none;border-radius:9px;display:flex;align-items:center;justify-content:center;
+  background:color-mix(in srgb,var(--accent) 15%,transparent);color:var(--accent)}
+.cvcard .cvtx{display:flex;flex-direction:column;min-width:0;flex:1}
+.cvcard .cvtx b{font-size:13.5px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.cvcard .cvtx span{font-size:12px;color:var(--faint)}
+#v-chat{--cvw:46%}
+#cvpane{display:none;position:absolute;top:0;right:0;bottom:0;width:var(--cvw);z-index:6;
+  flex-direction:column;background:var(--panel);border-left:1px solid var(--line)}
+#cvpane.on{display:flex}
+#v-chat.with-canvas>#stream,#v-chat.with-canvas>#composer{margin-right:var(--cvw)}
+#v-chat.with-canvas>#jump{left:calc((100% - var(--cvw)) / 2)}
+#cvpane .cvhd{flex:none;height:40px;display:flex;align-items:center;gap:4px;padding:0 8px 0 14px;
+  border-bottom:1px solid var(--line)}
+#cvpane .cvt{font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+#cvpane .cvbody{flex:1;min-height:0;position:relative}
+#cvpane iframe{position:absolute;inset:0;width:100%;height:100%;border:0;background:transparent}
+#cvpane .cvgrip{position:absolute;left:-4px;top:0;bottom:0;width:8px;cursor:ew-resize}
+#cvpane .cvgrip:hover{background:var(--accent-dim,transparent)}
+/* Full screen covers the whole window, chrome and all; Esc leaves. */
+#cvpane.full{position:fixed;inset:0;width:auto;z-index:300;border:0}
+/* #v-chat keeps an identity transform from its page-entry animation, and any
+   transform on an ancestor makes a fixed child cover only that ancestor - the
+   "full screen" pane measured 1048x759 in a 1424x805 window. Dropped while full. */
+#v-chat.cv-full{transform:none!important;animation:none!important}
+#cvpane.full .cvgrip{display:none}
+/* A popped-out canvas window is just the canvas. */
+#app.solo.only-canvas #stream,#app.solo.only-canvas #composer,#app.solo.only-canvas #jump{display:none!important}
+#app.solo.only-canvas #cvpane{width:100%;border:0}
+#app.solo.only-canvas #cvpop,#app.solo.only-canvas #cvclose,#app.solo.only-canvas .cvgrip{display:none}
+/* The Visual switch, by the composer: a pill that reads as ON when lit. */
+.cb.vistog{width:auto;padding:0 10px;display:inline-flex;align-items:center;gap:6px;font-size:12.5px;border-radius:999px}
+.cb.vistog.on{background:color-mix(in srgb,var(--accent) 18%,transparent);color:var(--accent);
+  box-shadow:inset 0 0 0 1px var(--accent)}
+.cvbtn{display:inline-flex;align-items:center;gap:6px;white-space:nowrap;flex:none}
+
 /* ---------- workspace board ---------- */
 .bdtools{display:flex;align-items:center;gap:var(--s3);margin-bottom:10px}
 .bdhint{font-size:12px;color:var(--faint)}
@@ -1675,6 +1715,8 @@ body.dragging{cursor:grabbing;user-select:none}
       <input id="trename" spellcheck="false" style="display:none">
       <span class="meta" id="tmeta">connecting…</span>
       <div class="spacer"></div>
+      <!-- Shown only when THIS session has canvases (§ canvas). -->
+      <button class="ghost cvbtn" id="cvbtn" style="display:none" title="Canvases made in this session"></button>
       <div id="vis" title="Screen vision (§6)">
         <button data-v="off">off</button>
         <button data-v="passive">passive</button>
@@ -1704,6 +1746,18 @@ body.dragging{cursor:grabbing;user-select:none}
       <button id="jump" title="Jump to the latest message">
         <svg class="i sm"><use href="#i-chev-d"/></svg><span>latest</span>
       </button>
+      <!-- The canvas pane (§ canvas): a canvas opens here beside the chat,
+           like a preview pane. Pop out, full screen, close. -->
+      <div id="cvpane">
+        <div class="cvhd">
+          <span class="cvt"></span><span class="spacer"></span>
+          <button class="ibtn bare" id="cvpop" title="Open in its own window"><svg class="i"><use href="#i-popout"/></svg></button>
+          <button class="ibtn bare" id="cvfull" title="Full screen (Esc to leave)"><svg class="i"><use href="#i-max"/></svg></button>
+          <button class="ibtn bare" id="cvclose" title="Close the canvas"><svg class="i"><use href="#i-close"/></svg></button>
+        </div>
+        <div class="cvbody"><iframe id="cvframe" sandbox="allow-scripts allow-forms allow-popups allow-modals"></iframe></div>
+        <div class="cvgrip" title="Drag to resize"></div>
+      </div>
       <div id="composer">
         <div class="cwrap">
           <div id="slash"></div>
@@ -1714,6 +1768,7 @@ body.dragging{cursor:grabbing;user-select:none}
             <button class="cb" id="plus" title="Add files, folders, connectors, skills">+</button>
             <button class="cb" id="attach" title="Attach a file"><svg class="i"><use href="#i-clip"/></svg></button>
             <button class="cb" id="mic" title="Voice input"><svg class="i"><use href="#i-mic"/></svg></button>
+            <button class="cb vistog" id="vistog" title="Visual answers: let bluee answer with live charts, tables and forms (adds ~6.7k tokens per request while on)"><svg class="i"><use href="#i-grid"/></svg><span>Visual</span></button>
             <span id="micnote" class="micnote"></span>
             <input type="file" id="file" hidden multiple>
             <button id="send" title="Send">&uarr;</button>
@@ -2051,6 +2106,18 @@ function bootSolo(){
       $('#aframe').src='/artifacts/'+encodeURIComponent(soloId)+'/';
       $('#aname').textContent=soloId;
     },80);
+  } else if(soloView==='canvas' && soloId){
+    // One canvas in its own window: rebuilt from its session's log, shown
+    // full-window. Its buttons reach that session through cvChan.
+    show('#v-chat');
+    setTimeout(async()=>{
+      const [sess, n] = soloId.split('~');
+      const d = await api('/api/events?session='+encodeURIComponent(sess)).catch(()=>({}));
+      canvasReset();
+      for(const e of (d.events||[])) if(e.kind==='assistant_message' && e.text) replyHtml(e.text, false);
+      if(canvases[+n]){ openCanvas(+n); document.title='bluee · '+canvases[+n].title; }
+      else $('#v-chat').insertAdjacentHTML('beforeend','<div class="empty"><p>That canvas is no longer in its session.</p></div>');
+    },60);
   } else if(soloView==='plan' && soloId){
     // A project's progress in its own window - refreshes itself, never asks
     // the model anything.
@@ -2317,6 +2384,15 @@ async function send(){
   // Chips alone are a complete instruction ("run this skill").
   if(!text && picks.length) text='Go ahead with what I picked.';
   if(!text) return;
+  // `/visual` flips the Visual switch here, in this window - it is about this
+  // session's display, so it never reaches the model (and works in agent
+  // windows, which have no slash commands of their own).
+  if(/^\/visual(\s+(on|off))?$/i.test(text)){
+    const want=(text.split(/\s+/)[1]||'').toLowerCase();
+    if(!want || (want==='on')!==visualOn) visualToggle();
+    ta.value=''; ta.style.height='auto'; syncSend(); $('#slash').style.display='none';
+    return;
+  }
   const pk=picks.length ? picksPayload() : null, pkHtml=picksHtml();
   picks=[]; renderPicks();
   // A still-uploading attachment has no path yet and a failed one never will -
@@ -2339,7 +2415,9 @@ async function send(){
   liveBody=null; liveHtml='';
   if(agentMode){ agentSay(full, pk); return; }
   const sock=chatSocket();
-  const fire=()=>sock.send(JSON.stringify(pk ? {message:full, picks:pk} : {message:full}));
+  const frame={message:full, visual:visualOn};
+  if(pk) frame.picks=pk;
+  const fire=()=>sock.send(JSON.stringify(frame));
   if(sock.readyState===1) fire(); else sock.addEventListener('open',fire,{once:true});
 }
 
@@ -2360,7 +2438,7 @@ function chatSocket(){
       thinking(false);
       if(pgMirror){ pgMirror=false; $('#pgsend').disabled=false;
                     pgLine('<span style="color:var(--faint)">done</span>'); loadPlayground(); loadFiles(); }
-      if(e.session){ currentSession=e.session; $('#tmeta').textContent=e.model+' · '+e.session;
+      if(e.session){ currentSession=e.session; if(visualOn) visualSave(); $('#tmeta').textContent=e.model+' · '+e.session;
                      showTitle(e.title); }
       if(!liveHtml && liveBody) liveBody.innerHTML='<p style="color:var(--faint)">(no reply)</p>';
       if($('#sp-log').classList.contains('on')) loadLog();
@@ -2394,8 +2472,10 @@ function renderEvent(e){
       liveHtml+='<div class="toolout"><b>failed</b>'+esc(JSON.stringify(e.result))+'</div>';
     }
     else if(e.type==='reply'){
-      liveHtml+=md(e.text);
-      speakReply(e.text);
+      // A reply may carry a canvas (§ canvas): it becomes a card here and
+      // opens in the canvas pane as it lands.
+      liveHtml+=replyHtml(e.text, true);
+      speakReply(e.text.replace(/```openui[\s\S]*?```/g, ''));
       // Record the source on the message so Copy yields the text, not the
       // rendered markup.
       const host=liveBody&&liveBody.closest('.msg');
@@ -2801,6 +2881,7 @@ const SLASH=[
   ['/reduce','rebuild general memory from the event log'],
   ['/skills','list your saved skills'],
   ['/help','list commands'],
+  ['/visual','visual answers on/off for this session (live charts, tables, forms)'],
 ];
 /* ---------- composer pickers: `/` and `@` ----------
    `/` - slash commands (at the start of the main chat only - they are about the
@@ -3072,11 +3153,15 @@ async function loadSessions(){
 async function renderTranscript(id){
   const d=await api('/api/events?session='+encodeURIComponent(id)).catch(()=>({}));
   stream.innerHTML='';
+  // Canvases are per session: rebuilt from this session's log, nothing else.
+  // The Visual switch comes back with the session too.
+  canvasReset();
+  if(soloView!=='canvas') visualLoad(id);
   for(const e of (d.events||[])){
     if(e.kind==='user_message' && e.text.startsWith(PARENT_PREFIX))
       fromBluee(addMsg('me',FROM_BLUEE+md(e.text.slice(PARENT_PREFIX.length)),e.text,e.ts));
     else if(e.kind==='user_message') addMsg('me',md(e.text),e.text,e.ts);
-    else if(e.kind==='assistant_message'&&e.text&&e.text.trim()) addMsg('ai',md(e.text),e.text,e.ts);
+    else if(e.kind==='assistant_message'&&e.text&&e.text.trim()) addMsg('ai',replyHtml(e.text,false),e.text,e.ts);
     /* A blank reply logged before the harness learned to explain them
        (session 20260829-101419-58c030b6). Say what it was rather than draw an
        empty bubble - which is what it looked like at the time, too. */
@@ -6817,6 +6902,169 @@ async function agSend(){
 }
 
 
+/* ---------- canvases (OpenUI, § canvas) ----------
+   With the Visual switch on, a reply may carry ONE ```openui fenced block. It
+   becomes a card in the message and opens in the canvas pane beside the chat
+   (pop out to its own window, full screen, close). Canvases are PER SESSION:
+   they are read out of that session's own messages, so a new session has none
+   (and no Canvas button), and reopening one that made some brings them back.
+   The canvas itself runs in /canvas - sandboxed, opaque origin - and talks to
+   this page only by postMessage; a button in it asks bluee the next thing. */
+let canvases = [], cvOpen = -1, cvReady = false, cvPending = null, visualOn = false;
+const cvChan = (typeof BroadcastChannel !== 'undefined') ? new BroadcastChannel('bluee-canvas') : null;
+const mySession = () => agentMode ? (agInfo && agInfo.session) || null : currentSession;
+
+function canvasReset(){ canvases = []; closeCanvas(); cvBtnSync(); }
+
+function cvTitle(code){
+  const m = code.match(/(?:CardHeader|Header|Title|Heading)\(\s*"([^"]{1,80})"/) || code.match(/"([^"]{3,60})"/);
+  return m ? m[1] : 'Canvas';
+}
+
+function replyHtml(text, live){
+  const re = /```openui[^\n]*\n([\s\S]*?)```/g;
+  let out = '', last = 0, m, newest = -1;
+  while((m = re.exec(text))){
+    const before = text.slice(last, m.index);
+    if(before.trim()) out += md(before);
+    const code = m[1].trim(), n = canvases.length;
+    canvases.push({ code, title: cvTitle(code) });
+    out += '<div class="cvcard" data-cv="' + n + '" role="button" tabindex="0">' +
+      '<span class="cvi">' + ico('grid') + '</span>' +
+      '<span class="cvtx"><b>' + esc(canvases[n].title) + '</b><span>Canvas · click to open</span></span>' +
+      '<button class="ibtn bare" data-cvpop="' + n + '" title="Open in its own window">' + ico('popout','sm') + '</button></div>';
+    last = re.lastIndex; newest = n;
+  }
+  const rest = text.slice(last);
+  if(rest.trim() || !out) out += md(rest);
+  cvBtnSync();
+  if(live && newest >= 0) setTimeout(() => openCanvas(newest), 0);
+  return out;
+}
+
+function cvRender(){
+  if(cvOpen < 0 || !canvases[cvOpen]) return;
+  const msg = { type: 'render', code: canvases[cvOpen].code, theme: 'dark' };
+  if(cvReady) $('#cvframe').contentWindow.postMessage(msg, '*'); else cvPending = msg;
+}
+function openCanvas(n){
+  if(!canvases[n]) return;
+  cvOpen = n;
+  const pane = $('#cvpane');
+  pane.classList.add('on'); $('#v-chat').classList.add('with-canvas');
+  pane.querySelector('.cvt').textContent = canvases[n].title;
+  $$('.cvcard').forEach(c => c.classList.toggle('on', +c.dataset.cv === n));
+  const f = $('#cvframe');
+  if(!f.getAttribute('src')){ cvReady = false; f.src = '/canvas'; }
+  cvRender();
+}
+function closeCanvas(){
+  cvOpen = -1;
+  $('#cvpane')?.classList.remove('on', 'full');
+  $('#v-chat')?.classList.remove('with-canvas', 'cv-full');
+  $$('.cvcard.on').forEach(c => c.classList.remove('on'));
+}
+function popCanvas(n){
+  const s = mySession();
+  if(!s || !canvases[n]) return;
+  popOut('canvas', { id: s + '~' + n, title: 'bluee · ' + canvases[n].title, w: 960, h: 720 });
+}
+
+// A canvas button or form asks bluee: into the composer and sent, exactly as
+// if typed - so it is a real, logged message in this session.
+function cvAction(text){
+  text = String(text || '').trim(); if(!text) return;
+  if(soloView === 'canvas'){ cvChan && cvChan.postMessage({ session: soloId.split('~')[0], text }); return; }
+  if(busy){ addNote('A canvas button was pressed while bluee is busy - try it again in a moment.'); return; }
+  $('#input').value = text; syncSend(); send();
+}
+// A popped-out canvas is another window: its clicks arrive by channel.
+if(cvChan) cvChan.onmessage = ev => {
+  const d = ev.data || {};
+  if(soloView !== 'canvas' && d.session && d.session === mySession()) cvAction(d.text);
+};
+addEventListener('message', e => {
+  if(e.source !== $('#cvframe')?.contentWindow) return;
+  const d = e.data || {};
+  if(d.type === 'ready'){ cvReady = true; if(cvPending){ e.source.postMessage(cvPending, '*'); cvPending = null; } else cvRender(); }
+  if(d.type === 'action') cvAction(d.text);
+  if(d.type === 'open_url' && /^https?:\/\//i.test(d.url || '')) window.open(d.url, '_blank', 'noopener');
+});
+
+function cvBtnSync(){
+  const b = $('#cvbtn'); if(!b) return;
+  b.style.display = canvases.length ? '' : 'none';
+  b.innerHTML = ico('grid','sm') + ' Canvas (' + canvases.length + ')';
+  // An agent window has no top bar: the button lives in its header.
+  if(agentMode && $('#aghd') && b.parentNode !== $('#aghd')) $('#aghd').insertBefore(b, $('#agtm'));
+}
+$('#cvbtn').onclick = e => {
+  e.stopPropagation();
+  document.getElementById('connmenu')?.remove();
+  const m = document.createElement('div');
+  m.id = 'connmenu'; m.className = 'cmenu';
+  m.innerHTML = '<div class="hd">Canvases in this session</div>' + canvases.map((c, i) =>
+    '<div class="crow" data-i="' + i + '"><span class="k">' + ico('grid','sm') + '</span><span class="n">' +
+    esc(c.title) + '</span><span class="c">#' + (i + 1) + (i === cvOpen ? ' · open' : '') + '</span></div>').join('');
+  document.body.appendChild(m);
+  const r = $('#cvbtn').getBoundingClientRect();
+  m.style.left = Math.max(8, Math.min(r.right - m.offsetWidth, innerWidth - m.offsetWidth - 8)) + 'px';
+  m.style.top = (r.bottom + 6) + 'px';
+  m.querySelectorAll('.crow').forEach(row => row.onclick = () => { m.remove(); openCanvas(+row.dataset.i); });
+  setTimeout(() => document.addEventListener('click', function off(ev){
+    if(!m.contains(ev.target)){ m.remove(); document.removeEventListener('click', off); } }), 0);
+};
+stream.addEventListener('click', e => {
+  const pop = e.target.closest('[data-cvpop]');
+  if(pop){ e.stopPropagation(); popCanvas(+pop.dataset.cvpop); return; }
+  const c = e.target.closest('.cvcard');
+  if(c) openCanvas(+c.dataset.cv);
+});
+$('#cvclose').onclick = closeCanvas;
+$('#cvpop').onclick = () => popCanvas(cvOpen);
+function cvFull(on){
+  $('#cvpane').classList.toggle('full', on);
+  $('#v-chat').classList.toggle('cv-full', on);
+  $('#cvfull').title = on ? 'Leave full screen (Esc)' : 'Full screen (Esc to leave)';
+}
+$('#cvfull').onclick = () => cvFull(!$('#cvpane').classList.contains('full'));
+addEventListener('keydown', e => { if(e.key === 'Escape' && $('#cvpane').classList.contains('full')) cvFull(false); });
+
+// The pane's left edge drags to resize; remembered.
+(function(){
+  const g = document.querySelector('#cvpane .cvgrip');
+  try { const w = +localStorage.getItem('bluee.cvw'); if(w) $('#v-chat').style.setProperty('--cvw', w + 'px'); } catch(_) {}
+  g.addEventListener('mousedown', e => {
+    e.preventDefault();
+    const host = $('#v-chat').getBoundingClientRect();
+    document.body.classList.add('tiledrag');
+    const mv = ev => { const w = Math.max(320, Math.min(host.width - 280, host.right - ev.clientX));
+      $('#v-chat').style.setProperty('--cvw', w + 'px'); };
+    const up = () => { removeEventListener('mousemove', mv); removeEventListener('mouseup', up);
+      document.body.classList.remove('tiledrag');
+      try { localStorage.setItem('bluee.cvw', parseInt(getComputedStyle($('#v-chat')).getPropertyValue('--cvw'))); } catch(_) {} };
+    addEventListener('mousemove', mv); addEventListener('mouseup', up);
+  });
+})();
+
+/* The Visual switch is per session: remembered under the session id, so
+   reopening a session restores it, and a new chat starts with it off. */
+const visualKey = s => 'bluee.visual.' + s;
+function visualPaint(){
+  const b = $('#vistog'); if(!b) return;
+  b.classList.toggle('on', visualOn);
+  b.setAttribute('aria-pressed', visualOn ? 'true' : 'false');
+}
+function visualSave(){ const s = mySession(); if(!s) return; try { localStorage.setItem(visualKey(s), visualOn ? '1' : '0'); } catch(_) {} }
+function visualLoad(s){ try { visualOn = !!s && localStorage.getItem(visualKey(s)) === '1'; } catch(_) { visualOn = false; } visualPaint(); }
+function visualToggle(){
+  visualOn = !visualOn; visualSave(); visualPaint();
+  addNote('Visual answers <b>' + (visualOn ? 'on' : 'off') + '</b>' +
+    (visualOn ? ' - bluee may answer with live charts, tables and forms (~6.7k extra tokens per request).' : '.'));
+}
+$('#vistog').onclick = visualToggle;
+visualPaint();
+
 /* ---------- agents page: every sub-agent at a glance ----------
    One card each: what it is, what it is doing THIS moment (the tool it is in,
    or "needs you" with the question), what it has cost, and when it will sleep
@@ -7046,7 +7294,9 @@ function agEnd(){
 
 function agentSay(text, pk){
   agPendingLocal = text;
-  agPost('/api/agents/say', pk ? { id: soloId, text, picks: pk } : { id: soloId, text }).then(r => {
+  const body = { id: soloId, text, visual: visualOn };
+  if(pk) body.picks = pk;
+  agPost('/api/agents/say', body).then(r => {
     if(r && r.error){
       agPendingLocal = null;
       renderEvent({ type:'error', message: r.error });
@@ -7062,6 +7312,9 @@ function agConnect(){
     if(e.type === 'status'){
       const was = agInfo && agInfo.status;
       agInfo = e.agent; agHeader();
+      // A new agent gets its session on its first turn; keep its Visual
+      // switch under that id from then on.
+      if(visualOn && agInfo.session) visualSave();
       // A turn bluee (or the panel) started shows as working here too.
       if(agInfo.status === 'running' && !busy){ busy = true; $('#send').classList.add('busy'); }
       if(was === 'waiting' && agInfo.status === 'running') thinking(true);

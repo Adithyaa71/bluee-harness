@@ -20,6 +20,22 @@ use crate::vision::{VisionMode, VisionState};
 /// the moment they happen instead of arriving in a lump when the turn ends.
 pub type EventSink = tokio::sync::mpsc::UnboundedSender<TurnEvent>;
 
+/// The OpenUI component kit's own instructions (generated from the vendored
+/// library with `library.prompt()`), wrapped so a canvas is ONE fenced block
+/// inside a normal reply rather than the whole reply.
+const VISUAL_PROMPT: &str = concat!(
+    "[Visual answers are ON] Adithya turned on visual answers: you may answer with a live, \
+     interactive canvas - charts, tables, cards, forms, buttons. Use one only when a visual \
+     genuinely helps (comparisons, numbers, steps, options, status); a plain answer stays plain \
+     text. When you do, write a short normal sentence or two, then the canvas as ONE fenced block:\n\
+     ```openui\nroot = Card([...])\n...\n```\n\
+     Everything outside that block is ordinary chat text. Buttons should use @ToAssistant with a \
+     clear message, so a click asks you the next thing. The language and its components are \
+     described below - IGNORE its line saying your entire response must be openui-lang: only the \
+     fenced block is.\n\n",
+    include_str!("../dash/vendor/openui/prompt.md")
+);
+
 /// What Adithya picked in the composer for one message: `/skill` and
 /// `@server` / `@tool` / `@browser` chips. Applied to that turn only - the
 /// skills are attached, the tools loaded, and the model told plainly that he
@@ -172,6 +188,9 @@ pub struct Agent {
     child: Option<crate::subagents::ChildLink>,
     /// Composer picks for the NEXT turn only; taken (and cleared) by it.
     picks: Picks,
+    /// "Visual answers" (§ canvas): when on, each turn carries the OpenUI
+    /// component kit's instructions so the model may answer with a canvas.
+    visual: bool,
     /// Tokens and dollars this agent has spent since it was built, from the
     /// provider's own usage reports. What sub-agent caps are checked against.
     spent: crate::llm::Usage,
@@ -383,6 +402,7 @@ impl Agent {
             subagents: None,
             child: None,
             picks: Picks::default(),
+            visual: false,
             spent: Default::default(),
             defer: crate::toolsearch::enabled(),
             core_servers: crate::toolsearch::core_servers(),
@@ -653,6 +673,22 @@ impl Agent {
     /// Default work folder for file and command tools (a sub-agent's own).
     pub fn set_home(&mut self, root: &str, sub: &str) {
         self.native.set_home(root, sub);
+    }
+
+    /// Turn "Visual answers" on or off. Logged when it changes, so a session's
+    /// record says when canvases were allowed.
+    pub fn set_visual(&mut self, on: bool) {
+        if on == self.visual {
+            return;
+        }
+        self.visual = on;
+        let _ = self.log.append(EventKind::System {
+            note: format!("visual answers {}", if on { "on" } else { "off" }),
+        });
+    }
+
+    pub fn visual(&self) -> bool {
+        self.visual
     }
 
     /// What this agent has spent so far.
@@ -1287,6 +1323,17 @@ impl Agent {
     /// gets its own fresh recall.
     pub async fn turn_with(&mut self, input: &str, sink: Option<&EventSink>) -> Vec<TurnEvent> {
         let picked = self.apply_picks();
+        // Visual answers ride in front of the picks, for this turn only - the
+        // kit's instructions are ~6.7k tokens, paid only while the switch is on.
+        let picked = if self.visual {
+            let v = (VISUAL_PROMPT.to_string(), "visual answers on".to_string());
+            match picked {
+                Some((t, n)) => Some((format!("{}\n\n{t}", v.0), format!("{}; {n}", v.1))),
+                None => Some(v),
+            }
+        } else {
+            picked
+        };
         let recall = self.auto_recall(input).await;
         let recall = match (picked, recall) {
             (None, r) => r,

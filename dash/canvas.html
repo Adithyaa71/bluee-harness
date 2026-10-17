@@ -1,0 +1,89 @@
+<!doctype html>
+<!--
+  The canvas host: renders one OpenUI Lang program with the vendored OpenUI
+  bundle. Served with a sandbox CSP (opaque origin), so whatever the model
+  drew cannot reach bluee's API, memory or terminal - the same rule as
+  artifacts. It talks to its parent only through postMessage:
+
+    parent -> canvas   {type:'render', code, theme}
+    canvas -> parent   {type:'action', text, event}   a button / form wants bluee
+                       {type:'size', height}           so a card can fit it
+                       {type:'ready'}                  listening
+-->
+<html>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<link rel="stylesheet" href="/vendor/openui/openui-styles.css">
+<style>
+  /* OpenUI picks light or dark from the system and expects ITS background
+     under it - on white, its dark theme's light text was unreadable. */
+  html,body{margin:0;background:var(--openui-background,#fff);color:var(--openui-text-neutral-primary,#111)}
+  body{font-family:system-ui,-apple-system,"Segoe UI",sans-serif;padding:14px;min-height:100vh;box-sizing:border-box}
+  #msg{font:13px/1.5 system-ui,sans-serif;color:#9aa3ad;padding:8px}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<div id="msg"></div>
+<script src="/vendor/openui/openui-bundle.min.js"></script>
+<script>
+(function(){
+  var O = window.__OpenUI, root = null, last = '';
+  function post(m){ try { parent.postMessage(m, '*'); } catch (_) {} }
+  if (!O) { document.getElementById('msg').textContent = 'The canvas renderer did not load.'; return; }
+
+  // Turn an OpenUI action into what bluee should be told. @ToAssistant carries
+  // a message; anything else is described so nothing is silently dropped.
+  function actionText(ev){
+    ev = ev || {};
+    var p = ev.params || {};
+    // @ToAssistant arrives as `continue_conversation` with the message on the
+    // event itself (humanFriendlyMessage / llmFriendlyMessage), not in params.
+    var t = ev.humanFriendlyMessage || ev.llmFriendlyMessage || ev.message ||
+            p.message || p.text || p.prompt || p.content || '';
+    if (!t && ev.type) t = ev.type + (Object.keys(p).length ? ' ' + JSON.stringify(p) : '');
+    return String(t || '');
+  }
+  // The event made safe for postMessage (functions and DOM nodes dropped).
+  function plain(ev){ try { return JSON.parse(JSON.stringify(ev || {})); } catch (_) { return {}; } }
+
+  function render(code, theme){
+    if (!root) root = O.createRoot(document.getElementById('root'));
+    document.documentElement.dataset.theme = theme || 'dark';
+    document.getElementById('msg').textContent = '';
+    try {
+      root.render(O.React.createElement(O.Renderer, {
+        response: code, library: O.openuiChatLibrary, isStreaming: false,
+        onAction: function(ev){
+          // An URL is opened by the parent (it knows how), not from this sandbox.
+          var p = (ev && ev.params) || {};
+          if (p.url && /open/i.test(ev.type || '')) { post({ type: 'open_url', url: p.url }); return; }
+          post({ type: 'action', text: actionText(ev), event: plain(ev) });
+        },
+        // Called with an EMPTY list when all is well - only a real error speaks.
+        onError: function(errs){
+          var first = errs && errs.length ? (errs[0].message || String(errs[0])) : '';
+          document.getElementById('msg').textContent = first ? 'Some of this canvas could not be drawn: ' + first : '';
+        }
+      }));
+    } catch (e) {
+      document.getElementById('msg').textContent = 'Could not draw this canvas: ' + e.message;
+    }
+  }
+
+  // Report height whenever it changes, so an inline card can size to fit.
+  new ResizeObserver(function(){
+    var h = Math.ceil(document.documentElement.scrollHeight);
+    if (h !== last) { last = h; post({ type: 'size', height: h }); }
+  }).observe(document.body);
+
+  addEventListener('message', function(e){
+    var d = e.data || {};
+    if (d.type === 'render') render(String(d.code || ''), d.theme);
+  });
+  post({ type: 'ready' });
+})();
+</script>
+</body>
+</html>

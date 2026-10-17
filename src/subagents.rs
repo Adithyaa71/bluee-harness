@@ -138,6 +138,8 @@ pub struct AgentInfo {
     /// What it is doing this moment - the tool it is in, or "thinking".
     /// Empty when idle.
     pub activity: String,
+    /// Its window's Visual switch (§ canvas); applied before each turn.
+    pub visual: bool,
     /// `Instant` means nothing outside this process; `idle_secs` is the
     /// serialised form.
     #[serde(skip)]
@@ -628,6 +630,8 @@ impl Worker {
                 }
             }
             a.set_picks(picks);
+            let visual = self.info.lock().unwrap().visual;
+            a.set_visual(visual);
             let before = a.spent();
             let events = a.turn_with(&prompt, Some(&etx)).await;
             drop(etx);
@@ -818,6 +822,7 @@ impl SubAgents {
             max_turns: spec.max_turns,
             max_cost: spec.max_cost,
             activity: String::new(),
+            visual: false,
             idle_since: Some(Instant::now()),
         };
         let shared = Arc::new(Mutex::new(info.clone()));
@@ -916,6 +921,14 @@ impl SubAgents {
         i.end_after_mins = end;
         self.hub.publish(&i);
         Ok(i.clone())
+    }
+
+    /// Its window's Visual switch (§ canvas).
+    pub fn set_visual(&self, id: &str, on: bool) -> Result<()> {
+        let map = self.agents.lock().unwrap();
+        let Some(entry) = map.get(id) else { bail!("no sub-agent `{id}`") };
+        entry.info.lock().unwrap().visual = on;
+        Ok(())
     }
 
     /// Set the caps. `None` = no cap.
@@ -1248,7 +1261,7 @@ mod tests {
             queued: 0, question: None, sleep_after_mins: None, end_after_mins: None,
             idle_secs: 0, browser: None, model: None, template: None, idle_since: None,
             folder: String::new(), cost: 0.0, tokens: 0, max_turns: None, max_cost: None,
-            activity: String::new(),
+            activity: String::new(), visual: false,
         };
         assert!(!i.busy());
         i.queued = 1;

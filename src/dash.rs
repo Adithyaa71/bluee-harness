@@ -154,6 +154,10 @@ pub async fn serve_on(cfg: Config, std_listener: std::net::TcpListener) -> Resul
         .route("/vendor/xterm.js", get(|| asset("application/javascript", include_str!("../dash/vendor/xterm.js"))))
         .route("/vendor/xterm.css", get(|| asset("text/css", include_str!("../dash/vendor/xterm.css"))))
         .route("/vendor/addon-fit.js", get(|| asset("application/javascript", include_str!("../dash/vendor/addon-fit.js"))))
+        // OpenUI (§ canvas): vendored so canvases work offline, never from a CDN.
+        .route("/vendor/openui/openui-bundle.min.js", get(|| asset_bytes("application/javascript; charset=utf-8", include_bytes!("../dash/vendor/openui/openui-bundle.min.js"))))
+        .route("/vendor/openui/openui-styles.css", get(|| asset_bytes("text/css; charset=utf-8", include_bytes!("../dash/vendor/openui/openui-styles.css"))))
+        .route("/canvas", get(canvas_page))
         .route("/api/stats", get(stats))
         .route("/api/sessions", get(sessions))
         .route("/api/events", get(events))
@@ -257,6 +261,29 @@ async fn asset(mime: &'static str, body: &'static str) -> Response {
     ([(header::CONTENT_TYPE, mime)], body).into_response()
 }
 
+/// A large vendored file that never changes within a build - cached, so the
+/// 3 MB OpenUI bundle is fetched once, not per canvas.
+async fn asset_bytes(mime: &'static str, body: &'static [u8]) -> Response {
+    (
+        [(header::CONTENT_TYPE, mime), (header::CACHE_CONTROL, "public, max-age=86400")],
+        body,
+    )
+        .into_response()
+}
+
+/// The canvas host page. Sandboxed exactly like an artifact: an opaque origin,
+/// so a canvas the model drew cannot call bluee's API or reach the terminal.
+async fn canvas_page() -> Response {
+    (
+        [
+            (header::CONTENT_TYPE, "text/html; charset=utf-8"),
+            (header::CONTENT_SECURITY_POLICY, "sandbox allow-scripts allow-forms allow-popups allow-modals"),
+        ],
+        include_str!("../dash/canvas.html"),
+    )
+        .into_response()
+}
+
 async fn index() -> impl IntoResponse {
     Html(include_str!("../dash/index.html"))
 }
@@ -315,6 +342,9 @@ async fn chat_stream(mut socket: WebSocket, s: Shared) {
             .get("picks")
             .and_then(|p| serde_json::from_value(p.clone()).ok())
             .unwrap_or_default();
+        // The Visual switch is held by the page, per session, and sent with
+        // each message - so it belongs to whichever session that window shows.
+        let visual = frame.get("visual").and_then(|v| v.as_bool());
         let text = if wake {
             if s.subagents.hub().pending() == 0 {
                 let done = json!({ "type": "done" });
@@ -382,6 +412,9 @@ async fn chat_stream(mut socket: WebSocket, s: Shared) {
                 agent.add_note(&note);
             }
             agent.set_picks(picks);
+            if let Some(v) = visual {
+                agent.set_visual(v);
+            }
             agent.turn_with(&text, Some(&tx)).await;
             Some((
                 agent.session_id().to_string(),
@@ -2560,6 +2593,9 @@ struct SayBody {
     text: String,
     #[serde(default)]
     picks: crate::agent::Picks,
+    /// The agent window's Visual switch.
+    #[serde(default)]
+    visual: Option<bool>,
 }
 
 /// Adithya talking to an agent from its window. Queued, never waited on: the
@@ -2570,6 +2606,9 @@ async fn agents_say(
 ) -> Result<Json<Value>, (StatusCode, Json<Value>)> {
     if b.text.trim().is_empty() {
         return Err(fail(anyhow::anyhow!("nothing to say")));
+    }
+    if let Some(v) = b.visual {
+        s.subagents.set_visual(&b.id, v).map_err(fail)?;
     }
     s.subagents
         .ask_with(&b.id, &b.text, crate::subagents::From::User, 0, b.picks)
