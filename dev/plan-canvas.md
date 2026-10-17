@@ -9,7 +9,7 @@ Each stage is built, then checked in real Chrome before the next.
 | 3 | **Per session, not global** - canvases live only in that session's log. A new session shows no canvas button at all; reopening a session that made canvases shows a **Canvas (N)** button to browse them. Nothing stored anywhere else. | **done** |
 | 4 | **Sub-agents too** - the same switch, cards, panel and pop-out in every agent window, per agent session. | **done** |
 | 5 | **Calmer shell** - left rail slides away; top bar can collapse to plain; **Ctrl/Cmd + / - / 0** zooms the whole UI (remembered), in every window. | **done** |
-| 6 | **Playground tidy-up** - proposal first (it is crowded: files, browser, cards, board); build after Adithya picks. | planned |
+| 6 | **Playground tidy-up** - proposal first (it is crowded: files, browser, cards, board); build after Adithya picks. | **done** - switcher, browser tile, files hidden by default, renamed Workspace |
 
 Later (needs Adithya's "Reverse Engineer Anything" repo): own component
 libraries built from top UI themes, plus instructions for bluee on using them.

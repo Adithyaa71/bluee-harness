@@ -294,7 +294,7 @@ async fn ui_set(
         .ok()
         .and_then(|t| serde_json::from_str::<Value>(t.trim_start_matches('\u{feff}')).ok())
         .unwrap_or_else(|| json!({}));
-    for k in ["zoom", "rail", "topbar"] {
+    for k in ["zoom", "rail", "topbar", "files"] {
         if let Some(x) = b.get(k) {
             v[k] = x.clone();
         }

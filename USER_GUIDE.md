@@ -469,8 +469,14 @@ Proper handling needs a proxy that holds the key server-side — not built.
 
 ## Project workspaces — a repo as a board
 
-Select a granted folder in the Playground's folder picker and the page becomes
-that project's **board**:
+The **Workspace** page (it used to be called Playground) has one title: the
+folder you're in. Click it to switch between **Playground** (bluee's scratch
+folder), any folder you've granted, or **Grant a folder…**; in the Playground
+it also filters artifacts by topic. The folder icon shows or hides the file
+tree (hidden by default, and it remembers). The globe opens bluee's browser:
+as a **tile** on a project's board, or in its own window everywhere else.
+
+Pick a granted folder and the page becomes that project's **board**:
 
 - **Progress tile.** The project's plan, read from `<repo>/.bluee/plan.md`:
   phase N of M, a progress bar per phase, the current phase's tasks, what's

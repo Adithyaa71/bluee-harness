@@ -1300,6 +1300,15 @@ input[type=checkbox]:disabled{opacity:.4;cursor:not-allowed}
   box-shadow:inset 0 0 0 1px var(--accent)}
 .cvbtn{display:inline-flex;align-items:center;gap:6px;white-space:nowrap;flex:none}
 
+/* ---------- workspace switcher ---------- */
+.wsbtn{display:inline-flex;align-items:center;gap:8px;height:32px;padding:0 10px 0 8px;border:0;border-radius:var(--r2);
+  background:transparent;color:var(--ink);font:inherit;font-size:15px;font-weight:600;cursor:pointer;
+  transition:background var(--d-fast)}
+.wsbtn:hover{background:var(--panel2)}
+.wsbtn .i{color:var(--faint)}
+.wstopic .pk{margin-left:6px}
+#connmenu .crow.on{background:var(--accent-dim,var(--hover));box-shadow:inset 2px 0 0 var(--accent)}
+
 /* ---------- workspace board ---------- */
 .bdtools{display:flex;align-items:center;gap:var(--s3);margin-bottom:10px}
 .bdhint{font-size:12px;color:var(--faint)}
@@ -1732,7 +1741,7 @@ body.dragging{cursor:grabbing;user-select:none}
     <button class="rb on" data-page="chat"   data-tip="Chat"><svg class="i"><use href="#i-chat"/></svg></button>
     <button class="rb"    data-page="memory" data-tip="Memory"><svg class="i"><use href="#i-memory"/></svg></button>
     <button class="rb"    data-page="graph"  data-tip="Graph"><svg class="i"><use href="#i-graph"/></svg></button>
-    <button class="rb"    data-page="play"   data-tip="Playground"><svg class="i"><use href="#i-play"/></svg></button>
+    <button class="rb"    data-page="play"   data-tip="Workspace"><svg class="i"><use href="#i-play"/></svg></button>
     <button class="rb"    data-page="agents" data-tip="Agents"><svg class="i"><use href="#i-grid"/></svg></button>
 <button class="rb"    data-page="sess"   data-tip="Sessions"><svg class="i"><use href="#i-sessions"/></svg></button>
     <button class="rb"    data-page="set"    data-tip="Settings"><svg class="i"><use href="#i-settings"/></svg></button>
@@ -1866,13 +1875,17 @@ body.dragging{cursor:grabbing;user-select:none}
 
     <div class="view" id="v-play">
       <div id="playbar">
-        <span class="lbl">topic</span>
-        <div id="topics" style="display:flex;gap:6px;flex-wrap:wrap"></div>
-        <div class="spacer"></div>
-        <div class="seg">
-          <button class="ghost on" id="pgtoggle" title="Show or hide the file tree">files</button>
-          <button class="ghost" id="pgbrowse" title="A browser bluee starts and drives itself. Separate profile from your own, so it starts signed out.">browser</button>
+        <!-- The workspace switcher IS the title: which folder you are in, with
+             every granted folder, "grant a folder" and the topic filter under
+             it. Replaces a row of topic chips and a folder <select>. -->
+        <div class="wsw">
+          <button class="wsbtn" id="wsbtn" title="Switch workspace"><svg class="i"><use href="#i-play"/></svg><span id="wsname">Playground</span><svg class="i sm"><use href="#i-chev-d"/></svg></button>
         </div>
+        <span id="wstopic" class="wstopic"></span>
+        <div id="topics" style="display:none"></div>
+        <div class="spacer"></div>
+        <button class="ibtn" id="pgtoggle" title="Files (show / hide)"><svg class="i"><use href="#i-folder"/></svg></button>
+        <button class="ibtn" id="pgbrowse" title="Browser - bluee's own (separate profile, starts signed out). On a project board it opens as a tile; otherwise in its own window."><svg class="i"><use href="#i-globe"/></svg></button>
         <button class="ibtn" id="areload" title="Refresh"><svg class="i"><use href="#i-refresh"/></svg></button>
       </div>
       <div id="pgwrap">
@@ -4198,6 +4211,7 @@ async function loadPlayground(){
   const d=await api('/api/artifacts'+q).catch(()=>({artifacts:[],topics:[]}));
   artifacts=d.artifacts||[];
   const topics=d.topics||[];
+  pgTopics=topics; wsPaint();
   $('#topics').innerHTML =
     `<span class="tchip${topicFilter?'':' on'}" data-t="">all (${artifacts.length})</span>`+
     topics.map(t=>`<span class="tchip${topicFilter===t.topic?' on':''}" data-t="${esc(t.topic)}">${esc(t.topic)} (${t.count})</span>`).join('');
@@ -4324,6 +4338,7 @@ const snap = v => Math.round(v / SNAP) * SNAP;
 
 function tileTitle(t){
   if(t.kind === 'plan') return 'Progress';
+  if(t.kind === 'browser') return 'Browser';
   if(t.kind === 'artifact') return (boardArts.find(a => a.id === t.ref) || {}).name || t.ref;
   return t.ref.split('/').pop();
 }
@@ -4418,6 +4433,9 @@ function makeTile(t){
     '<button class="ibtn bare" data-a="pop" title="Open in its own window">' + ico('popout','sm') + '</button>' +
     '<button class="ibtn bare" data-a="off" title="Take off the board (the file stays)">' + ico('close','sm') + '</button></div>' +
     '<div class="tb">' + (t.kind === 'plan' ? '' :
+      // bluee's own browser view is bluee's page, not something the model
+      // wrote: it needs its API, so it is not sandboxed like the rest.
+      t.kind === 'browser' ? '<iframe src="/?only=browser"></iframe>' :
       '<iframe sandbox="allow-scripts allow-forms allow-popups" src="' + esc(tileUrl(t)) + '"></iframe>') + '</div>' +
     '<div class="rz" title="Resize"></div>';
   el.querySelector('.tt').textContent = tileTitle(t);
@@ -4470,6 +4488,7 @@ function tileAction(id, act){
   }
   if(act === 'pop'){
     if(t.kind === 'plan') popOut('plan', { id: boardRoot, title: 'Progress · ' + boardRoot, w: 760, h: 620 });
+    else if(t.kind === 'browser') popOut('browser', { title: 'bluee · browser', w: 1100, h: 760 });
     else {
       const url = tileUrl(t);
       if(url.startsWith('/files/')) popOut('file', { id: url.slice('/files/'.length), title: tileTitle(t), w: 900, h: 640 });
@@ -4535,6 +4554,7 @@ function boardAddMenu(anchor){
   walk(fileTree);
   const opts = [];
   if(boardTiles.some(t => t.kind === 'plan-off')) opts.push(['plan', '', 'Progress']);
+  if(!boardTiles.some(t => t.kind === 'browser')) opts.push(['browser', '', 'Browser']);
   boardTiles.filter(t => t.id.endsWith(':off')).forEach(t => opts.push(['artifact', t.ref, tileTitle({ ...t, kind: 'artifact' })]));
   flat.filter(p => !boardTiles.some(t => t.kind === 'file' && t.ref === p)).forEach(p => opts.push(['file', p, p]));
   const m = document.createElement('div');
@@ -4551,6 +4571,7 @@ function boardAddMenu(anchor){
   m.querySelectorAll('.crow').forEach(row => row.onclick = () => {
     m.remove();
     const k = row.dataset.k, ref = row.dataset.r;
+    if(k === 'browser'){ addBrowserTile(); return; }
     if(k === 'plan'){ const t = boardTiles.find(t => t.kind === 'plan-off'); t.kind = 'plan'; }
     else if(k === 'artifact'){ const t = boardTiles.find(t => t.id === 'art:' + ref + ':off'); t.id = 'art:' + ref; }
     else boardTiles.push({ id: 'file:' + ref, kind: 'file', ref, ...placeTile('file') });
@@ -4559,6 +4580,18 @@ function boardAddMenu(anchor){
   setTimeout(() => document.addEventListener('click', function off(e){
     if(!m.contains(e.target)){ m.remove(); document.removeEventListener('click', off); }
   }), 0);
+}
+
+// The browser as a tile on this board (or brought back if it was taken off).
+function addBrowserTile(){
+  const t = boardTiles.find(x => x.kind === 'browser');
+  if(t){ boardEls.get(t.id)?.scrollIntoView({ block: 'nearest', behavior: 'smooth' }); return; }
+  const W = Math.max(600, ($('#board')?.clientWidth || 900));
+  boardTiles.push({ id: 'browser', kind: 'browser', ref: '', x: 0, y: snap(Math.max(0, ...boardTiles.map(x => x.y + (x.min ? 92 : x.h))) + 20),
+    w: Math.min(W, 900), h: 560 });
+  // Not boardRoot = null: that reloads the board from disk before this
+  // debounced save lands, and the new tile would vanish.
+  saveBoard(); loadPlayground();
 }
 
 // Pin the page open in the file viewer to the board.
@@ -4764,7 +4797,13 @@ function webToggle(on){
   else { clearInterval(webTimer); webTimer=null; $('#weblive').checked=false; }
 }
 
-$('#pgbrowse').onclick = ()=>webToggle();
+/* The browser is a tile now, not a pane that splits the page: on a project
+   board it is added as a tile (drag, resize, pop out like the rest); anywhere
+   else it opens in its own window. */
+$('#pgbrowse').onclick = ()=>{
+  if(fileRoot !== 'playground' && $('#board')) addBrowserTile();
+  else popOut('browser', { title: "bluee · browser", w: 1100, h: 760 });
+};
 $('#webclose').onclick = ()=>webToggle(false);
 $('#webrefresh').onclick = async()=>{ webBusy('reloading…');
   const d=await webCall({action:'reload'}); if(d&&d.url) webPage=d; await webShot(true); };
@@ -4903,18 +4942,19 @@ $('#pgrootrm').onclick=async()=>{
     $('#pgrootadd').classList.remove('on'); loadFiles(); }
   else { m.className='rootmsg bad'; m.textContent=r.error||'failed'; }
 };
-function setFiles(open){
+/* Files are hidden by default - the board and cards get the full width - and
+   the choice is kept in data/ui.json (localStorage resets every launch). */
+function setFiles(open, save){
   $('#pgfiles').classList.toggle('hide',!open);
   $('#pgwrap').classList.toggle('collapsed',!open);
   $('#pgtoggle').classList.toggle('on',open);
-  try{ localStorage.setItem('bluee.files', open?'1':'0'); }catch(_){}
+  if(save && typeof uiSave === 'function') uiSave({ files: open });
 }
 const filesOpen=()=>!$('#pgfiles').classList.contains('hide');
-$('#pgtoggle').onclick=()=>setFiles(!filesOpen());
-$('#pgfhide').onclick=()=>setFiles(false);
-$('#pgshow').onclick=()=>setFiles(true);
-try{ if(localStorage.getItem('bluee.files')==='0') setFiles(false); else setFiles(true); }
-catch(_){ setFiles(true); }
+$('#pgtoggle').onclick=()=>setFiles(!filesOpen(), true);
+$('#pgfhide').onclick=()=>setFiles(false, true);
+$('#pgshow').onclick=()=>setFiles(true, true);
+setFiles(false);
 
 /* Drag the divider to resize. Width is remembered, because re-widening a panel
    every time you open the page is the kind of small friction that makes a tool
@@ -6204,7 +6244,57 @@ async function loadRoots(){
   // A folder deleted in Explorer should say so here rather than just coming
   // back empty, and you should be able to drop it without going hunting.
   $('#pgrootgone').classList.toggle('on', !!(cur && !cur.exists));
+  wsPaint();
 }
+
+/* ---------- the workspace switcher ----------
+   The page's title is the folder you are in. Its menu lists every granted
+   folder, "grant a folder", and - in the playground - the topic filter. The
+   folder <select> in the files panel is still the one source of truth; this
+   just drives it. */
+let pgTopics = [];
+function wsPaint(){
+  const n = $('#wsname'); if(!n) return;
+  const cur = (typeof fileRoots !== 'undefined' ? fileRoots : []).find(r => r.id === fileRoot);
+  n.textContent = !cur || cur.id === 'playground' ? 'Playground' : cur.label;
+  const t = $('#wstopic');
+  t.innerHTML = topicFilter && fileRoot === 'playground'
+    ? '<span class="pk k-skill">topic: ' + esc(topicFilter) + '<button title="Clear the filter">×</button></span>' : '';
+  const x = t.querySelector('button');
+  if(x) x.onclick = () => { topicFilter = null; loadPlayground(); };
+}
+$('#wsbtn').onclick = e => {
+  e.stopPropagation();
+  document.getElementById('connmenu')?.remove();
+  const m = document.createElement('div');
+  m.id = 'connmenu'; m.className = 'cmenu';
+  const row = (k, v, icon, label, note, on) =>
+    '<div class="crow' + (on ? ' on' : '') + '" data-k="' + k + '" data-v="' + esc(v) + '"><span class="k">' + ico(icon,'sm') +
+    '</span><span class="n">' + esc(label) + '</span><span class="c">' + esc(note || '') + '</span></div>';
+  m.innerHTML = '<div class="hd">Workspace</div>' +
+    fileRoots.map(r => row('root', r.id, r.id === 'playground' ? 'play' : 'folder',
+      r.id === 'playground' ? 'Playground' : r.label,
+      r.id === 'playground' ? "bluee's scratch folder" : (r.exists ? '' : 'missing'), r.id === fileRoot)).join('') +
+    row('grant', '', 'plus', 'Grant a folder…', 'let bluee work in it') +
+    (fileRoot === 'playground' && pgTopics.length
+      ? '<div class="sep"></div><div class="hd">Filter by topic</div>' +
+        row('topic', '', 'check', 'All', artifacts.length + '', !topicFilter) +
+        pgTopics.map(t => row('topic', t.topic, 'spark', t.topic, t.count + '', topicFilter === t.topic)).join('')
+      : '');
+  document.body.appendChild(m);
+  const r = $('#wsbtn').getBoundingClientRect();
+  m.style.maxHeight = (innerHeight - r.bottom - 16) + 'px'; m.style.overflowY = 'auto';
+  m.style.left = r.left + 'px'; m.style.top = (r.bottom + 6) + 'px';
+  m.querySelectorAll('.crow').forEach(rw => rw.onclick = () => {
+    m.remove();
+    const k = rw.dataset.k, v = rw.dataset.v;
+    if(k === 'root' && v !== fileRoot){ const s = $('#pgroot'); s.value = v; s.dispatchEvent(new Event('change')); }
+    if(k === 'grant'){ setFiles(true, true); $('#pgroadd').click(); }
+    if(k === 'topic'){ topicFilter = v || null; loadPlayground(); }
+  });
+  setTimeout(() => document.addEventListener('click', function off(ev){
+    if(!m.contains(ev.target)){ m.remove(); document.removeEventListener('click', off); } }), 0);
+};
 
 function fmtSize(n){
   if (!n) return '';
@@ -7008,6 +7098,7 @@ api('/api/ui').then(p => {
   nativeZoom = !!p.native_zoom;
   uiPrefs = { zoom: +p.zoom || 1, rail: p.rail !== false, topbar: p.topbar !== false };
   if(!soloView){ setRail(uiPrefs.rail, false); setTop(uiPrefs.topbar, false); }
+  if(p.files === true) setFiles(true);
   if(!nativeZoom && uiPrefs.zoom !== 1) document.documentElement.style.zoom = String(uiPrefs.zoom);
 }).catch(() => {});
 
